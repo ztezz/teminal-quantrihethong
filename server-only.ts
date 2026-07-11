@@ -360,6 +360,11 @@ async function main() {
       const freeMem = os.freemem();
       const usedMem = totalMem - freeMem;
       const memPercent = Math.round((usedMem / totalMem) * 100);
+      const diskPath = path.resolve(process.env.FILE_MANAGER_ROOT || process.cwd());
+      const disk = await fs.promises.statfs(diskPath);
+      const diskTotal = Number(disk.blocks) * Number(disk.bsize);
+      const diskFree = Number(disk.bavail) * Number(disk.bsize);
+      const diskUsed = diskTotal - diskFree;
 
       function getCpuTimes() {
         let idle = 0, total = 0;
@@ -381,7 +386,10 @@ async function main() {
         cpu: cpuPercent,
         memUsedMB: Math.round(usedMem / 1024 / 1024),
         memTotalMB: Math.round(totalMem / 1024 / 1024),
-        memPercent
+        memPercent,
+        diskUsedGB: Math.round(diskUsed / 1024 / 1024 / 1024 * 10) / 10,
+        diskTotalGB: Math.round(diskTotal / 1024 / 1024 / 1024 * 10) / 10,
+        diskPercent: diskTotal === 0 ? 0 : Math.round(diskUsed / diskTotal * 100)
       });
     } catch (error: any) {
       return res.status(500).json({ success: false, error: error.message });

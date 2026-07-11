@@ -49,6 +49,19 @@ interface LogEntry {
   timestamp: string;
 }
 
+type ActiveTab = 'terminal' | 'logs' | 'settings' | 'files';
+
+function getSavedActiveTab(): ActiveTab {
+  if (typeof window === 'undefined') return 'terminal';
+  const saved = localStorage.getItem('vps_terminal_active_tab');
+  return saved === 'logs' || saved === 'settings' || saved === 'files' ? saved : 'terminal';
+}
+
+function getSavedSidebarState(): boolean {
+  if (typeof window === 'undefined') return true;
+  return localStorage.getItem('vps_terminal_sidebar_open') !== 'false';
+}
+
 // Helper to determine the proper file-type specific icon and color styling
 function getFileIcon(fileName: string) {
   const ext = fileName.split('.').pop()?.toLowerCase() || '';
@@ -100,14 +113,25 @@ export default function Home() {
 
   // Logs & Settings Management UI State
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [activeTab, setActiveTab] = useState<'terminal' | 'logs' | 'settings' | 'files'>('terminal');
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [activeTab, setActiveTab] = useState<ActiveTab>(getSavedActiveTab);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(getSavedSidebarState);
+
+  useEffect(() => {
+    localStorage.setItem('vps_terminal_active_tab', activeTab);
+  }, [activeTab]);
+
+  useEffect(() => {
+    localStorage.setItem('vps_terminal_sidebar_open', String(isSidebarOpen));
+  }, [isSidebarOpen]);
 
   // System metrics
   const [cpuPercent, setCpuPercent] = useState<number>(0);
   const [memUsedMB, setMemUsedMB] = useState<number>(0);
   const [memTotalMB, setMemTotalMB] = useState<number>(0);
   const [memPercent, setMemPercent] = useState<number>(0);
+  const [diskUsedGB, setDiskUsedGB] = useState<number>(0);
+  const [diskTotalGB, setDiskTotalGB] = useState<number>(0);
+  const [diskPercent, setDiskPercent] = useState<number>(0);
 
   // File Manager States
   const [filesList, setFilesList] = useState<any[]>([]);
@@ -471,6 +495,9 @@ export default function Home() {
         setMemUsedMB(data.memUsedMB);
         setMemTotalMB(data.memTotalMB);
         setMemPercent(data.memPercent);
+        setDiskUsedGB(data.diskUsedGB);
+        setDiskTotalGB(data.diskTotalGB);
+        setDiskPercent(data.diskPercent);
       }
     } catch (err) {
       // Silently ignore metrics errors
@@ -1127,6 +1154,19 @@ export default function Home() {
                         </div>
                         <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
                           <div className="h-full bg-purple-500 transition-all duration-500" style={{ width: `${memPercent}%` }}></div>
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between items-end mb-1.5">
+                          <label className="text-[9px] uppercase font-bold text-slate-500">Dung lượng ổ đĩa</label>
+                          <span className="text-xs font-mono text-white">{diskUsedGB}GB / {diskTotalGB}GB</span>
+                        </div>
+                        <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full transition-all duration-500 ${diskPercent >= 90 ? 'bg-red-500' : diskPercent >= 75 ? 'bg-amber-500' : 'bg-emerald-500'}`}
+                            style={{ width: `${diskPercent}%` }}
+                          ></div>
                         </div>
                       </div>
                     </div>
