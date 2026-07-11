@@ -1,6 +1,9 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+// Backend API base URL — đặt NEXT_PUBLIC_API_URL trong .env khi deploy frontend riêng
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
+
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -98,6 +101,12 @@ export default function Home() {
   const [activeTab, setActiveTab] = useState<'terminal' | 'logs' | 'settings' | 'files'>('terminal');
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
+  // System metrics
+  const [cpuPercent, setCpuPercent] = useState<number>(0);
+  const [memUsedMB, setMemUsedMB] = useState<number>(0);
+  const [memTotalMB, setMemTotalMB] = useState<number>(0);
+  const [memPercent, setMemPercent] = useState<number>(0);
+
   // File Manager States
   const [filesList, setFilesList] = useState<any[]>([]);
   const [currentPath, setCurrentPath] = useState<string>('');
@@ -117,14 +126,14 @@ export default function Home() {
     file.name.toLowerCase().includes(fileSearchQuery.toLowerCase())
   );
 
-  const loadFiles = async (dirPath?: string, authToken = token) => {
+  const loadFiles = useCallback(async (dirPath?: string, authToken = token) => {
     const auth = authToken || token;
     if (!auth) return;
     setFileLoading(true);
     setFileError(null);
     setFileSearchQuery('');
     try {
-      const url = dirPath ? `/api/files?path=${encodeURIComponent(dirPath)}` : '/api/files';
+      const url = dirPath ? `${API_URL}/api/files?path=${encodeURIComponent(dirPath)}` : `${API_URL}/api/files`;
       const res = await fetch(url, {
         headers: { 'Authorization': `Bearer ${auth}` }
       });
@@ -141,14 +150,14 @@ export default function Home() {
     } finally {
       setFileLoading(false);
     }
-  };
+  }, [token]);
 
   const openFile = async (filePath: string) => {
     if (!token) return;
     setFileLoading(true);
     setFileError(null);
     try {
-      const res = await fetch(`/api/files/read?path=${encodeURIComponent(filePath)}`, {
+      const res = await fetch(`${API_URL}/api/files/read?path=${encodeURIComponent(filePath)}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       const data = await res.json();
@@ -177,7 +186,7 @@ export default function Home() {
     setFileLoading(true);
     setFileError(null);
     try {
-      const res = await fetch('/api/files/write', {
+      const res = await fetch(`${API_URL}/api/files/write`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -205,7 +214,7 @@ export default function Home() {
     setFileLoading(true);
     setFileError(null);
     try {
-      const res = await fetch(`/api/files?path=${encodeURIComponent(filePath)}`, {
+      const res = await fetch(`${API_URL}/api/files?path=${encodeURIComponent(filePath)}`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${token}` }
       });
@@ -231,7 +240,7 @@ export default function Home() {
     setFileLoading(true);
     setFileError(null);
     try {
-      const res = await fetch('/api/files/mkdir', {
+      const res = await fetch(`${API_URL}/api/files/mkdir`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -260,7 +269,7 @@ export default function Home() {
     setFileError(null);
     const fullFilePath = currentPath + (currentPath.endsWith('/') || currentPath.endsWith('\\') ? '' : '/') + newFileName.trim();
     try {
-      const res = await fetch('/api/files/write', {
+      const res = await fetch(`${API_URL}/api/files/write`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -296,6 +305,12 @@ export default function Home() {
   const xtermInstance = useRef<any>(null);
   const socketInstance = useRef<Socket | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
+
+  // Stable refs to always access latest fontSize/theme inside effects without adding them as deps
+  const fontSizeRef = useRef<number>(fontSize);
+  const themeRef = useRef<string>(theme);
+  useEffect(() => { fontSizeRef.current = fontSize; }, [fontSize]);
+  useEffect(() => { themeRef.current = theme; }, [theme]);
 
   const [autoScroll, setAutoScroll] = useState<boolean>(true);
   const autoScrollRef = useRef<boolean>(true);
@@ -351,7 +366,7 @@ export default function Home() {
   const loadLogs = async (authToken = token) => {
     if (!authToken) return;
     try {
-      const res = await fetch('/api/logs', {
+      const res = await fetch(`${API_URL}/api/logs`, {
         headers: { 'Authorization': `Bearer ${authToken}` }
       });
       const data = await res.json();
@@ -363,10 +378,28 @@ export default function Home() {
     }
   };
 
-  const loadSettings = async (authToken = token) => {
+  const loadMetrics = useCallback(async (authToken = token) => {
     if (!authToken) return;
     try {
-      const res = await fetch('/api/settings', {
+      const res = await fetch(`${API_URL}/api/metrics`, {
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      });
+      const data = await res.json();
+      if (data.success) {
+        setCpuPercent(data.cpu);
+        setMemUsedMB(data.memUsedMB);
+        setMemTotalMB(data.memTotalMB);
+        setMemPercent(data.memPercent);
+      }
+    } catch (err) {
+      // Silently ignore metrics errors
+    }
+  }, [token]);
+
+  const loadSettings = useCallback(async (authToken = token) => {
+    if (!authToken) return;
+    try {
+      const res = await fetch(`${API_URL}/api/settings`, {
         headers: { 'Authorization': `Bearer ${authToken}` }
       });
       const data = await res.json();
@@ -382,9 +415,9 @@ export default function Home() {
         isSettingsLoadedRef.current = true;
       }, 300);
     }
-  };
+  }, [token]);
 
-  const saveSettings = async (newSize: number, newTheme: string) => {
+  const saveSettings = useCallback(async (newSize: number, newTheme: string) => {
     if (!token) return;
     const shouldShowStatus = isSettingsLoadedRef.current;
     if (shouldShowStatus) {
@@ -393,7 +426,7 @@ export default function Home() {
       });
     }
     try {
-      const res = await fetch('/api/settings', {
+      const res = await fetch(`${API_URL}/api/settings`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -423,14 +456,14 @@ export default function Home() {
         setSaveStatus('error');
       }
     }
-  };
+  }, [token]);
 
   // Check if session already exists on load
   useEffect(() => {
     const savedToken = localStorage.getItem('vps_terminal_token');
     if (savedToken) {
       setTimeout(() => setLoading(true), 0);
-      fetch('/api/auth/verify', {
+      fetch(`${API_URL}/api/auth/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: savedToken })
@@ -440,7 +473,7 @@ export default function Home() {
         if (data.success) {
           setToken(savedToken);
           setIsAuthenticated(true);
-          loadSettings(savedToken);
+        loadSettings(savedToken);
           loadFiles('', savedToken);
         } else {
           localStorage.removeItem('vps_terminal_token');
@@ -456,7 +489,7 @@ export default function Home() {
     } else {
       setTimeout(() => setIsAuthenticated(false), 0);
     }
-  }, []);
+  }, [loadSettings, loadFiles]);
 
   // Handle master password validation
   const handleLogin = async (e: React.FormEvent) => {
@@ -466,7 +499,7 @@ export default function Home() {
     setError(null);
 
     try {
-      const res = await fetch('/api/auth', {
+      const res = await fetch(`${API_URL}/api/auth`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password })
@@ -508,7 +541,7 @@ export default function Home() {
 
     setLoading(true);
     try {
-      const res = await fetch('/api/settings/password', {
+      const res = await fetch(`${API_URL}/api/settings/password`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -541,7 +574,7 @@ export default function Home() {
     }
     
     try {
-      await fetch('/api/auth/logout', {
+      await fetch(`${API_URL}/api/auth/logout`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token })
@@ -651,9 +684,9 @@ export default function Home() {
         cursorBlink: true,
         cursorStyle: 'block',
         fontFamily: '"JetBrains Mono", "Fira Code", Courier, monospace',
-        fontSize: fontSize,
+        fontSize: fontSizeRef.current,
         lineHeight: 1.25,
-        theme: getTerminalColors(theme),
+        theme: getTerminalColors(themeRef.current),
         scrollback: 5000,
         allowProposedApi: true
       });
@@ -678,7 +711,7 @@ export default function Home() {
       term.writeln('\x1b[33mConnecting to local VPS shell process...\x1b[0m');
 
       // Establish socket.io connection with auth token
-      socket = io({
+      socket = io(API_URL || undefined, {
         auth: { token },
         reconnectionDelay: 2000,
         reconnectionDelayMax: 5000,
@@ -767,7 +800,19 @@ export default function Home() {
     setTimeout(() => {
       saveSettings(fontSize, theme);
     }, 0);
-  }, [fontSize, theme]);
+  }, [fontSize, theme, saveSettings]);
+
+  // Poll system metrics every 5 seconds when authenticated
+  useEffect(() => {
+    if (!isAuthenticated || !token) return;
+    // Use setTimeout(0) to avoid setState-in-effect lint error
+    const initialTimer = setTimeout(() => loadMetrics(token), 0);
+    const interval = setInterval(() => loadMetrics(token), 5000);
+    return () => {
+      clearTimeout(initialTimer);
+      clearInterval(interval);
+    };
+  }, [isAuthenticated, token, loadMetrics]);
 
   // Loading indicator for verification check
   if (isAuthenticated === null) {
@@ -915,20 +960,20 @@ export default function Home() {
                       <div>
                         <div className="flex justify-between items-end mb-1.5">
                           <label className="text-[9px] uppercase font-bold text-slate-500">Tải CPU</label>
-                          <span className="text-xs font-mono text-white">4.8%</span>
+                          <span className="text-xs font-mono text-white">{cpuPercent}%</span>
                         </div>
                         <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
-                          <div className="h-full bg-blue-500 transition-all duration-500" style={{ width: '4.8%' }}></div>
+                          <div className="h-full bg-blue-500 transition-all duration-500" style={{ width: `${cpuPercent}%` }}></div>
                         </div>
                       </div>
 
                       <div>
                         <div className="flex justify-between items-end mb-1.5">
                           <label className="text-[9px] uppercase font-bold text-slate-500">Sử dụng Bộ nhớ</label>
-                          <span className="text-xs font-mono text-white">482MB / 1.5GB</span>
+                          <span className="text-xs font-mono text-white">{memUsedMB}MB / {memTotalMB}MB</span>
                         </div>
                         <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
-                          <div className="h-full bg-purple-500 transition-all duration-500" style={{ width: '31%' }}></div>
+                          <div className="h-full bg-purple-500 transition-all duration-500" style={{ width: `${memPercent}%` }}></div>
                         </div>
                       </div>
                     </div>
