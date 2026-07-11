@@ -9,7 +9,7 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import crypto from 'crypto';
-import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
+import * as pty from 'node-pty';
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
@@ -519,11 +519,14 @@ async function main() {
     const shellExec = isWin ? 'cmd.exe' : '/bin/bash';
     const args = isWin ? [] : ['-i'];
 
-    let shell: ChildProcessWithoutNullStreams | null = null;
+    let shell: pty.IPty | null = null;
     try {
-      shell = spawn(shellExec, args, {
-        env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor', LANG: 'en_US.UTF-8' },
-        shell: isWin ? true : undefined
+      shell = pty.spawn(shellExec, args, {
+        name: 'xterm-256color',
+        cols: 80,
+        rows: 24,
+        cwd: process.cwd(),
+        env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor', LANG: 'en_US.UTF-8' }
       });
     } catch (err: any) {
       socket.emit('output', `\r\n\x1b[31;1m[SYSTEM ERROR] Failed to spawn shell: ${err.message}\x1b[0m\r\n`);
@@ -531,22 +534,26 @@ async function main() {
       return;
     }
 
-    shell.stdout.on('data', (data) => socket.emit('output', data.toString()));
-    shell.stderr.on('data', (data) => socket.emit('output', data.toString()));
+    shell.onData((data) => socket.emit('output', data));
 
-    shell.on('close', async (code) => {
-      socket.emit('output', `\r\n\r\n\x1b[33m[SHELL EXIT] Process exited (code ${code}).\x1b[0m\r\n`);
-      await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', `Shell exited with code ${code}`, clientIp);
+    shell.onExit(async ({ exitCode }) => {
+      socket.emit('output', `\r\n\r\n\x1b[33m[SHELL EXIT] Process exited (code ${exitCode}).\x1b[0m\r\n`);
+      await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', `Shell exited with code ${exitCode}`, clientIp);
       socket.disconnect();
     });
 
     socket.on('input', (data: string) => {
-      if (shell && shell.stdin && shell.stdin.writable) shell.stdin.write(data);
+      shell?.write(data);
+    });
+
+    socket.on('resize', ({ cols, rows }: { cols: number; rows: number }) => {
+      if (!shell || !Number.isInteger(cols) || !Number.isInteger(rows)) return;
+      shell.resize(Math.max(2, Math.min(cols, 500)), Math.max(1, Math.min(rows, 200)));
     });
 
     socket.on('disconnect', async () => {
       if (shell) {
-        try { shell.kill('SIGKILL'); } catch { /* ignore */ }
+        try { shell.kill(); } catch { /* ignore */ }
         shell = null;
       }
       await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', `Terminal disconnected (Socket: ${socket.id})`, clientIp);

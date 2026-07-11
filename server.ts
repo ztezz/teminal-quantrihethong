@@ -3,7 +3,7 @@ import next from 'next';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import crypto from 'crypto';
-import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
+import * as pty from 'node-pty';
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
@@ -737,17 +737,20 @@ app.prepare().then(async () => {
     const shellExec = isWin ? 'cmd.exe' : '/bin/bash';
     const args = isWin ? [] : ['-i']; // Interactive mode to force bash prompt
 
-    let shell: ChildProcessWithoutNullStreams | null = null;
+    let shell: pty.IPty | null = null;
 
     try {
-      shell = spawn(shellExec, args, {
+      shell = pty.spawn(shellExec, args, {
+        name: 'xterm-256color',
+        cols: 80,
+        rows: 24,
+        cwd: process.cwd(),
         env: {
           ...process.env,
           TERM: 'xterm-256color',
           COLORTERM: 'truecolor',
           LANG: 'en_US.UTF-8'
-        },
-        shell: isWin ? true : undefined
+        }
       });
     } catch (err: any) {
       console.error('[SPAWN ERROR] Failed to spawn bash child process:', err);
@@ -757,27 +760,24 @@ app.prepare().then(async () => {
     }
 
     // Stream shell output back to frontend
-    shell.stdout.on('data', (data) => {
-      socket.emit('output', data.toString());
-    });
-
-    shell.stderr.on('data', (data) => {
-      socket.emit('output', data.toString());
-    });
+    shell.onData((data) => socket.emit('output', data));
 
     // Handle clean close from the shell itself
-    shell.on('close', async (code) => {
-      console.log(`[SHELL] Shell process exited with code ${code}. Socket ID: ${socket.id}`);
-      socket.emit('output', `\r\n\r\n\x1b[33m[SHELL EXIT] Terminal process exited (code ${code}). Closing connection...\x1b[0m\r\n`);
-      await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', `Terminal shell exited with code ${code}`, clientIp);
+    shell.onExit(async ({ exitCode }) => {
+      console.log(`[SHELL] Shell process exited with code ${exitCode}. Socket ID: ${socket.id}`);
+      socket.emit('output', `\r\n\r\n\x1b[33m[SHELL EXIT] Terminal process exited (code ${exitCode}). Closing connection...\x1b[0m\r\n`);
+      await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', `Terminal shell exited with code ${exitCode}`, clientIp);
       socket.disconnect();
     });
 
     // Handle inputs from frontend
     socket.on('input', (data: string) => {
-      if (shell && shell.stdin && shell.stdin.writable) {
-        shell.stdin.write(data);
-      }
+      shell?.write(data);
+    });
+
+    socket.on('resize', ({ cols, rows }: { cols: number; rows: number }) => {
+      if (!shell || !Number.isInteger(cols) || !Number.isInteger(rows)) return;
+      shell.resize(Math.max(2, Math.min(cols, 500)), Math.max(1, Math.min(rows, 200)));
     });
 
     // Handle disconnect (CRITICAL security & cleanup step!)
@@ -787,7 +787,7 @@ app.prepare().then(async () => {
       if (shell) {
         try {
           // Send SIGKILL immediately to terminate shell process & avoid resource leakage
-          shell.kill('SIGKILL');
+          shell.kill();
           console.log(`[CLEANUP] Successfully killed terminal shell process for Socket ID ${socket.id}`);
         } catch (err) {
           console.error(`[CLEANUP ERROR] Failed to kill terminal process for Socket ID ${socket.id}:`, err);

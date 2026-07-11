@@ -654,7 +654,7 @@ export default function Home() {
 
   // Main Terminal Mounting & Socket Connection logic
   useEffect(() => {
-    if (!isAuthenticated || !token || !terminalRef.current || activeTab !== 'terminal') {
+    if (!isAuthenticated || !token || activeTab !== 'terminal') {
       // Disconnect socket if navigating away from terminal tab
       if (socketInstance.current) {
         socketInstance.current.disconnect();
@@ -673,6 +673,18 @@ export default function Home() {
     let socket: Socket | null = null;
 
     const setupTerminal = async () => {
+      // AnimatePresence can delay mounting the dashboard after authentication.
+      // Wait briefly for the terminal container instead of abandoning setup.
+      for (let attempt = 0; attempt < 40 && !terminalRef.current; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+        if (!isMounted) return;
+      }
+
+      if (!terminalRef.current) {
+        console.error('[TERMINAL] Container did not mount in time.');
+        return;
+      }
+
       // Load Xterm.js packages dynamically to prevent server-side errors
       const { Terminal } = await import('@xterm/xterm');
       const { FitAddon } = await import('@xterm/addon-fit');
@@ -724,6 +736,9 @@ export default function Home() {
       socket.on('connect', () => {
         term.writeln('\x1b[32m✔ Connected to real-time process manager successfully.\x1b[0m');
         term.writeln('\x1b[90mPress Enter to start interacting with the terminal.\x1b[0m\r\n');
+        fitAddon.fit();
+        socket?.emit('resize', { cols: term.cols, rows: term.rows });
+        term.focus();
       });
 
       socket.on('connect_error', (err) => {
@@ -757,6 +772,9 @@ export default function Home() {
           if (isMounted && fitAddon) {
             try {
               fitAddon.fit();
+              if (socket?.connected) {
+                socket.emit('resize', { cols: term.cols, rows: term.rows });
+              }
             } catch (e) {
               // Ignore occasional race dimension fitting errors on fast toggling
             }
@@ -766,7 +784,13 @@ export default function Home() {
       }
     };
 
-    setupTerminal();
+    setupTerminal().catch((error) => {
+      console.error('[TERMINAL] Failed to initialize:', error);
+      if (terminalRef.current) {
+        terminalRef.current.textContent = `Không thể khởi tạo terminal: ${error instanceof Error ? error.message : String(error)}`;
+        terminalRef.current.classList.add('p-3', 'font-mono', 'text-sm', 'text-red-400');
+      }
+    });
 
     return () => {
       isMounted = false;
