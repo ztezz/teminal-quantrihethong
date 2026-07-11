@@ -37,6 +37,8 @@ import {
   FileJson,
   FileClock,
   Download,
+  Upload,
+  Move,
   Search
 } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
@@ -113,6 +115,7 @@ export default function Home() {
   const [parentPath, setParentPath] = useState<string>('');
   const [viewingFile, setViewingFile] = useState<string | null>(null);
   const [fileContent, setFileContent] = useState<string | null>(null);
+  const [fileMtime, setFileMtime] = useState<string | null>(null);
   const [isEditingFile, setIsEditingFile] = useState<boolean>(false);
   const [fileLoading, setFileLoading] = useState<boolean>(false);
   const [fileError, setFileError] = useState<string | null>(null);
@@ -121,6 +124,7 @@ export default function Home() {
   const [newDirName, setNewDirName] = useState<string>('');
   const [newFileName, setNewFileName] = useState<string>('');
   const [fileSearchQuery, setFileSearchQuery] = useState<string>('');
+  const uploadInputRef = useRef<HTMLInputElement>(null);
 
   const filteredFiles = filesList.filter((file) =>
     file.name.toLowerCase().includes(fileSearchQuery.toLowerCase())
@@ -169,6 +173,7 @@ export default function Home() {
         } else {
           setViewingFile(filePath);
           setFileContent(data.content);
+          setFileMtime(data.mtime);
           setIsEditingFile(false);
         }
       } else {
@@ -192,10 +197,11 @@ export default function Home() {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({ filePath: viewingFile, content: fileContent })
+        body: JSON.stringify({ filePath: viewingFile, content: fileContent, expectedMtime: fileMtime })
       });
       const data = await res.json();
       if (data.success) {
+        setFileMtime(data.mtime);
         setIsEditingFile(false);
       } else {
         setFileError(data.error || 'Lỗi khi lưu tệp tin');
@@ -220,7 +226,7 @@ export default function Home() {
       });
       const data = await res.json();
       if (data.success) {
-        loadFiles(currentPath);
+        await loadFiles(currentPath);
         if (viewingFile === filePath) {
           setViewingFile(null);
           setFileContent(null);
@@ -252,7 +258,7 @@ export default function Home() {
       if (data.success) {
         setNewDirName('');
         setShowCreateFolder(false);
-        loadFiles(currentPath);
+        await loadFiles(currentPath);
       } else {
         setFileError(data.error || 'Lỗi tạo thư mục mới');
       }
@@ -267,22 +273,21 @@ export default function Home() {
     if (!token || !newFileName.trim()) return;
     setFileLoading(true);
     setFileError(null);
-    const fullFilePath = currentPath + (currentPath.endsWith('/') || currentPath.endsWith('\\') ? '' : '/') + newFileName.trim();
     try {
-      const res = await fetch(`${API_URL}/api/files/write`, {
+      const res = await fetch(`${API_URL}/api/files/create`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({ filePath: fullFilePath, content: '' })
+        body: JSON.stringify({ dirPath: currentPath, name: newFileName.trim() })
       });
       const data = await res.json();
       if (data.success) {
         setNewFileName('');
         setShowCreateFile(false);
-        loadFiles(currentPath);
-        openFile(fullFilePath);
+        await loadFiles(currentPath);
+        await openFile(data.path);
       } else {
         setFileError(data.error || 'Lỗi tạo tệp mới');
       }
@@ -291,6 +296,82 @@ export default function Home() {
     } finally {
       setFileLoading(false);
     }
+  };
+
+  const downloadFile = async (filePath: string) => {
+    if (!token) return;
+    setFileError(null);
+    try {
+      const res = await fetch(`${API_URL}/api/files/download?path=${encodeURIComponent(filePath)}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!res.ok) throw new Error((await res.json()).error || 'Không thể tải tệp');
+      const url = URL.createObjectURL(await res.blob());
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filePath.split('/').pop() || 'download';
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error: any) { setFileError(error.message); }
+  };
+
+  const uploadFile = async (file: globalThis.File) => {
+    if (!token) return;
+    setFileLoading(true);
+    setFileError(null);
+    try {
+      const res = await fetch(`${API_URL}/api/files/upload`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/octet-stream',
+          'X-File-Name': encodeURIComponent(file.name),
+          'X-Directory': encodeURIComponent(currentPath)
+        },
+        body: file
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Upload thất bại');
+      await loadFiles(currentPath);
+    } catch (error: any) { setFileError(error.message); }
+    finally { setFileLoading(false); }
+  };
+
+  const moveOrRename = async (filePath: string) => {
+    if (!token) return;
+    const currentName = filePath.split('/').pop() || '';
+    const newName = prompt('Tên mới:', currentName)?.trim();
+    if (!newName || newName === currentName) return;
+    const res = await fetch(`${API_URL}/api/files/move`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ sourcePath: filePath, destinationDir: currentPath, newName })
+    });
+    const data = await res.json();
+    if (!data.success) setFileError(data.error || 'Không thể đổi tên');
+    else await loadFiles(currentPath);
+  };
+
+  const restoreFromTrash = async () => {
+    if (!token) return;
+    try {
+      const listRes = await fetch(`${API_URL}/api/files/trash`, { headers: { 'Authorization': `Bearer ${token}` } });
+      const list = await listRes.json();
+      if (!list.success) throw new Error(list.error);
+      if (!list.items.length) return setFileError('Thùng rác đang trống.');
+      const choices = list.items.map((item: any, index: number) => `${index + 1}. ${item.originalPath}`).join('\n');
+      const selected = Number(prompt(`Chọn số thứ tự cần khôi phục:\n${choices}`));
+      const item = list.items[selected - 1];
+      if (!item) return;
+      const res = await fetch(`${API_URL}/api/files/trash/restore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ id: item.id })
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error);
+      await loadFiles(currentPath);
+    } catch (error: any) { setFileError(error.message); }
   };
 
   // Password Change State
@@ -633,6 +714,54 @@ export default function Home() {
           magenta: '#ff00ff',
           cyan: '#00ffff',
           white: '#ffffff',
+        };
+      case 'dracula':
+        return {
+          background: '#282a36', foreground: '#f8f8f2', cursor: '#f8f8f2',
+          black: '#21222c', red: '#ff5555', green: '#50fa7b', yellow: '#f1fa8c',
+          blue: '#6272a4', magenta: '#ff79c6', cyan: '#8be9fd', white: '#f8f8f2',
+        };
+      case 'tokyo-night':
+        return {
+          background: '#1a1b26', foreground: '#c0caf5', cursor: '#c0caf5',
+          black: '#15161e', red: '#f7768e', green: '#9ece6a', yellow: '#e0af68',
+          blue: '#7aa2f7', magenta: '#bb9af7', cyan: '#7dcfff', white: '#a9b1d6',
+        };
+      case 'nord':
+        return {
+          background: '#2e3440', foreground: '#d8dee9', cursor: '#88c0d0',
+          black: '#3b4252', red: '#bf616a', green: '#a3be8c', yellow: '#ebcb8b',
+          blue: '#81a1c1', magenta: '#b48ead', cyan: '#88c0d0', white: '#e5e9f0',
+        };
+      case 'solarized-dark':
+        return {
+          background: '#002b36', foreground: '#839496', cursor: '#93a1a1',
+          black: '#073642', red: '#dc322f', green: '#859900', yellow: '#b58900',
+          blue: '#268bd2', magenta: '#d33682', cyan: '#2aa198', white: '#eee8d5',
+        };
+      case 'solarized-light':
+        return {
+          background: '#fdf6e3', foreground: '#657b83', cursor: '#586e75',
+          black: '#073642', red: '#dc322f', green: '#859900', yellow: '#b58900',
+          blue: '#268bd2', magenta: '#d33682', cyan: '#2aa198', white: '#eee8d5',
+        };
+      case 'gruvbox':
+        return {
+          background: '#282828', foreground: '#ebdbb2', cursor: '#fabd2f',
+          black: '#1d2021', red: '#fb4934', green: '#b8bb26', yellow: '#fabd2f',
+          blue: '#83a598', magenta: '#d3869b', cyan: '#8ec07c', white: '#fbf1c7',
+        };
+      case 'one-dark':
+        return {
+          background: '#282c34', foreground: '#abb2bf', cursor: '#528bff',
+          black: '#1e2127', red: '#e06c75', green: '#98c379', yellow: '#e5c07b',
+          blue: '#61afef', magenta: '#c678dd', cyan: '#56b6c2', white: '#d7dae0',
+        };
+      case 'github-light':
+        return {
+          background: '#ffffff', foreground: '#24292f', cursor: '#0969da',
+          black: '#24292f', red: '#cf222e', green: '#116329', yellow: '#9a6700',
+          blue: '#0969da', magenta: '#8250df', cyan: '#1b7c83', white: '#f6f8fa',
         };
       case 'dark-classic':
       default:
@@ -1349,6 +1478,14 @@ export default function Home() {
                                   <option value="matrix">Xanh lục Ma trận (Cổ điển)</option>
                                   <option value="amber">Cam Hổ phách (CRT Phosphor)</option>
                                   <option value="cyberpunk">Neon Cyberpunk (Xanh & Hồng)</option>
+                                  <option value="dracula">Dracula (Tím cổ điển)</option>
+                                  <option value="tokyo-night">Tokyo Night (Xanh đêm)</option>
+                                  <option value="nord">Nord (Băng giá dịu mắt)</option>
+                                  <option value="solarized-dark">Solarized Dark (Tối cân bằng)</option>
+                                  <option value="solarized-light">Solarized Light (Sáng dịu mắt)</option>
+                                  <option value="gruvbox">Gruvbox (Retro ấm)</option>
+                                  <option value="one-dark">One Dark (Phong cách Atom)</option>
+                                  <option value="github-light">GitHub Light (Sáng tối giản)</option>
                                 </select>
                               </div>
                             </div>
@@ -1556,6 +1693,16 @@ export default function Home() {
                               <p className="text-xs text-slate-500 font-mono">Duyệt, xem, tạo, sửa và xóa tệp tin trên hệ thống VPS</p>
                             </div>
                             <div className="flex flex-wrap gap-2">
+                              <input
+                                ref={uploadInputRef}
+                                type="file"
+                                className="hidden"
+                                onChange={(event) => {
+                                  const file = event.target.files?.[0];
+                                  if (file) uploadFile(file);
+                                  event.target.value = '';
+                                }}
+                              />
                               <button
                                 onClick={() => loadFiles(parentPath)}
                                 disabled={!parentPath || currentPath === parentPath}
@@ -1571,6 +1718,20 @@ export default function Home() {
                               >
                                 <RefreshCw className={`w-3.5 h-3.5 ${fileLoading ? 'animate-spin' : ''}`} />
                                 <span>Tải lại</span>
+                              </button>
+                              <button
+                                onClick={() => uploadInputRef.current?.click()}
+                                className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white rounded transition cursor-pointer"
+                              >
+                                <Upload className="w-3.5 h-3.5" />
+                                <span>Upload</span>
+                              </button>
+                              <button
+                                onClick={restoreFromTrash}
+                                className="flex items-center gap-1.5 px-3 py-1.5 bg-[#111116] hover:bg-[#1a1a24] text-xs font-semibold text-slate-300 border border-white/10 rounded transition cursor-pointer"
+                              >
+                                <History className="w-3.5 h-3.5" />
+                                <span>Thùng rác</span>
                               </button>
                               <button
                                 onClick={() => { setShowCreateFolder(true); setShowCreateFile(false); }}
@@ -1663,7 +1824,7 @@ export default function Home() {
                             {/* Breadcrumb Path Bar */}
                             <div className="flex-1 flex items-center gap-2 px-4 py-2.5 bg-[#0d0d12] border border-white/10 rounded-lg text-xs font-mono text-slate-400 min-w-0">
                               <span className="text-slate-500 uppercase tracking-widest shrink-0">Đường dẫn:</span>
-                              <span className="text-white bg-white/5 px-2 py-0.5 rounded select-all break-all truncate" title={currentPath || '/'}>{currentPath || '/'}</span>
+                              <span className="text-white bg-white/5 px-2 py-0.5 rounded select-all break-all truncate" title={currentPath || '/'}>/{currentPath}</span>
                             </div>
 
                             {/* Search Input Bar */}
@@ -1778,7 +1939,7 @@ export default function Home() {
                                       </tr>
                                     ) : (
                                       filteredFiles.map((file, index) => {
-                                        const fullItemPath = currentPath + (currentPath.endsWith('/') || currentPath.endsWith('\\') ? '' : '/') + file.name;
+                                        const fullItemPath = file.path;
                                         return (
                                           <tr key={index} className="hover:bg-white/[0.02] transition-colors group">
                                             {/* File / Folder Name Clickable */}
@@ -1836,6 +1997,13 @@ export default function Home() {
                                                 ) : (
                                                   <>
                                                     <button
+                                                      onClick={() => downloadFile(fullItemPath)}
+                                                      className="p-1.5 rounded bg-emerald-500/5 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/10 cursor-pointer transition-colors"
+                                                      title="Tải xuống"
+                                                    >
+                                                      <Download className="w-3.5 h-3.5" />
+                                                    </button>
+                                                    <button
                                                       onClick={() => openFile(fullItemPath)}
                                                       className="p-1.5 rounded bg-purple-500/5 hover:bg-purple-500/20 text-purple-400 border border-purple-500/10 cursor-pointer transition-colors"
                                                       title="Xem tệp"
@@ -1855,6 +2023,13 @@ export default function Home() {
                                                     </button>
                                                   </>
                                                 )}
+                                                <button
+                                                  onClick={() => moveOrRename(fullItemPath)}
+                                                  className="p-1.5 rounded bg-amber-500/5 hover:bg-amber-500/20 text-amber-400 border border-amber-500/10 cursor-pointer transition-colors"
+                                                  title="Đổi tên"
+                                                >
+                                                  <Move className="w-3.5 h-3.5" />
+                                                </button>
                                                 <button
                                                   onClick={() => deleteFileOrFolder(fullItemPath)}
                                                   className="p-1.5 rounded bg-red-500/5 hover:bg-red-500/20 text-red-400 border border-red-500/10 cursor-pointer transition-colors"

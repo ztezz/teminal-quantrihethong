@@ -10,6 +10,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import crypto from 'crypto';
 import * as pty from 'node-pty';
+import { createFileManagerRouter } from './lib/file-manager-router';
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
@@ -206,7 +207,7 @@ async function main() {
     cors: { origin: allowedOrigin, methods: ['GET', 'POST'] }
   });
 
-  expressApp.use(express.json());
+  expressApp.use(express.json({ limit: '2mb' }));
 
   // CORS headers cho tất cả API routes
   expressApp.use((req, res, next) => {
@@ -388,118 +389,10 @@ async function main() {
   });
 
   // ── File Manager ──────────────────────────────────────────────────────────
-
-  const resolveSafePath = (userPath?: string) => {
-    const rootDir = process.cwd();
-    if (!userPath) return rootDir;
-    return path.resolve(rootDir, userPath);
-  };
-
-  expressApp.get('/api/files', async (req, res) => {
-    try {
-      const token = (req.headers.authorization || '').replace('Bearer ', '');
-      if (!token || !hasSession(token)) return res.status(401).json({ success: false, error: 'Unauthorized' });
-      const targetDir = resolveSafePath(req.query.path as string);
-      if (!fs.existsSync(targetDir)) return res.status(404).json({ success: false, error: 'Thư mục không tồn tại' });
-      if (!fs.statSync(targetDir).isDirectory()) return res.status(400).json({ success: false, error: 'Đường dẫn không phải là thư mục' });
-      const filesList: any[] = [];
-      for (const item of fs.readdirSync(targetDir)) {
-        try {
-          const itemStat = fs.statSync(path.join(targetDir, item));
-          filesList.push({ name: item, isDirectory: itemStat.isDirectory(), size: itemStat.size, mtime: itemStat.mtime.toISOString() });
-        } catch { /* skip inaccessible */ }
-      }
-      filesList.sort((a, b) => {
-        if (a.isDirectory && !b.isDirectory) return -1;
-        if (!a.isDirectory && b.isDirectory) return 1;
-        return a.name.localeCompare(b.name);
-      });
-      return res.json({ success: true, currentPath: targetDir, parentPath: path.dirname(targetDir), files: filesList });
-    } catch (error: any) {
-      return res.status(500).json({ success: false, error: error.message });
-    }
-  });
-
-  expressApp.get('/api/files/read', async (req, res) => {
-    try {
-      const token = (req.headers.authorization || '').replace('Bearer ', '');
-      if (!token || !hasSession(token)) return res.status(401).json({ success: false, error: 'Unauthorized' });
-      const queryPath = req.query.path as string;
-      if (!queryPath) return res.status(400).json({ success: false, error: 'Thiếu đường dẫn tệp tin' });
-      const targetFile = resolveSafePath(queryPath);
-      if (!fs.existsSync(targetFile)) return res.status(404).json({ success: false, error: 'Tệp tin không tồn tại' });
-      const stat = fs.statSync(targetFile);
-      if (stat.isDirectory()) return res.status(400).json({ success: false, error: 'Đường dẫn là một thư mục' });
-      if (stat.size > 5 * 1024 * 1024) return res.status(400).json({ success: false, error: 'Tệp quá lớn (giới hạn 5MB)' });
-      const buffer = fs.readFileSync(targetFile);
-      if (buffer.slice(0, 512).includes(0)) {
-        return res.json({ success: true, isBinary: true, size: stat.size, mtime: stat.mtime.toISOString() });
-      }
-      return res.json({ success: true, isBinary: false, content: buffer.toString('utf8'), size: stat.size, mtime: stat.mtime.toISOString() });
-    } catch (error: any) {
-      return res.status(500).json({ success: false, error: error.message });
-    }
-  });
-
-  expressApp.post('/api/files/write', async (req, res) => {
-    try {
-      const token = (req.headers.authorization || '').replace('Bearer ', '');
-      if (!token || !hasSession(token)) return res.status(401).json({ success: false, error: 'Unauthorized' });
-      const { filePath, content } = req.body;
-      if (!filePath) return res.status(400).json({ success: false, error: 'Thiếu đường dẫn tệp tin' });
-      const targetFile = resolveSafePath(filePath);
-      const parentDir = path.dirname(targetFile);
-      if (!fs.existsSync(parentDir)) fs.mkdirSync(parentDir, { recursive: true });
-      fs.writeFileSync(targetFile, content || '', 'utf8');
-      const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
-      await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', `Đã chỉnh sửa/tạo tệp: ${path.basename(targetFile)}`, clientIp);
-      return res.json({ success: true, message: 'Đã lưu tệp tin thành công' });
-    } catch (error: any) {
-      return res.status(500).json({ success: false, error: error.message });
-    }
-  });
-
-  expressApp.post('/api/files/mkdir', async (req, res) => {
-    try {
-      const token = (req.headers.authorization || '').replace('Bearer ', '');
-      if (!token || !hasSession(token)) return res.status(401).json({ success: false, error: 'Unauthorized' });
-      const { dirPath, name } = req.body;
-      if (!dirPath || !name) return res.status(400).json({ success: false, error: 'Thiếu đường dẫn hoặc tên thư mục' });
-      const targetDir = path.join(resolveSafePath(dirPath), name);
-      if (fs.existsSync(targetDir)) return res.status(400).json({ success: false, error: 'Thư mục hoặc tệp đã tồn tại' });
-      fs.mkdirSync(targetDir, { recursive: true });
-      const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
-      await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', `Đã tạo thư mục: ${name}`, clientIp);
-      return res.json({ success: true, message: 'Đã tạo thư mục thành công' });
-    } catch (error: any) {
-      return res.status(500).json({ success: false, error: error.message });
-    }
-  });
-
-  expressApp.delete('/api/files', async (req, res) => {
-    try {
-      const token = (req.headers.authorization || '').replace('Bearer ', '');
-      if (!token || !hasSession(token)) return res.status(401).json({ success: false, error: 'Unauthorized' });
-      const targetPath = req.query.path as string;
-      if (!targetPath) return res.status(400).json({ success: false, error: 'Thiếu đường dẫn cần xóa' });
-      const absolutePath = resolveSafePath(targetPath);
-      if (!fs.existsSync(absolutePath)) return res.status(404).json({ success: false, error: 'Đường dẫn không tồn tại' });
-      if (absolutePath === process.cwd() || absolutePath === '/' || absolutePath === 'C:\\') {
-        return res.status(400).json({ success: false, error: 'Không thể xóa thư mục gốc' });
-      }
-      const stat = fs.statSync(absolutePath);
-      if (stat.isDirectory()) {
-        fs.rmSync(absolutePath, { recursive: true, force: true });
-      } else {
-        fs.unlinkSync(absolutePath);
-      }
-      const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
-      await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', `Đã xóa tệp/thư mục: ${path.basename(absolutePath)}`, clientIp);
-      return res.json({ success: true, message: 'Đã xóa thành công' });
-    } catch (error: any) {
-      return res.status(500).json({ success: false, error: error.message });
-    }
-  });
+  expressApp.use('/api/files', createFileManagerRouter({
+    hasSession,
+    log: (event, ip) => db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', event, ip)
+  }));
 
   // ── Socket.io Terminal ────────────────────────────────────────────────────
 

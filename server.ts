@@ -4,6 +4,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import crypto from 'crypto';
 import * as pty from 'node-pty';
+import { createFileManagerRouter } from './lib/file-manager-router';
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
@@ -256,7 +257,7 @@ app.prepare().then(async () => {
     }
   });
 
-  expressApp.use(express.json());
+  expressApp.use(express.json({ limit: '2mb' }));
 
   // Wait for database initialization
   try {
@@ -486,7 +487,12 @@ app.prepare().then(async () => {
     }
   });
 
-  // --- File Manager Endpoints ---
+  expressApp.use('/api/files', createFileManagerRouter({
+    hasSession,
+    log: (event, ip) => db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', event, ip)
+  }));
+
+  // --- Legacy File Manager Endpoints ---
 
   const resolveSafePath = (userPath?: string) => {
     const rootDir = process.cwd();
