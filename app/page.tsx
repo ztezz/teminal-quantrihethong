@@ -1,7 +1,7 @@
 'use client';
 
-// Backend API base URL — đặt NEXT_PUBLIC_API_URL trong .env khi deploy frontend riêng
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
+// Backend API base URL
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'https://api-ssh.luugame.fun';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
