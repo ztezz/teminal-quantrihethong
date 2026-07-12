@@ -6,6 +6,7 @@
     "dev": "tsx server.ts",
     "backend": "tsx server.ts --backend",
     "build": "next build",
+    "build:backend": "esbuild server.ts --bundle --platform=node --format=cjs --packages=external --outfile=dist/server.js",
     "start": "tsx server.ts",
     "lint": "eslint .",
     "clean": "next clean"
@@ -42,6 +43,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/unzipper": "^0.10.11",
+    "esbuild": "^0.28.1",
     "eslint": "9.39.1",
     "eslint-config-next": "16.0.8",
     "firebase-tools": "^15.0.0",
