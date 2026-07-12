@@ -10,8 +10,9 @@ import path from 'path';
 import fs from 'fs';
 
 const dev = process.env.NODE_ENV !== 'production';
-const app = next({ dev });
-const handle = app.getRequestHandler();
+const backendOnly = process.argv.includes('--backend');
+const nextApp = backendOnly ? null : next({ dev });
+const handle = nextApp?.getRequestHandler();
 
 // Pure JavaScript File-Based Database to bypass binary sqlite3 GLIBC errors
 const DB_FILE = path.join(process.cwd(), 'terminal_database.json');
@@ -245,7 +246,8 @@ async function initializeDatabase() {
   console.log('[DB] Database tables verified & connected successfully.');
 }
 
-app.prepare().then(async () => {
+async function startServer() {
+  await nextApp?.prepare();
   const expressApp = express();
   const httpServer = createServer(expressApp);
   
@@ -253,11 +255,22 @@ app.prepare().then(async () => {
   const io = new Server(httpServer, {
     cors: {
       origin: '*',
-      methods: ['GET', 'POST']
+      methods: ['GET', 'POST', 'PATCH', 'DELETE']
     }
   });
 
   expressApp.use(express.json({ limit: '2mb' }));
+
+  if (backendOnly) {
+    const allowedOrigin = process.env.FRONTEND_ORIGIN || '*';
+    expressApp.use((req, res, nextMiddleware) => {
+      res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-File-Name, X-Directory');
+      if (req.method === 'OPTIONS') return res.sendStatus(204);
+      nextMiddleware();
+    });
+  }
 
   // Wait for database initialization
   try {
@@ -442,7 +455,7 @@ app.prepare().then(async () => {
       const freeMem = os.freemem();
       const usedMem = totalMem - freeMem;
       const memPercent = Math.round((usedMem / totalMem) * 100);
-      const diskPath = path.resolve(process.env.FILE_MANAGER_ROOT || process.cwd());
+      const diskPath = path.parse(process.cwd()).root;
       const disk = await fs.promises.statfs(diskPath);
       const diskTotal = Number(disk.blocks) * Number(disk.bsize);
       const diskFree = Number(disk.bavail) * Number(disk.bsize);
@@ -500,235 +513,6 @@ app.prepare().then(async () => {
     log: (event, ip) => db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', event, ip)
   }));
 
-  // --- Legacy File Manager Endpoints ---
-
-  const resolveSafePath = (userPath?: string) => {
-    const rootDir = process.cwd();
-    if (!userPath) return rootDir;
-    const resolved = path.resolve(rootDir, userPath);
-    return resolved;
-  };
-
-  // 1. GET /api/files - List files and directories
-  expressApp.get('/api/files', async (req, res) => {
-    try {
-      const authHeader = req.headers.authorization;
-      const token = authHeader ? authHeader.replace('Bearer ', '') : '';
-
-      if (!token || !hasSession(token)) {
-        return res.status(401).json({ success: false, error: 'Unauthorized' });
-      }
-
-      const queryPath = req.query.path as string;
-      const targetDir = resolveSafePath(queryPath);
-
-      if (!fs.existsSync(targetDir)) {
-        return res.status(404).json({ success: false, error: 'Thư mục không tồn tại' });
-      }
-
-      const stat = fs.statSync(targetDir);
-      if (!stat.isDirectory()) {
-        return res.status(400).json({ success: false, error: 'Đường dẫn không phải là thư mục' });
-      }
-
-      const items = fs.readdirSync(targetDir);
-      const filesList = [];
-
-      for (const item of items) {
-        try {
-          const itemPath = path.join(targetDir, item);
-          const itemStat = fs.statSync(itemPath);
-          filesList.push({
-            name: item,
-            isDirectory: itemStat.isDirectory(),
-            size: itemStat.size,
-            mtime: itemStat.mtime.toISOString(),
-          });
-        } catch (e) {
-          // Skip inaccessible files
-        }
-      }
-
-      filesList.sort((a, b) => {
-        if (a.isDirectory && !b.isDirectory) return -1;
-        if (!a.isDirectory && b.isDirectory) return 1;
-        return a.name.localeCompare(b.name);
-      });
-
-      return res.json({
-        success: true,
-        currentPath: targetDir,
-        parentPath: path.dirname(targetDir),
-        files: filesList
-      });
-    } catch (error: any) {
-      console.error('[API FILES GET ERROR]', error);
-      return res.status(500).json({ success: false, error: error.message });
-    }
-  });
-
-  // 2. GET /api/files/read - Read file content
-  expressApp.get('/api/files/read', async (req, res) => {
-    try {
-      const authHeader = req.headers.authorization;
-      const token = authHeader ? authHeader.replace('Bearer ', '') : '';
-
-      if (!token || !hasSession(token)) {
-        return res.status(401).json({ success: false, error: 'Unauthorized' });
-      }
-
-      const queryPath = req.query.path as string;
-      if (!queryPath) {
-        return res.status(400).json({ success: false, error: 'Thiếu đường dẫn tệp tin' });
-      }
-
-      const targetFile = resolveSafePath(queryPath);
-      if (!fs.existsSync(targetFile)) {
-        return res.status(404).json({ success: false, error: 'Tệp tin không tồn tại' });
-      }
-
-      const stat = fs.statSync(targetFile);
-      if (stat.isDirectory()) {
-        return res.status(400).json({ success: false, error: 'Đường dẫn là một thư mục' });
-      }
-
-      if (stat.size > 5 * 1024 * 1024) {
-        return res.status(400).json({ success: false, error: 'Tệp quá lớn để đọc trực tuyến (giới hạn 5MB)' });
-      }
-
-      const buffer = fs.readFileSync(targetFile);
-      const isBinary = buffer.slice(0, 512).includes(0);
-
-      if (isBinary) {
-        return res.json({
-          success: true,
-          isBinary: true,
-          size: stat.size,
-          mtime: stat.mtime.toISOString()
-        });
-      }
-
-      const content = buffer.toString('utf8');
-      return res.json({
-        success: true,
-        isBinary: false,
-        content,
-        size: stat.size,
-        mtime: stat.mtime.toISOString()
-      });
-    } catch (error: any) {
-      console.error('[API FILES READ ERROR]', error);
-      return res.status(500).json({ success: false, error: error.message });
-    }
-  });
-
-  // 3. POST /api/files/write - Create or update file content
-  expressApp.post('/api/files/write', async (req, res) => {
-    try {
-      const authHeader = req.headers.authorization;
-      const token = authHeader ? authHeader.replace('Bearer ', '') : '';
-
-      if (!token || !hasSession(token)) {
-        return res.status(401).json({ success: false, error: 'Unauthorized' });
-      }
-
-      const { filePath, content } = req.body;
-      if (!filePath) {
-        return res.status(400).json({ success: false, error: 'Thiếu đường dẫn tệp tin' });
-      }
-
-      const targetFile = resolveSafePath(filePath);
-      const parentDir = path.dirname(targetFile);
-      if (!fs.existsSync(parentDir)) {
-        fs.mkdirSync(parentDir, { recursive: true });
-      }
-
-      fs.writeFileSync(targetFile, content || '', 'utf8');
-
-      const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
-      await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', `Đã chỉnh sửa/tạo tệp: ${path.basename(targetFile)}`, clientIp);
-
-      return res.json({ success: true, message: 'Đã lưu tệp tin thành công' });
-    } catch (error: any) {
-      console.error('[API FILES WRITE ERROR]', error);
-      return res.status(500).json({ success: false, error: error.message });
-    }
-  });
-
-  // 4. POST /api/files/mkdir - Create a folder
-  expressApp.post('/api/files/mkdir', async (req, res) => {
-    try {
-      const authHeader = req.headers.authorization;
-      const token = authHeader ? authHeader.replace('Bearer ', '') : '';
-
-      if (!token || !hasSession(token)) {
-        return res.status(401).json({ success: false, error: 'Unauthorized' });
-      }
-
-      const { dirPath, name } = req.body;
-      if (!dirPath || !name) {
-        return res.status(400).json({ success: false, error: 'Thiếu đường dẫn hoặc tên thư mục' });
-      }
-
-      const targetDir = path.join(resolveSafePath(dirPath), name);
-      if (fs.existsSync(targetDir)) {
-        return res.status(400).json({ success: false, error: 'Thư mục hoặc tệp đã tồn tại' });
-      }
-
-      fs.mkdirSync(targetDir, { recursive: true });
-
-      const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
-      await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', `Đã tạo thư mục: ${name}`, clientIp);
-
-      return res.json({ success: true, message: 'Đã tạo thư mục thành công' });
-    } catch (error: any) {
-      console.error('[API FILES MKDIR ERROR]', error);
-      return res.status(500).json({ success: false, error: error.message });
-    }
-  });
-
-  // 5. DELETE /api/files - Delete file or directory
-  expressApp.delete('/api/files', async (req, res) => {
-    try {
-      const authHeader = req.headers.authorization;
-      const token = authHeader ? authHeader.replace('Bearer ', '') : '';
-
-      if (!token || !hasSession(token)) {
-        return res.status(401).json({ success: false, error: 'Unauthorized' });
-      }
-
-      const targetPath = req.query.path as string;
-      if (!targetPath) {
-        return res.status(400).json({ success: false, error: 'Thiếu đường dẫn cần xóa' });
-      }
-
-      const absolutePath = resolveSafePath(targetPath);
-      if (!fs.existsSync(absolutePath)) {
-        return res.status(404).json({ success: false, error: 'Đường dẫn không tồn tại' });
-      }
-
-      if (absolutePath === process.cwd() || absolutePath === '/' || absolutePath === 'C:\\') {
-        return res.status(400).json({ success: false, error: 'Không thể xóa thư mục gốc của hệ thống' });
-      }
-
-      const stat = fs.statSync(absolutePath);
-      if (stat.isDirectory()) {
-        fs.rmSync(absolutePath, { recursive: true, force: true });
-      } else {
-        fs.unlinkSync(absolutePath);
-      }
-
-      const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
-      await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', `Đã xóa tệp/thư mục: ${path.basename(absolutePath)}`, clientIp);
-
-      return res.json({ success: true, message: 'Đã xóa thành công' });
-    } catch (error: any) {
-      console.error('[API FILES DELETE ERROR]', error);
-      return res.status(500).json({ success: false, error: error.message });
-    }
-  });
-
-
   // --- Socket.io Terminal Implementation ---
 
   io.use((socket, nextFn) => {
@@ -750,6 +534,18 @@ app.prepare().then(async () => {
     const isWin = os.platform() === 'win32';
     const shellExec = isWin ? 'cmd.exe' : '/bin/bash';
     const args = isWin ? [] : ['-i']; // Interactive mode to force bash prompt
+    let terminalCwd = process.cwd();
+    const requestedCwd = socket.handshake.auth?.cwd ?? socket.handshake.query?.cwd;
+    if (typeof requestedCwd === 'string') {
+      const filesystemRoot = path.parse(process.cwd()).root;
+      const candidate = path.resolve(filesystemRoot, requestedCwd.replace(/^[/\\]+/, ''));
+      try {
+        if ((candidate === filesystemRoot || candidate.startsWith(filesystemRoot + path.sep)) && (await fs.promises.stat(candidate)).isDirectory()) terminalCwd = candidate;
+        else throw new Error('CWD is not a directory');
+      } catch {
+        socket.emit('output', '\r\n\x1b[33m[SYSTEM] Requested working directory is invalid; using the server default.\x1b[0m\r\n');
+      }
+    }
 
     let shell: pty.IPty | null = null;
 
@@ -758,7 +554,7 @@ app.prepare().then(async () => {
         name: 'xterm-256color',
         cols: 80,
         rows: 24,
-        cwd: process.cwd(),
+        cwd: terminalCwd,
         env: {
           ...process.env,
           TERM: 'xterm-256color',
@@ -815,12 +611,18 @@ app.prepare().then(async () => {
 
 
   // --- Next.js Pages routing fallback ---
-  expressApp.all(/.*/, (req, res) => {
-    return handle(req, res);
-  });
+  if (handle) {
+    expressApp.all(/.*/, (req, res) => handle(req, res));
+  }
 
-  const port = 3000;
+  const port = backendOnly ? Number(process.env.BACKEND_PORT) || 3001 : Number(process.env.PORT) || 3000;
   httpServer.listen(port, () => {
-    console.log(`> Full-Stack Web Terminal server running perfectly on port ${port}`);
+    const mode = backendOnly ? 'Backend-only' : 'Full-stack Web Terminal';
+    console.log(`> ${mode} server running on port ${port}`);
   });
+}
+
+startServer().catch((err) => {
+  console.error('[STARTUP ERROR]', err);
+  process.exit(1);
 });

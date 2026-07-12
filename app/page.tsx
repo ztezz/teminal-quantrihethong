@@ -39,7 +39,9 @@ import {
   Download,
   Upload,
   Move,
-  Search
+  Search,
+  Bookmark,
+  BookmarkCheck
 } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
 
@@ -47,6 +49,25 @@ interface LogEntry {
   event: string;
   ip: string;
   timestamp: string;
+}
+
+interface FileBookmark {
+  path: string;
+  label: string;
+}
+
+interface FileMetadata {
+  path: string;
+  mode: string;
+  uid: number;
+  gid: number;
+}
+
+interface TrashItem {
+  id: string;
+  originalPath: string;
+  name?: string;
+  deletedAt?: string;
 }
 
 type ActiveTab = 'terminal' | 'logs' | 'settings' | 'files';
@@ -60,6 +81,31 @@ function getSavedActiveTab(): ActiveTab {
 function getSavedSidebarState(): boolean {
   if (typeof window === 'undefined') return true;
   return localStorage.getItem('vps_terminal_sidebar_open') !== 'false';
+}
+
+const LAST_FILE_PATH_KEY = 'vps_terminal_last_file_path';
+const FILE_BOOKMARKS_KEY = 'vps_terminal_file_bookmarks';
+
+function getSavedFilePath(): string {
+  if (typeof window === 'undefined') return '';
+  return localStorage.getItem(LAST_FILE_PATH_KEY) || '';
+}
+
+function getSavedFileBookmarks(): FileBookmark[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const saved = JSON.parse(localStorage.getItem(FILE_BOOKMARKS_KEY) || '[]');
+    if (!Array.isArray(saved)) return [];
+    return saved.flatMap((item): FileBookmark[] => {
+      if (typeof item === 'string') return [{ path: item, label: item || '/' }];
+      if (item && typeof item.path === 'string') {
+        return [{ path: item.path, label: typeof item.label === 'string' && item.label.trim() ? item.label : item.path || '/' }];
+      }
+      return [];
+    });
+  } catch {
+    return [];
+  }
 }
 
 // Helper to determine the proper file-type specific icon and color styling
@@ -148,13 +194,35 @@ export default function Home() {
   const [newDirName, setNewDirName] = useState<string>('');
   const [newFileName, setNewFileName] = useState<string>('');
   const [fileSearchQuery, setFileSearchQuery] = useState<string>('');
+  const [fileBookmarks, setFileBookmarks] = useState<FileBookmark[]>(getSavedFileBookmarks);
+  const [pathInput, setPathInput] = useState('');
+  const [pathHistory, setPathHistory] = useState<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const historyIndexRef = useRef(-1);
+  const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
+  const [fileClipboard, setFileClipboard] = useState<{ operation: 'copy' | 'move'; paths: string[] } | null>(null);
+  const [recursiveSearch, setRecursiveSearch] = useState(false);
+  const [searchResults, setSearchResults] = useState<any[] | null>(null);
+  const [searchTruncated, setSearchTruncated] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
+  const [metadata, setMetadata] = useState<FileMetadata | null>(null);
+  const [trashItems, setTrashItems] = useState<TrashItem[]>([]);
+  const [selectedTrashIds, setSelectedTrashIds] = useState<string[]>([]);
+  const [showTrash, setShowTrash] = useState(false);
+  const [editorOriginal, setEditorOriginal] = useState('');
+  const [editorFind, setEditorFind] = useState('');
+  const [editorReplace, setEditorReplace] = useState('');
+  const [editorPosition, setEditorPosition] = useState({ line: 1, char: 1 });
+  const editorRef = useRef<HTMLTextAreaElement>(null);
+  const pendingTerminalCwdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
 
-  const filteredFiles = filesList.filter((file) =>
+  const visibleFiles = searchResults ?? filesList;
+  const filteredFiles = visibleFiles.filter((file) =>
     file.name.toLowerCase().includes(fileSearchQuery.toLowerCase())
   );
 
-  const loadFiles = useCallback(async (dirPath?: string, authToken = token) => {
+  const loadFiles = useCallback(async (dirPath?: string, authToken = token, historyMode: 'push' | 'replace' | 'none' = 'push') => {
     const auth = authToken || token;
     if (!auth) return;
     setFileLoading(true);
@@ -169,7 +237,26 @@ export default function Home() {
       if (data.success) {
         setFilesList(data.files);
         setCurrentPath(data.currentPath);
+        setPathInput(data.currentPath);
         setParentPath(data.parentPath);
+        setSelectedPaths([]);
+        setSearchResults(null);
+        setSearchTruncated(false);
+        localStorage.setItem(LAST_FILE_PATH_KEY, data.currentPath);
+        if (historyMode !== 'none') {
+          setPathHistory((history) => {
+            if (historyMode === 'replace') {
+              historyIndexRef.current = 0;
+              setHistoryIndex(0);
+              return [data.currentPath];
+            }
+            const base = history.slice(0, historyIndexRef.current + 1);
+            const next = base[base.length - 1] === data.currentPath ? base : [...base, data.currentPath];
+            historyIndexRef.current = next.length - 1;
+            setHistoryIndex(historyIndexRef.current);
+            return next;
+          });
+        }
       } else {
         setFileError(data.error || 'Không thể tải danh sách tệp tin');
       }
@@ -179,6 +266,124 @@ export default function Home() {
       setFileLoading(false);
     }
   }, [token]);
+
+  const toggleFileBookmark = (bookmarkPath: string) => {
+    setFileBookmarks((current) => {
+      const updated = current.some((item) => item.path === bookmarkPath)
+        ? current.filter((item) => item.path !== bookmarkPath)
+        : [...current, { path: bookmarkPath, label: bookmarkPath || '/' }];
+      localStorage.setItem(FILE_BOOKMARKS_KEY, JSON.stringify(updated));
+      return updated;
+    });
+  };
+
+  const requestFileApi = async (endpoint: string, options: RequestInit = {}) => {
+    if (!token) throw new Error('Phiên đăng nhập đã hết hạn');
+    const response = await fetch(`${API_URL}${endpoint}`, {
+      ...options,
+      headers: {
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        'Authorization': `Bearer ${token}`,
+        ...options.headers,
+      },
+    });
+    const data = await response.json();
+    if (!response.ok && response.status !== 207) throw new Error(data.error || 'Thao tác thất bại');
+    return data;
+  };
+
+  const navigateHistory = (offset: number) => {
+    const nextIndex = historyIndex + offset;
+    const nextPath = pathHistory[nextIndex];
+    if (nextPath === undefined) return;
+    historyIndexRef.current = nextIndex;
+    setHistoryIndex(nextIndex);
+    loadFiles(nextPath, token, 'none');
+  };
+
+  const transferFiles = async (operation: 'copy' | 'move', paths: string[]) => {
+    if (!paths.length) return;
+    try {
+      const data = await requestFileApi('/api/files/transfer', {
+        method: 'POST',
+        body: JSON.stringify({ operation, paths, destinationDir: currentPath }),
+      });
+      if (data.results?.some((item: any) => !item.success)) setFileError('Một số mục không thể được xử lý.');
+      if (operation === 'move') setFileClipboard(null);
+      setSelectedPaths([]);
+      await loadFiles(currentPath, token, 'none');
+    } catch (error: any) { setFileError(error.message); }
+  };
+
+  const trashPaths = async (paths: string[]) => {
+    if (!paths.length || !confirm(`Chuyển ${paths.length} mục vào thùng rác?`)) return;
+    try {
+      const data = await requestFileApi('/api/files/trash', { method: 'POST', body: JSON.stringify({ paths }) });
+      if (data.results?.some((item: any) => !item.success)) setFileError('Một số mục không thể chuyển vào thùng rác.');
+      setSelectedPaths([]);
+      await loadFiles(currentPath, token, 'none');
+    } catch (error: any) { setFileError(error.message); }
+  };
+
+  const runRecursiveSearch = async () => {
+    if (!fileSearchQuery.trim()) { setSearchResults(null); return; }
+    try {
+      const data = await requestFileApi(`/api/files/search?path=${encodeURIComponent(currentPath)}&query=${encodeURIComponent(fileSearchQuery.trim())}`);
+      setSearchResults(data.results || []);
+      setSearchTruncated(Boolean(data.truncated));
+    } catch (error: any) { setFileError(error.message); }
+  };
+
+  const uploadFiles = (files: globalThis.File[]) => {
+    if (!token || !files.length) return;
+    setFileLoading(true);
+    setFileError(null);
+    let remaining = files.length;
+    files.forEach((file) => {
+      const key = `${file.name}-${file.size}-${file.lastModified}`;
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${API_URL}/api/files/upload`);
+      xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
+      xhr.setRequestHeader('X-Directory', encodeURIComponent(currentPath));
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) setUploadProgress((progress) => ({ ...progress, [key]: Math.round(event.loaded / event.total * 100) }));
+      };
+      xhr.onerror = () => setFileError(`Upload ${file.name} thất bại`);
+      xhr.onload = () => {
+        if (xhr.status >= 400) {
+          try { setFileError(JSON.parse(xhr.responseText).error || `Upload ${file.name} thất bại`); }
+          catch { setFileError(`Upload ${file.name} thất bại`); }
+        }
+      };
+      xhr.onloadend = () => {
+        setUploadProgress((progress) => { const next = { ...progress }; delete next[key]; return next; });
+        remaining -= 1;
+        if (remaining === 0) { setFileLoading(false); loadFiles(currentPath, token, 'none'); }
+      };
+      xhr.send(file);
+    });
+  };
+
+  const openTrash = async () => {
+    try {
+      const data = await requestFileApi('/api/files/trash');
+      setTrashItems(data.items || []);
+      setSelectedTrashIds([]);
+      setShowTrash(true);
+    } catch (error: any) { setFileError(error.message); }
+  };
+
+  const trashAction = async (action: 'restore' | 'delete' | 'empty', ids: string[] = []) => {
+    try {
+      if (action === 'restore') await requestFileApi('/api/files/trash/restore', { method: 'POST', body: JSON.stringify({ ids }) });
+      if (action === 'delete') await requestFileApi('/api/files/trash', { method: 'DELETE', body: JSON.stringify({ ids }) });
+      if (action === 'empty') await requestFileApi('/api/files/trash/empty', { method: 'DELETE' });
+      await openTrash();
+      await loadFiles(currentPath, token, 'none');
+    } catch (error: any) { setFileError(error.message); }
+  };
 
   const openFile = async (filePath: string) => {
     if (!token) return;
@@ -339,28 +544,6 @@ export default function Home() {
     } catch (error: any) { setFileError(error.message); }
   };
 
-  const uploadFile = async (file: globalThis.File) => {
-    if (!token) return;
-    setFileLoading(true);
-    setFileError(null);
-    try {
-      const res = await fetch(`${API_URL}/api/files/upload`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/octet-stream',
-          'X-File-Name': encodeURIComponent(file.name),
-          'X-Directory': encodeURIComponent(currentPath)
-        },
-        body: file
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Upload thất bại');
-      await loadFiles(currentPath);
-    } catch (error: any) { setFileError(error.message); }
-    finally { setFileLoading(false); }
-  };
-
   const moveOrRename = async (filePath: string) => {
     if (!token) return;
     const currentName = filePath.split('/').pop() || '';
@@ -374,28 +557,6 @@ export default function Home() {
     const data = await res.json();
     if (!data.success) setFileError(data.error || 'Không thể đổi tên');
     else await loadFiles(currentPath);
-  };
-
-  const restoreFromTrash = async () => {
-    if (!token) return;
-    try {
-      const listRes = await fetch(`${API_URL}/api/files/trash`, { headers: { 'Authorization': `Bearer ${token}` } });
-      const list = await listRes.json();
-      if (!list.success) throw new Error(list.error);
-      if (!list.items.length) return setFileError('Thùng rác đang trống.');
-      const choices = list.items.map((item: any, index: number) => `${index + 1}. ${item.originalPath}`).join('\n');
-      const selected = Number(prompt(`Chọn số thứ tự cần khôi phục:\n${choices}`));
-      const item = list.items[selected - 1];
-      if (!item) return;
-      const res = await fetch(`${API_URL}/api/files/trash/restore`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ id: item.id })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error);
-      await loadFiles(currentPath);
-    } catch (error: any) { setFileError(error.message); }
   };
 
   // Password Change State
@@ -582,7 +743,7 @@ export default function Home() {
           setToken(savedToken);
           setIsAuthenticated(true);
         loadSettings(savedToken);
-          loadFiles('', savedToken);
+          loadFiles(getSavedFilePath(), savedToken);
         } else {
           localStorage.removeItem('vps_terminal_token');
           setIsAuthenticated(false);
@@ -620,7 +781,7 @@ export default function Home() {
         setIsAuthenticated(true);
         loadSettings(data.token);
         loadLogs(data.token);
-        loadFiles('', data.token);
+        loadFiles(getSavedFilePath(), data.token);
       } else {
         setError(data.error || 'Authentication failed');
       }
@@ -827,6 +988,8 @@ export default function Home() {
     let term: any = null;
     let fitAddon: any = null;
     let socket: Socket | null = null;
+    let contextMenuHandler: ((event: MouseEvent) => void) | null = null;
+    let terminalElement: HTMLDivElement | null = null;
 
     const setupTerminal = async () => {
       // AnimatePresence can delay mounting the dashboard after authentication.
@@ -846,6 +1009,7 @@ export default function Home() {
       const { FitAddon } = await import('@xterm/addon-fit');
 
       if (!isMounted || !terminalRef.current) return;
+      terminalElement = terminalRef.current;
 
       // Create new terminal instance
       term = new Terminal({
@@ -861,7 +1025,7 @@ export default function Home() {
 
       fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
-      term.open(terminalRef.current);
+      term.open(terminalElement);
       
       // Force instant resize computation
       setTimeout(() => {
@@ -872,6 +1036,40 @@ export default function Home() {
 
       xtermInstance.current = term;
 
+      const copySelection = async () => {
+        const selection = term.getSelection();
+        if (selection) await navigator.clipboard.writeText(selection);
+      };
+
+      const pasteClipboard = async () => {
+        const text = await navigator.clipboard.readText();
+        if (text && socket?.connected) socket.emit('input', text);
+        term.focus();
+      };
+
+      term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+        if (event.type !== 'keydown' || !event.ctrlKey || !event.shiftKey) return true;
+
+        if (event.key.toLowerCase() === 'c') {
+          copySelection().catch(error => console.error('[TERMINAL] Copy failed:', error));
+          return false;
+        }
+
+        if (event.key.toLowerCase() === 'v') {
+          pasteClipboard().catch(error => console.error('[TERMINAL] Paste failed:', error));
+          return false;
+        }
+
+        return true;
+      });
+
+      contextMenuHandler = (event) => {
+        event.preventDefault();
+        const clipboardAction = term.hasSelection() ? copySelection() : pasteClipboard();
+        clipboardAction.catch(error => console.error('[TERMINAL] Clipboard action failed:', error));
+      };
+      terminalElement.addEventListener('contextmenu', contextMenuHandler);
+
       // Welcome Banner in terminal
       term.writeln('\x1b[38;5;86m╔═════════════════════════════════════════════════════════════╗\x1b[0m');
       term.writeln('\x1b[38;5;86m║             SELF-HOSTED WEB VPS SHELL TERMINAL              ║\x1b[0m');
@@ -880,13 +1078,14 @@ export default function Home() {
 
       // Establish socket.io connection with auth token
       socket = io(API_URL || undefined, {
-        auth: { token },
+        auth: { token, cwd: pendingTerminalCwdRef.current || undefined },
         reconnectionDelay: 2000,
         reconnectionDelayMax: 5000,
         timeout: 10000,
       });
 
       socketInstance.current = socket;
+      pendingTerminalCwdRef.current = null;
 
       // Connection state listeners
       socket.on('connect', () => {
@@ -936,7 +1135,7 @@ export default function Home() {
             }
           }
         });
-        resizeObserverRef.current.observe(terminalRef.current);
+        resizeObserverRef.current.observe(terminalElement);
       }
     };
 
@@ -950,6 +1149,9 @@ export default function Home() {
 
     return () => {
       isMounted = false;
+      if (contextMenuHandler && terminalElement) {
+        terminalElement.removeEventListener('contextmenu', contextMenuHandler);
+      }
       if (socket) {
         socket.disconnect();
       }
@@ -1205,7 +1407,7 @@ export default function Home() {
                         <button
                           onClick={() => {
                             setActiveTab('files');
-                            loadFiles();
+                            loadFiles(currentPath || getSavedFilePath());
                           }}
                           className={`w-full flex items-center gap-3 px-3 py-2.5 rounded text-xs font-semibold uppercase tracking-wider transition cursor-pointer ${
                             activeTab === 'files' 
@@ -1319,10 +1521,11 @@ export default function Home() {
                           <div 
                             ref={terminalRef} 
                             className="w-full h-full [&_.xterm-viewport]:!overflow-y-auto" 
+                            title="Chuột phải: sao chép vùng chọn hoặc dán | Ctrl+Shift+C / Ctrl+Shift+V"
                           />
                         </div>
                         <div className="mt-4 flex flex-col sm:flex-row items-start sm:items-center justify-between text-[11px] text-slate-500 font-mono px-1 gap-2">
-                          <span className="text-emerald-500/80 font-semibold">[HỆ THỐNG] Luồng Terminal đang hoạt động qua kết nối node-pty bảo mật</span>
+                          <span className="text-emerald-500/80 font-semibold">[HỆ THỐNG] Chuột phải: sao chép vùng chọn hoặc dán | Ctrl+Shift+C / Ctrl+Shift+V</span>
                           <div className="flex items-center gap-3 flex-wrap">
                             <label className="flex items-center gap-1.5 select-none cursor-pointer text-slate-400 hover:text-slate-300 transition-colors" id="label-autoscroll">
                               <input
@@ -1736,10 +1939,10 @@ export default function Home() {
                               <input
                                 ref={uploadInputRef}
                                 type="file"
+                                multiple
                                 className="hidden"
                                 onChange={(event) => {
-                                  const file = event.target.files?.[0];
-                                  if (file) uploadFile(file);
+                                  uploadFiles(Array.from(event.target.files || []));
                                   event.target.value = '';
                                 }}
                               />
@@ -1767,7 +1970,7 @@ export default function Home() {
                                 <span>Upload</span>
                               </button>
                               <button
-                                onClick={restoreFromTrash}
+                                onClick={openTrash}
                                 className="flex items-center gap-1.5 px-3 py-1.5 bg-[#111116] hover:bg-[#1a1a24] text-xs font-semibold text-slate-300 border border-white/10 rounded transition cursor-pointer"
                               >
                                 <History className="w-3.5 h-3.5" />
@@ -1796,6 +1999,11 @@ export default function Home() {
                               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                               <span>{fileError}</span>
                               <button onClick={() => setFileError(null)} className="ml-auto text-red-400 hover:text-white font-bold">X</button>
+                            </div>
+                          )}
+                          {Object.keys(uploadProgress).length > 0 && (
+                            <div className="space-y-1 rounded border border-emerald-500/20 bg-emerald-500/5 p-3 text-[11px] font-mono">
+                              {Object.entries(uploadProgress).map(([name, progress]) => <div key={name} className="flex gap-3"><span className="flex-1 truncate">{name.split('-').slice(0, -2).join('-')}</span><span>{progress}%</span></div>)}
                             </div>
                           )}
 
@@ -1862,9 +2070,18 @@ export default function Home() {
                           {/* Breadcrumb & Search Bar */}
                           <div className="flex flex-col md:flex-row gap-3 items-stretch md:items-center">
                             {/* Breadcrumb Path Bar */}
-                            <div className="flex-1 flex items-center gap-2 px-4 py-2.5 bg-[#0d0d12] border border-white/10 rounded-lg text-xs font-mono text-slate-400 min-w-0">
+                            <div className="flex-1 flex items-center gap-1 px-2 py-2 bg-[#0d0d12] border border-white/10 rounded-lg text-xs font-mono text-slate-400 min-w-0">
+                              <button onClick={() => navigateHistory(-1)} disabled={historyIndex <= 0} className="p-1 disabled:opacity-30"><ArrowLeft className="w-3.5 h-3.5" /></button>
+                              <button onClick={() => navigateHistory(1)} disabled={historyIndex >= pathHistory.length - 1} className="p-1 disabled:opacity-30"><ChevronRight className="w-3.5 h-3.5" /></button>
                               <span className="text-slate-500 uppercase tracking-widest shrink-0">Đường dẫn:</span>
-                              <span className="text-white bg-white/5 px-2 py-0.5 rounded select-all break-all truncate" title={currentPath || '/'}>/{currentPath}</span>
+                              <input value={pathInput} onChange={(event) => setPathInput(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && loadFiles(pathInput)} className="min-w-24 flex-1 bg-white/5 px-2 py-1 text-white outline-none focus:ring-1 focus:ring-blue-500" />
+                              <button
+                                onClick={() => toggleFileBookmark(currentPath)}
+                                className={`shrink-0 p-1.5 rounded border transition-colors cursor-pointer ${fileBookmarks.some((item) => item.path === currentPath) ? 'text-amber-400 bg-amber-500/10 border-amber-500/30' : 'text-slate-500 hover:text-amber-400 border-white/10'}`}
+                                title="Ghim hoặc bỏ ghim đường dẫn"
+                              >
+                                {fileBookmarks.some((item) => item.path === currentPath) ? <BookmarkCheck className="w-3.5 h-3.5" /> : <Bookmark className="w-3.5 h-3.5" />}
+                              </button>
                             </div>
 
                             {/* Search Input Bar */}
@@ -1876,7 +2093,8 @@ export default function Home() {
                                 <input
                                   type="text"
                                   value={fileSearchQuery}
-                                  onChange={(e) => setFileSearchQuery(e.target.value)}
+                                  onChange={(e) => { setFileSearchQuery(e.target.value); if (!e.target.value) setSearchResults(null); }}
+                                  onKeyDown={(event) => event.key === 'Enter' && recursiveSearch && runRecursiveSearch()}
                                   placeholder="Tìm kiếm tệp, thư mục..."
                                   className="w-full pl-9 pr-8 py-2.5 bg-[#0d0d12] border border-white/10 rounded-lg text-xs font-mono text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition"
                                 />
@@ -1891,6 +2109,48 @@ export default function Home() {
                               </div>
                             )}
                           </div>
+                          <div className="flex items-center gap-1 overflow-x-auto text-[11px] font-mono text-slate-500">
+                            <button onClick={() => loadFiles('/')} className="px-1.5 py-1 hover:text-blue-400">/</button>
+                            {currentPath.replace(/\\/g, '/').split('/').filter(Boolean).map((segment, index, segments) => {
+                              const prefix = currentPath.startsWith('/') ? '/' : '';
+                              const path = prefix + segments.slice(0, index + 1).join('/');
+                              return <span key={`${path}-${index}`} className="flex items-center gap-1"><ChevronRight className="w-3 h-3" /><button onClick={() => loadFiles(path)} className="whitespace-nowrap px-1 py-1 hover:text-blue-400">{segment}</button></span>;
+                            })}
+                          </div>
+                          {!viewingFile && <label className="flex items-center gap-2 text-[11px] text-slate-400"><input type="checkbox" checked={recursiveSearch} onChange={(e) => { setRecursiveSearch(e.target.checked); setSearchResults(null); }} /> Tìm đệ quy (Enter để tìm){searchTruncated && <span className="text-amber-400">Kết quả đã bị giới hạn</span>}</label>}
+
+                          {!viewingFile && selectedPaths.length > 0 && <div className="flex flex-wrap items-center gap-2 rounded border border-blue-500/20 bg-blue-500/5 p-2 text-xs">
+                            <span className="mr-auto">Đã chọn {selectedPaths.length} mục</span>
+                            <button onClick={() => setFileClipboard({ operation: 'copy', paths: selectedPaths })} className="px-2 py-1 bg-white/10 rounded">Sao chép</button>
+                            <button onClick={() => setFileClipboard({ operation: 'move', paths: selectedPaths })} className="px-2 py-1 bg-white/10 rounded">Cắt</button>
+                            <button onClick={() => trashPaths(selectedPaths)} className="px-2 py-1 bg-red-500/20 text-red-300 rounded">Thùng rác</button>
+                          </div>}
+                          {!viewingFile && fileClipboard && <button onClick={() => transferFiles(fileClipboard.operation, fileClipboard.paths)} className="text-xs px-3 py-2 rounded bg-emerald-600 text-white">Dán {fileClipboard.paths.length} mục vào đây</button>}
+
+                          {fileBookmarks.length > 0 && (
+                            <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                              <span className="text-[10px] uppercase tracking-widest text-slate-500 font-mono shrink-0">Đã ghim:</span>
+                              {fileBookmarks.map((bookmark) => (
+                                <div key={bookmark.path} className="flex items-center shrink-0 rounded border border-amber-500/20 bg-amber-500/5 overflow-hidden">
+                                  <button
+                                    onClick={() => loadFiles(bookmark.path)}
+                                    className="max-w-64 truncate px-2.5 py-1.5 text-[11px] font-mono text-amber-300 hover:bg-amber-500/10 cursor-pointer"
+                                    title={`Mở ${bookmark.path || '/'}`}
+                                  >
+                                    {bookmark.label}
+                                  </button>
+                                  <button onClick={() => { const label = prompt('Nhãn bookmark:', bookmark.label)?.trim(); if (label) setFileBookmarks((items) => { const next = items.map((item) => item.path === bookmark.path ? { ...item, label } : item); localStorage.setItem(FILE_BOOKMARKS_KEY, JSON.stringify(next)); return next; }); }} className="p-1.5 border-l border-amber-500/20"><Edit className="w-3 h-3" /></button>
+                                  <button
+                                    onClick={() => toggleFileBookmark(bookmark.path)}
+                                    className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-red-500/10 border-l border-amber-500/20 cursor-pointer"
+                                    title="Bỏ ghim"
+                                  >
+                                    <X className="w-3 h-3" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
 
                           {/* Conditional View: File Editor OR Directory List */}
                           {viewingFile ? (
@@ -1903,7 +2163,7 @@ export default function Home() {
                                     {viewingFile.replace(/\\/g, '/').split('/').pop()}
                                   </span>
                                   <span className="text-[10px] uppercase font-bold px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-400 border border-purple-500/20">
-                                    {isEditingFile ? 'Đang chỉnh sửa' : 'Chỉ xem'}
+                                    {isEditingFile ? (fileContent !== editorOriginal ? 'Chưa lưu' : 'Đang chỉnh sửa') : 'Chỉ xem'}
                                   </span>
                                 </div>
                                 <div className="flex gap-2">
@@ -1936,7 +2196,7 @@ export default function Home() {
                                     </button>
                                   )}
                                   <button
-                                    onClick={() => { setViewingFile(null); setFileContent(null); }}
+                                    onClick={() => { if (fileContent !== editorOriginal && !confirm('Bỏ các thay đổi chưa lưu?')) return; setViewingFile(null); setFileContent(null); }}
                                     className="flex items-center gap-1.5 px-3 py-1.5 bg-[#111116] hover:bg-[#1c1c24] text-xs font-semibold text-slate-400 border border-white/10 rounded transition cursor-pointer"
                                   >
                                     <ArrowLeft className="w-3.5 h-3.5" />
@@ -1947,24 +2207,44 @@ export default function Home() {
 
                               {/* Editor Content */}
                               <div className="p-4 bg-black">
+                                <div className="flex flex-wrap gap-2 mb-2">
+                                  <input value={editorFind} onChange={(e) => setEditorFind(e.target.value)} placeholder="Tìm" className="bg-[#111116] border border-white/10 px-2 py-1 text-xs rounded" />
+                                  <input value={editorReplace} onChange={(e) => setEditorReplace(e.target.value)} placeholder="Thay thế" className="bg-[#111116] border border-white/10 px-2 py-1 text-xs rounded" />
+                                  <button onClick={() => { const area = editorRef.current; if (!area || !editorFind) return; const start = (fileContent || '').indexOf(editorFind, area.selectionEnd); const index = start < 0 ? (fileContent || '').indexOf(editorFind) : start; if (index >= 0) { area.focus(); area.setSelectionRange(index, index + editorFind.length); } }} className="px-2 py-1 text-xs bg-white/10 rounded">Tìm tiếp</button>
+                                  <button disabled={!isEditingFile} onClick={() => setFileContent((fileContent || '').split(editorFind).join(editorReplace))} className="px-2 py-1 text-xs bg-white/10 rounded disabled:opacity-30">Thay tất cả</button>
+                                </div>
                                 <textarea
+                                  ref={editorRef}
                                   value={fileContent || ''}
                                   onChange={(e) => setFileContent(e.target.value)}
+                                  onSelect={(e) => { const value = e.currentTarget.value.slice(0, e.currentTarget.selectionStart); const lines = value.split('\n'); setEditorPosition({ line: lines.length, char: lines[lines.length - 1].length + 1 }); }}
+                                  onKeyDown={(e) => {
+                                    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveEditedFile(); }
+                                    if (isEditingFile && e.key === 'Tab') { e.preventDefault(); const area = e.currentTarget; const start = area.selectionStart; const next = `${area.value.slice(0, start)}  ${area.value.slice(area.selectionEnd)}`; setFileContent(next); requestAnimationFrame(() => area.setSelectionRange(start + 2, start + 2)); }
+                                  }}
                                   readOnly={!isEditingFile}
                                   className="w-full h-96 bg-black text-slate-300 font-mono text-xs focus:outline-none resize-y p-3 rounded border border-white/5 focus:border-white/20 select-all leading-relaxed"
                                   spellCheck={false}
                                   placeholder="Nội dung tệp rỗng..."
                                 />
+                                <div className="mt-2 text-right text-[10px] font-mono text-slate-500">Dòng {editorPosition.line}, ký tự {editorPosition.char} | {(fileContent || '').length} ký tự | Ctrl+S để lưu</div>
                               </div>
                             </div>
                           ) : (
                             /* Directory List */
-                            <div className="rounded-xl border border-white/10 bg-[#0d0d12]/60 overflow-hidden shadow-2xl">
+                            <div className="rounded-xl border border-white/10 bg-[#0d0d12]/60 overflow-hidden shadow-2xl" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); uploadFiles(Array.from(event.dataTransfer.files)); }}>
+                              <div className="flex flex-wrap gap-2 p-2 border-b border-white/10 text-[11px]">
+                                <span className="text-slate-500 mr-auto">Kéo nhiều tệp từ máy tính vào đây để upload</span>
+                                <button onClick={() => { pendingTerminalCwdRef.current = currentPath; setActiveTab('terminal'); }} className="px-2 py-1 bg-white/5 rounded">Mở Terminal tại đây</button>
+                                <button onClick={async () => { const name = prompt('Tên archive (gồm phần mở rộng):', 'archive.zip')?.trim(); if (!name) return; const format = name.endsWith('.tar.gz') ? 'tar.gz' : name.split('.').pop() || 'zip'; try { await requestFileApi('/api/files/archive/create', { method: 'POST', body: JSON.stringify({ paths: selectedPaths.length ? selectedPaths : [currentPath], destinationDir: currentPath, name, format }) }); await loadFiles(currentPath, token, 'none'); } catch (error: any) { setFileError(error.message); } }} className="px-2 py-1 bg-white/5 rounded">Tạo archive</button>
+                                <button onClick={async () => { const name = prompt('Tên symlink mới:', 'link')?.trim(); const targetPath = name && prompt('Đường dẫn đích:')?.trim(); if (!name || !targetPath) return; try { await requestFileApi('/api/files/symlink', { method: 'POST', body: JSON.stringify({ name, targetPath, destinationDir: currentPath }) }); await loadFiles(currentPath, token, 'none'); } catch (error: any) { setFileError(error.message); } }} className="px-2 py-1 bg-white/5 rounded">Tạo symlink</button>
+                              </div>
                               <div className="overflow-x-auto">
                                 <table className="w-full text-left border-collapse text-sm">
                                   <thead>
                                     <tr className="bg-[#111116]/80 border-b border-white/10 text-[10px] text-slate-500 font-mono uppercase tracking-widest">
-                                      <th className="py-3.5 px-5 font-semibold">Tên</th>
+                                      <th className="py-3.5 pl-4 font-semibold"><input type="checkbox" checked={filteredFiles.length > 0 && filteredFiles.every((item) => selectedPaths.includes(item.path))} onChange={(event) => setSelectedPaths(event.target.checked ? filteredFiles.map((item) => item.path) : [])} aria-label="Chọn tất cả" /></th>
+                                      <th className="py-3.5 px-3 font-semibold">Tên</th>
                                       <th className="py-3.5 px-5 font-semibold hidden sm:table-cell">Kích thước</th>
                                       <th className="py-3.5 px-5 font-semibold hidden md:table-cell">Lần cuối sửa</th>
                                       <th className="py-3.5 px-5 font-semibold text-right">Thao tác</th>
@@ -1983,7 +2263,8 @@ export default function Home() {
                                         return (
                                           <tr key={index} className="hover:bg-white/[0.02] transition-colors group">
                                             {/* File / Folder Name Clickable */}
-                                            <td className="py-3.5 px-5">
+                                            <td className="py-3.5 pl-4"><input type="checkbox" checked={selectedPaths.includes(fullItemPath)} onChange={() => setSelectedPaths((items) => items.includes(fullItemPath) ? items.filter((item) => item !== fullItemPath) : [...items, fullItemPath])} aria-label={`Chọn ${file.name}`} /></td>
+                                            <td className="py-3.5 px-3">
                                               {file.isDirectory ? (
                                                 <button
                                                   onClick={() => loadFiles(fullItemPath)}
@@ -2062,8 +2343,10 @@ export default function Home() {
                                                       <Edit className="w-3.5 h-3.5" />
                                                     </button>
                                                   </>
-                                                )}
-                                                <button
+                                                 )}
+                                                 <button onClick={async () => { try { const data = await requestFileApi(`/api/files/metadata?path=${encodeURIComponent(fullItemPath)}`); setMetadata({ path: fullItemPath, mode: String(data.mode ?? data.metadata?.mode ?? ''), uid: Number(data.uid ?? data.metadata?.uid ?? 0), gid: Number(data.gid ?? data.metadata?.gid ?? 0) }); } catch (error: any) { setFileError(error.message); } }} className="p-1.5 rounded bg-white/5 text-slate-400 border border-white/10" title="Quyền"><Lock className="w-3.5 h-3.5" /></button>
+                                                 {!file.isDirectory && /\.(zip|tar|tgz|tar\.gz)$/i.test(file.name) && <button onClick={async () => { const destinationDir = prompt('Giải nén vào:', currentPath)?.trim(); if (!destinationDir) return; try { await requestFileApi('/api/files/archive/extract', { method: 'POST', body: JSON.stringify({ archivePath: fullItemPath, destinationDir }) }); await loadFiles(currentPath, token, 'none'); } catch (error: any) { setFileError(error.message); } }} className="p-1.5 rounded bg-cyan-500/5 text-cyan-400 border border-cyan-500/10" title="Giải nén"><Download className="w-3.5 h-3.5" /></button>}
+                                                 <button
                                                   onClick={() => moveOrRename(fullItemPath)}
                                                   className="p-1.5 rounded bg-amber-500/5 hover:bg-amber-500/20 text-amber-400 border border-amber-500/10 cursor-pointer transition-colors"
                                                   title="Đổi tên"
@@ -2091,6 +2374,18 @@ export default function Home() {
                         </div>
                       </motion.div>
                     )}
+                    {metadata && <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"><div className="w-full max-w-md rounded-xl border border-white/10 bg-[#111116] p-5 space-y-4">
+                      <div className="flex"><h4 className="font-bold text-white">Quyền và sở hữu</h4><button onClick={() => setMetadata(null)} className="ml-auto"><X className="w-4 h-4" /></button></div>
+                      <p className="text-xs font-mono truncate">{metadata.path}</p>
+                      <label className="block text-xs">Mode<input value={metadata.mode} onChange={(e) => setMetadata({ ...metadata, mode: e.target.value })} className="mt-1 w-full bg-black border border-white/10 rounded p-2 font-mono" /></label>
+                      <div className="grid grid-cols-2 gap-3"><label className="text-xs">UID<input type="number" value={metadata.uid} onChange={(e) => setMetadata({ ...metadata, uid: Number(e.target.value) })} className="mt-1 w-full bg-black border border-white/10 rounded p-2" /></label><label className="text-xs">GID<input type="number" value={metadata.gid} onChange={(e) => setMetadata({ ...metadata, gid: Number(e.target.value) })} className="mt-1 w-full bg-black border border-white/10 rounded p-2" /></label></div>
+                      <button onClick={async () => { try { await requestFileApi('/api/files/metadata', { method: 'PATCH', body: JSON.stringify(metadata) }); setMetadata(null); await loadFiles(currentPath, token, 'none'); } catch (error: any) { setFileError(error.message); } }} className="w-full bg-blue-600 rounded py-2 text-sm text-white">Lưu quyền</button>
+                    </div></div>}
+                    {showTrash && <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"><div className="w-full max-w-2xl max-h-[80vh] overflow-auto rounded-xl border border-white/10 bg-[#111116] p-5 space-y-4">
+                      <div className="flex items-center"><h4 className="font-bold text-white">Thùng rác</h4><button onClick={() => setShowTrash(false)} className="ml-auto"><X className="w-4 h-4" /></button></div>
+                      {trashItems.length === 0 ? <p className="text-sm text-slate-500">Thùng rác trống.</p> : trashItems.map((item) => <label key={item.id} className="flex gap-3 p-3 border border-white/5 rounded text-xs"><input type="checkbox" checked={selectedTrashIds.includes(item.id)} onChange={() => setSelectedTrashIds((ids) => ids.includes(item.id) ? ids.filter((id) => id !== item.id) : [...ids, item.id])} /><span className="flex-1 min-w-0"><span className="block text-white truncate">{item.name || item.originalPath.split('/').pop()}</span><span className="text-slate-500 font-mono break-all">{item.originalPath}</span></span><span className="text-slate-500">{item.deletedAt ? new Date(item.deletedAt).toLocaleString() : ''}</span></label>)}
+                      <div className="flex flex-wrap gap-2"><button disabled={!selectedTrashIds.length} onClick={() => trashAction('restore', selectedTrashIds)} className="px-3 py-2 bg-emerald-600 rounded text-xs disabled:opacity-30">Khôi phục</button><button disabled={!selectedTrashIds.length} onClick={() => confirm('Xóa vĩnh viễn các mục đã chọn?') && trashAction('delete', selectedTrashIds)} className="px-3 py-2 bg-red-600 rounded text-xs disabled:opacity-30">Xóa vĩnh viễn</button><button onClick={() => confirm('Dọn sạch toàn bộ thùng rác?') && trashAction('empty')} className="ml-auto px-3 py-2 bg-red-950 text-red-300 rounded text-xs">Dọn sạch</button></div>
+                    </div></div>}
                   </AnimatePresence>
                 </div>
               </main>
