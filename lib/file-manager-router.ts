@@ -54,8 +54,10 @@ export function createFileManagerRouter({ hasSession, log }: Options) {
     if (typeof userPath !== 'string' && userPath !== undefined) throw httpError(400, 'Đường dẫn không hợp lệ');
     const normalized = typeof userPath === 'string' ? userPath.replace(/^[/\\]+/, '') : '';
     const target = path.resolve(root, normalized);
-    if (target !== root && !target.startsWith(root + path.sep)) throw httpError(403, 'Đường dẫn nằm ngoài thư mục quản lý');
-    if (!allowTrash && (target === trashRoot || target.startsWith(trashRoot + path.sep))) throw httpError(403, 'Không thể truy cập trực tiếp thùng rác');
+    const relativeTarget = path.relative(root, target);
+    if (relativeTarget.startsWith('..' + path.sep) || relativeTarget === '..' || path.isAbsolute(relativeTarget)) throw httpError(403, 'Đường dẫn nằm ngoài thư mục quản lý');
+    const relativeTrash = path.relative(trashRoot, target);
+    if (!allowTrash && (relativeTrash === '' || (!relativeTrash.startsWith('..' + path.sep) && relativeTrash !== '..' && !path.isAbsolute(relativeTrash)))) throw httpError(403, 'Không thể truy cập trực tiếp thùng rác');
     return target;
   };
   const fail = (res: Response, error: any) => {
