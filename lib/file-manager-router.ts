@@ -15,6 +15,7 @@ const MAX_SEARCH_ENTRIES = 20_000;
 type Options = {
   hasSession: (token: string) => boolean;
   log: (event: string, ip: string) => Promise<unknown>;
+  rootDir?: string;
 };
 
 type TrashMetadata = { originalPath: string; deletedAt: string };
@@ -39,10 +40,10 @@ function modeInfo(mode: number) {
   };
 }
 
-export function createFileManagerRouter({ hasSession, log }: Options) {
+export function createFileManagerRouter({ hasSession, log, rootDir }: Options) {
   const router = Router();
-  const root = path.parse(process.cwd()).root;
-  const trashRoot = path.join(process.cwd(), '.terminal-trash');
+  const root = path.resolve(rootDir || path.parse(process.cwd()).root);
+  const trashRoot = path.join(root, '.terminal-trash');
 
   const authenticate = (req: Request) => {
     const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');

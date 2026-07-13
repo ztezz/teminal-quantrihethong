@@ -13,6 +13,7 @@ const dev = process.env.NODE_ENV !== 'production';
 const backendOnly = process.argv.includes('--backend');
 const nextApp = backendOnly ? null : next({ dev });
 const handle = nextApp?.getRequestHandler();
+const FILE_MANAGER_ROOT = path.resolve(process.env.FILE_MANAGER_ROOT || path.parse(process.cwd()).root);
 
 // Pure JavaScript File-Based Database to bypass binary sqlite3 GLIBC errors
 const DB_FILE = path.join(process.cwd(), 'terminal_database.json');
@@ -510,7 +511,8 @@ async function startServer() {
 
   expressApp.use('/api/files', createFileManagerRouter({
     hasSession,
-    log: (event, ip) => db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', event, ip)
+    log: (event, ip) => db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', event, ip),
+    rootDir: FILE_MANAGER_ROOT
   }));
 
   // --- Socket.io Terminal Implementation ---
@@ -537,10 +539,10 @@ async function startServer() {
     let terminalCwd = process.cwd();
     const requestedCwd = socket.handshake.auth?.cwd ?? socket.handshake.query?.cwd;
     if (typeof requestedCwd === 'string') {
-      const filesystemRoot = path.parse(process.cwd()).root;
-      const candidate = path.resolve(filesystemRoot, requestedCwd.replace(/^[/\\]+/, ''));
+      const candidate = path.resolve(FILE_MANAGER_ROOT, requestedCwd.replace(/^[/\\]+/, ''));
+      const relativeCandidate = path.relative(FILE_MANAGER_ROOT, candidate);
       try {
-        if ((candidate === filesystemRoot || candidate.startsWith(filesystemRoot + path.sep)) && (await fs.promises.stat(candidate)).isDirectory()) terminalCwd = candidate;
+        if (!relativeCandidate.startsWith('..' + path.sep) && relativeCandidate !== '..' && !path.isAbsolute(relativeCandidate) && (await fs.promises.stat(candidate)).isDirectory()) terminalCwd = candidate;
         else throw new Error('CWD is not a directory');
       } catch {
         socket.emit('output', '\r\n\x1b[33m[SYSTEM] Requested working directory is invalid; using the server default.\x1b[0m\r\n');
