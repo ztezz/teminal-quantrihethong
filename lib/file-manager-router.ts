@@ -42,6 +42,7 @@ const OFFICE_EXTENSIONS = new Set(['.doc', '.docx', '.xls', '.xlsx', '.ppt', '.p
 
 type Options = {
   hasSession: (token: string) => boolean;
+  consumePreviewTicket: (ticket: string, filePath: string) => boolean;
   log: (event: string, ip: string) => Promise<unknown>;
   rootDir?: string;
   trashDir?: string;
@@ -69,13 +70,14 @@ function modeInfo(mode: number) {
   };
 }
 
-export function createFileManagerRouter({ hasSession, log, rootDir, trashDir }: Options) {
+export function createFileManagerRouter({ hasSession, consumePreviewTicket, log, rootDir, trashDir }: Options) {
   const router = Router();
   const root = path.resolve(rootDir || process.cwd());
   const trashRoot = path.resolve(trashDir || path.join(process.cwd(), '.terminal-trash'));
 
   const authenticate = (req: Request) => {
-    const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    const encodedToken = String(req.headers.cookie || '').split(';').map(cookie => cookie.trim().split('=')).find(([name]) => name === 'terminal_session')?.slice(1).join('=') || '';
+    const token = encodedToken ? decodeURIComponent(encodedToken) : '';
     return Boolean(token && hasSession(token));
   };
   const relative = (absolutePath: string) => path.relative(root, absolutePath).split(path.sep).join('/');
@@ -150,8 +152,9 @@ export function createFileManagerRouter({ hasSession, log, rootDir, trashDir }: 
 
   router.use((req, res, next) => {
     const acceptsQueryToken = req.path === '/media' || req.path === '/office-preview';
-    const mediaToken = acceptsQueryToken && typeof req.query.token === 'string' ? req.query.token : '';
-    return authenticate(req) || Boolean(mediaToken && hasSession(mediaToken)) ? next() : res.status(401).json({ success: false, code: 'UNAUTHORIZED', error: 'Unauthorized' });
+    const ticket = acceptsQueryToken && typeof req.query.ticket === 'string' ? req.query.ticket : '';
+    const filePath = acceptsQueryToken && typeof req.query.path === 'string' ? req.query.path : '';
+    return authenticate(req) || Boolean(ticket && consumePreviewTicket(ticket, filePath)) ? next() : res.status(401).json({ success: false, code: 'UNAUTHORIZED', error: 'Unauthorized' });
   });
 
   router.get('/', async (req, res) => {

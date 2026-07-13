@@ -153,7 +153,8 @@ function getFileIcon(fileName: string) {
 export default function Home() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [password, setPassword] = useState('');
-  const [token, setToken] = useState<string | null>(null);
+  const [sessionReady, setSessionReady] = useState(false);
+  const [previewTicket, setPreviewTicket] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -233,22 +234,21 @@ export default function Home() {
     file.name.toLowerCase().includes(fileSearchQuery.toLowerCase())
   );
 
-  const loadFiles = useCallback(async (dirPath?: string, authToken = token, historyMode: 'push' | 'replace' | 'none' = 'push', fallbackToRoot = false) => {
-    const auth = authToken || token;
-    if (!auth) return;
+  const loadFiles = useCallback(async (dirPath?: string, _authToken?: string | null, historyMode: 'push' | 'replace' | 'none' = 'push', fallbackToRoot = false) => {
+    if (!sessionReady) return;
     setFileLoading(true);
     setFileError(null);
     setFileSearchQuery('');
     try {
       const url = dirPath ? `${API_URL}/api/files?path=${encodeURIComponent(dirPath)}` : `${API_URL}/api/files`;
       const res = await fetch(url, {
-        headers: { 'Authorization': `Bearer ${auth}` }
+        credentials: 'include'
       });
       let data = await res.json();
       if (!data.success && data.code === 'ENOENT' && dirPath && fallbackToRoot) {
         localStorage.removeItem(LAST_FILE_PATH_KEY);
         const rootResponse = await fetch(`${API_URL}/api/files`, {
-          headers: { 'Authorization': `Bearer ${auth}` }
+          credentials: 'include'
         });
         data = await rootResponse.json();
         historyMode = 'replace';
@@ -284,7 +284,7 @@ export default function Home() {
     } finally {
       setFileLoading(false);
     }
-  }, [token]);
+  }, [sessionReady]);
 
   const toggleFileBookmark = (bookmarkPath: string) => {
     setFileBookmarks((current) => {
@@ -297,12 +297,12 @@ export default function Home() {
   };
 
   const requestFileApi = async (endpoint: string, options: RequestInit = {}) => {
-    if (!token) throw new Error('Phiên đăng nhập đã hết hạn');
+    if (!sessionReady) throw new Error('Phiên đăng nhập đã hết hạn');
     const response = await fetch(`${API_URL}${endpoint}`, {
       ...options,
+      credentials: 'include',
       headers: {
         ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-        'Authorization': `Bearer ${token}`,
         ...options.headers,
       },
     });
@@ -317,7 +317,7 @@ export default function Home() {
     if (nextPath === undefined) return;
     historyIndexRef.current = nextIndex;
     setHistoryIndex(nextIndex);
-    loadFiles(nextPath, token, 'none');
+    loadFiles(nextPath, null, 'none');
   };
 
   const transferFiles = async (operation: 'copy' | 'move', paths: string[]) => {
@@ -330,7 +330,7 @@ export default function Home() {
       if (data.results?.some((item: any) => !item.success)) setFileError('Một số mục không thể được xử lý.');
       if (operation === 'move') setFileClipboard(null);
       setSelectedPaths([]);
-      await loadFiles(currentPath, token, 'none');
+      await loadFiles(currentPath, null, 'none');
     } catch (error: any) { setFileError(error.message); }
   };
 
@@ -340,7 +340,7 @@ export default function Home() {
       const data = await requestFileApi('/api/files/trash', { method: 'POST', body: JSON.stringify({ paths }) });
       if (data.results?.some((item: any) => !item.success)) setFileError('Một số mục không thể chuyển vào thùng rác.');
       setSelectedPaths([]);
-      await loadFiles(currentPath, token, 'none');
+      await loadFiles(currentPath, null, 'none');
     } catch (error: any) { setFileError(error.message); }
   };
 
@@ -354,7 +354,7 @@ export default function Home() {
   };
 
   const uploadFiles = (files: globalThis.File[]) => {
-    if (!token || !files.length) return;
+    if (!sessionReady || !files.length) return;
     setFileLoading(true);
     setFileError(null);
     let remaining = files.length;
@@ -362,7 +362,7 @@ export default function Home() {
       const key = `${file.name}-${file.size}-${file.lastModified}`;
       const xhr = new XMLHttpRequest();
       xhr.open('POST', `${API_URL}/api/files/upload`);
-      xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      xhr.withCredentials = true;
       xhr.setRequestHeader('Content-Type', 'application/octet-stream');
       xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
       xhr.setRequestHeader('X-Directory', encodeURIComponent(currentPath));
@@ -379,7 +379,7 @@ export default function Home() {
       xhr.onloadend = () => {
         setUploadProgress((progress) => { const next = { ...progress }; delete next[key]; return next; });
         remaining -= 1;
-        if (remaining === 0) { setFileLoading(false); loadFiles(currentPath, token, 'none'); }
+        if (remaining === 0) { setFileLoading(false); loadFiles(currentPath, null, 'none'); }
       };
       xhr.send(file);
     });
@@ -400,13 +400,15 @@ export default function Home() {
       if (action === 'delete') await requestFileApi('/api/files/trash', { method: 'DELETE', body: JSON.stringify({ ids }) });
       if (action === 'empty') await requestFileApi('/api/files/trash/empty', { method: 'DELETE' });
       await openTrash();
-      await loadFiles(currentPath, token, 'none');
+      await loadFiles(currentPath, null, 'none');
     } catch (error: any) { setFileError(error.message); }
   };
 
   const openFile = async (filePath: string) => {
-    if (!token) return;
+    if (!sessionReady) return;
     if (previewKind(filePath) !== 'text') {
+      const ticketData = await requestFileApi('/api/auth/preview-ticket', { method: 'POST', body: JSON.stringify({ path: filePath }) });
+      setPreviewTicket(ticketData.ticket);
       setViewingFile(filePath);
       setFileContent(null);
       setFileMtime(null);
@@ -418,7 +420,7 @@ export default function Home() {
     setFileError(null);
     try {
       const res = await fetch(`${API_URL}/api/files/read?path=${encodeURIComponent(filePath)}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
+        credentials: 'include'
       });
       const data = await res.json();
       if (data.success) {
@@ -443,16 +445,16 @@ export default function Home() {
   };
 
   const saveEditedFile = async () => {
-    if (!token || !viewingFile || fileContent === null) return;
+    if (!sessionReady || !viewingFile || fileContent === null) return;
     setFileLoading(true);
     setFileError(null);
     try {
       const res = await fetch(`${API_URL}/api/files/write`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
+          'Content-Type': 'application/json'
         },
+        credentials: 'include',
         body: JSON.stringify({ filePath: viewingFile, content: fileContent, expectedMtime: fileMtime })
       });
       const data = await res.json();
@@ -470,7 +472,7 @@ export default function Home() {
   };
 
   const deleteFileOrFolder = async (filePath: string) => {
-    if (!token) return;
+    if (!sessionReady) return;
     const itemName = filePath.replace(/\\/g, '/').split('/').pop() || 'tệp/thư mục';
     if (!confirm(`Bạn có chắc chắn muốn xóa "${itemName}" không?`)) return;
     setFileLoading(true);
@@ -478,7 +480,7 @@ export default function Home() {
     try {
       const res = await fetch(`${API_URL}/api/files?path=${encodeURIComponent(filePath)}`, {
         method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
+        credentials: 'include'
       });
       const data = await res.json();
       if (data.success) {
@@ -498,16 +500,16 @@ export default function Home() {
   };
 
   const createNewDir = async () => {
-    if (!token || !newDirName.trim()) return;
+    if (!sessionReady || !newDirName.trim()) return;
     setFileLoading(true);
     setFileError(null);
     try {
       const res = await fetch(`${API_URL}/api/files/mkdir`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
+          'Content-Type': 'application/json'
         },
+        credentials: 'include',
         body: JSON.stringify({ dirPath: currentPath, name: newDirName.trim() })
       });
       const data = await res.json();
@@ -526,16 +528,16 @@ export default function Home() {
   };
 
   const createNewFile = async () => {
-    if (!token || !newFileName.trim()) return;
+    if (!sessionReady || !newFileName.trim()) return;
     setFileLoading(true);
     setFileError(null);
     try {
       const res = await fetch(`${API_URL}/api/files/create`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
+          'Content-Type': 'application/json'
         },
+        credentials: 'include',
         body: JSON.stringify({ dirPath: currentPath, name: newFileName.trim() })
       });
       const data = await res.json();
@@ -555,11 +557,11 @@ export default function Home() {
   };
 
   const downloadFile = async (filePath: string) => {
-    if (!token) return;
+    if (!sessionReady) return;
     setFileError(null);
     try {
       const res = await fetch(`${API_URL}/api/files/download?path=${encodeURIComponent(filePath)}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
+        credentials: 'include'
       });
       if (!res.ok) throw new Error((await res.json()).error || 'Không thể tải tệp');
       const url = URL.createObjectURL(await res.blob());
@@ -572,13 +574,14 @@ export default function Home() {
   };
 
   const moveOrRename = async (filePath: string) => {
-    if (!token) return;
+    if (!sessionReady) return;
     const currentName = filePath.split('/').pop() || '';
     const newName = prompt('Tên mới:', currentName)?.trim();
     if (!newName || newName === currentName) return;
     const res = await fetch(`${API_URL}/api/files/move`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({ sourcePath: filePath, destinationDir: currentPath, newName })
     });
     const data = await res.json();
@@ -656,11 +659,11 @@ export default function Home() {
   };
 
   // Fetch log history and current preferences
-  const loadLogs = async (authToken = token) => {
-    if (!authToken) return;
+  const loadLogs = useCallback(async () => {
+    if (!sessionReady) return;
     try {
       const res = await fetch(`${API_URL}/api/logs`, {
-        headers: { 'Authorization': `Bearer ${authToken}` }
+        credentials: 'include'
       });
       const data = await res.json();
       if (data.success) {
@@ -669,13 +672,13 @@ export default function Home() {
     } catch (err) {
       console.error('Failed to load logs:', err);
     }
-  };
+  }, [sessionReady]);
 
-  const loadMetrics = useCallback(async (authToken = token) => {
-    if (!authToken) return;
+  const loadMetrics = useCallback(async () => {
+    if (!sessionReady) return;
     try {
       const res = await fetch(`${API_URL}/api/metrics`, {
-        headers: { 'Authorization': `Bearer ${authToken}` }
+        credentials: 'include'
       });
       const data = await res.json();
       if (data.success) {
@@ -690,13 +693,13 @@ export default function Home() {
     } catch (err) {
       // Silently ignore metrics errors
     }
-  }, [token]);
+  }, [sessionReady]);
 
-  const loadSettings = useCallback(async (authToken = token) => {
-    if (!authToken) return;
+  const loadSettings = useCallback(async () => {
+    if (!sessionReady) return;
     try {
       const res = await fetch(`${API_URL}/api/settings`, {
-        headers: { 'Authorization': `Bearer ${authToken}` }
+        credentials: 'include'
       });
       const data = await res.json();
       if (data.success && data.settings) {
@@ -711,10 +714,10 @@ export default function Home() {
         isSettingsLoadedRef.current = true;
       }, 300);
     }
-  }, [token]);
+  }, [sessionReady]);
 
   const saveSettings = useCallback(async (newSize: number, newTheme: string) => {
-    if (!token) return;
+    if (!sessionReady) return;
     const shouldShowStatus = isSettingsLoadedRef.current;
     if (shouldShowStatus) {
       Promise.resolve().then(() => {
@@ -724,10 +727,8 @@ export default function Home() {
     try {
       const res = await fetch(`${API_URL}/api/settings`, {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ fontSize: newSize, theme: newTheme })
       });
       const data = await res.json();
@@ -752,27 +753,23 @@ export default function Home() {
         setSaveStatus('error');
       }
     }
-  }, [token]);
+  }, [sessionReady]);
 
   // Check if session already exists on load
   useEffect(() => {
-    const savedToken = localStorage.getItem('vps_terminal_token');
-    if (savedToken) {
-      setTimeout(() => setLoading(true), 0);
-      fetch(`${API_URL}/api/auth/verify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: savedToken })
-      })
+    localStorage.removeItem('vps_terminal_token');
+    setTimeout(() => setLoading(true), 0);
+    fetch(`${API_URL}/api/auth/verify`, {
+      method: 'POST',
+      credentials: 'include'
+    })
       .then(res => res.json())
       .then(data => {
         if (data.success) {
-          setToken(savedToken);
+          setSessionReady(true);
           setIsAuthenticated(true);
-        loadSettings(savedToken);
-          loadFiles(getSavedFilePath(), savedToken, 'push', true);
         } else {
-          localStorage.removeItem('vps_terminal_token');
+          setSessionReady(false);
           setIsAuthenticated(false);
         }
       })
@@ -782,10 +779,17 @@ export default function Home() {
       .finally(() => {
         setLoading(false);
       });
-    } else {
-      setTimeout(() => setIsAuthenticated(false), 0);
-    }
-  }, [loadSettings, loadFiles]);
+  }, []);
+
+  useEffect(() => {
+    if (!sessionReady) return;
+    const timer = setTimeout(() => {
+      loadSettings();
+      loadLogs();
+      loadFiles(getSavedFilePath(), null, 'push', true);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [sessionReady, loadSettings, loadLogs, loadFiles]);
 
   // Handle master password validation
   const handleLogin = async (e: React.FormEvent) => {
@@ -798,17 +802,14 @@ export default function Home() {
       const res = await fetch(`${API_URL}/api/auth`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ password })
       });
       const data = await res.json();
 
       if (data.success) {
-        localStorage.setItem('vps_terminal_token', data.token);
-        setToken(data.token);
+        setSessionReady(true);
         setIsAuthenticated(true);
-        loadSettings(data.token);
-        loadLogs(data.token);
-        loadFiles(getSavedFilePath(), data.token, 'push', true);
       } else {
         setError(data.error || 'Authentication failed');
       }
@@ -830,8 +831,8 @@ export default function Home() {
       return;
     }
 
-    if (newPassword.length < 5) {
-      setPwdError('New password must be at least 5 characters long');
+    if (newPassword.length < 12) {
+      setPwdError('New password must be at least 12 characters long');
       return;
     }
 
@@ -839,10 +840,8 @@ export default function Home() {
     try {
       const res = await fetch(`${API_URL}/api/settings/password`, {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ currentPassword, newPassword })
       });
       const data = await res.json();
@@ -872,15 +871,13 @@ export default function Home() {
     try {
       await fetch(`${API_URL}/api/auth/logout`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token })
+        credentials: 'include'
       });
     } catch (e) {
       console.error(e);
     }
 
-    localStorage.removeItem('vps_terminal_token');
-    setToken(null);
+    setSessionReady(false);
     setIsAuthenticated(false);
     setPassword('');
   };
@@ -998,7 +995,7 @@ export default function Home() {
 
   // Main Terminal Mounting & Socket Connection logic
   useEffect(() => {
-    if (!isAuthenticated || !token || activeTab !== 'terminal') {
+    if (!isAuthenticated || !sessionReady || activeTab !== 'terminal') {
       // Disconnect socket if navigating away from terminal tab
       if (socketInstance.current) {
         socketInstance.current.disconnect();
@@ -1103,9 +1100,12 @@ export default function Home() {
       term.writeln('\x1b[38;5;86m╚═════════════════════════════════════════════════════════════╝\x1b[0m');
       term.writeln('\x1b[33mConnecting to local VPS shell process...\x1b[0m');
 
-      // Establish socket.io connection with auth token
+      const ticketResponse = await fetch(`${API_URL}/api/auth/socket-ticket`, { method: 'POST', credentials: 'include' });
+      const ticketData = await ticketResponse.json();
+      if (!ticketData.success) throw new Error(ticketData.error || 'Không thể cấp vé kết nối terminal');
+
       socket = io(API_URL || undefined, {
-        auth: { token, cwd: pendingTerminalCwdRef.current || undefined },
+        auth: { ticket: ticketData.ticket, cwd: pendingTerminalCwdRef.current || undefined },
         reconnectionDelay: 2000,
         reconnectionDelayMax: 5000,
         timeout: 10000,
@@ -1123,8 +1123,19 @@ export default function Home() {
         term.focus();
       });
 
-      socket.on('connect_error', (err) => {
+      socket.on('connect_error', async (err) => {
         term.writeln(`\r\n\x1b[31m✖ Connection failed: ${err.message}\x1b[0m\r\n`);
+        if (!isMounted || !socket || socket.connected) return;
+        try {
+          const response = await fetch(`${API_URL}/api/auth/socket-ticket`, { method: 'POST', credentials: 'include' });
+          const data = await response.json();
+          if (data.success && isMounted && socket) {
+            socket.auth = { ticket: data.ticket, cwd: pendingTerminalCwdRef.current || undefined };
+            socket.connect();
+          }
+        } catch (error) {
+          console.error('[TERMINAL] Failed to refresh connection ticket:', error);
+        }
       });
 
       // Stream data from server to terminal
@@ -1189,7 +1200,7 @@ export default function Home() {
         resizeObserverRef.current.disconnect();
       }
     };
-  }, [isAuthenticated, token, activeTab]);
+  }, [isAuthenticated, sessionReady, activeTab]);
 
   // Handle dynamic font size or theme adjustment in living terminal
   useEffect(() => {
@@ -1213,15 +1224,15 @@ export default function Home() {
 
   // Poll system metrics every 5 seconds when authenticated
   useEffect(() => {
-    if (!isAuthenticated || !token) return;
+    if (!isAuthenticated || !sessionReady) return;
     // Use setTimeout(0) to avoid setState-in-effect lint error
-    const initialTimer = setTimeout(() => loadMetrics(token), 0);
-    const interval = setInterval(() => loadMetrics(token), 5000);
+    const initialTimer = setTimeout(() => loadMetrics(), 0);
+    const interval = setInterval(() => loadMetrics(), 5000);
     return () => {
       clearTimeout(initialTimer);
       clearInterval(interval);
     };
-  }, [isAuthenticated, token, loadMetrics]);
+  }, [isAuthenticated, sessionReady, loadMetrics]);
 
   // Loading indicator for verification check
   if (isAuthenticated === null) {
@@ -2237,7 +2248,7 @@ export default function Home() {
                                 <div className="bg-black p-4 flex justify-center">
                                   <video
                                     key={viewingFile}
-                                    src={`${API_URL}/api/files/media?path=${encodeURIComponent(viewingFile)}&token=${encodeURIComponent(token || '')}`}
+                                    src={`${API_URL}/api/files/media?path=${encodeURIComponent(viewingFile)}&ticket=${encodeURIComponent(previewTicket || '')}`}
                                     controls
                                     playsInline
                                     preload="metadata"
@@ -2250,7 +2261,7 @@ export default function Home() {
                                 <div className="min-h-64 bg-gradient-to-br from-slate-950 via-purple-950/40 to-black p-8 flex items-center justify-center">
                                   <audio
                                     key={viewingFile}
-                                    src={`${API_URL}/api/files/media?path=${encodeURIComponent(viewingFile)}&token=${encodeURIComponent(token || '')}`}
+                                    src={`${API_URL}/api/files/media?path=${encodeURIComponent(viewingFile)}&ticket=${encodeURIComponent(previewTicket || '')}`}
                                     controls
                                     preload="metadata"
                                     className="w-full max-w-2xl"
@@ -2263,7 +2274,7 @@ export default function Home() {
                                   {/* Authenticated filesystem images cannot use Next's build-time image optimizer. */}
                                   {/* eslint-disable-next-line @next/next/no-img-element */}
                                   <img
-                                    src={`${API_URL}/api/files/media?path=${encodeURIComponent(viewingFile)}&token=${encodeURIComponent(token || '')}`}
+                                    src={`${API_URL}/api/files/media?path=${encodeURIComponent(viewingFile)}&ticket=${encodeURIComponent(previewTicket || '')}`}
                                     alt={viewingFile.replace(/\\/g, '/').split('/').pop() || 'Ảnh xem trước'}
                                     className="max-h-[75vh] max-w-full object-contain shadow-2xl"
                                   />
@@ -2271,7 +2282,7 @@ export default function Home() {
                               ) : previewKind(viewingFile) === 'pdf' || previewKind(viewingFile) === 'office' ? (
                                 <iframe
                                   key={viewingFile}
-                                  src={`${API_URL}/api/files/${previewKind(viewingFile) === 'office' ? 'office-preview' : 'media'}?path=${encodeURIComponent(viewingFile)}&token=${encodeURIComponent(token || '')}`}
+                                  src={`${API_URL}/api/files/${previewKind(viewingFile) === 'office' ? 'office-preview' : 'media'}?path=${encodeURIComponent(viewingFile)}&ticket=${encodeURIComponent(previewTicket || '')}`}
                                   title={`Xem trước ${viewingFile}`}
                                   className="h-[75vh] w-full bg-white"
                                 />
@@ -2305,8 +2316,8 @@ export default function Home() {
                               <div className="flex flex-wrap gap-2 p-2 border-b border-white/10 text-[11px]">
                                 <span className="text-slate-500 mr-auto">Kéo nhiều tệp từ máy tính vào đây để upload</span>
                                 <button onClick={() => { pendingTerminalCwdRef.current = currentPath; setActiveTab('terminal'); }} className="px-2 py-1 bg-white/5 rounded">Mở Terminal tại đây</button>
-                                <button onClick={async () => { const name = prompt('Tên archive (gồm phần mở rộng):', 'archive.zip')?.trim(); if (!name) return; const format = name.endsWith('.tar.gz') ? 'tar.gz' : name.split('.').pop() || 'zip'; try { await requestFileApi('/api/files/archive/create', { method: 'POST', body: JSON.stringify({ paths: selectedPaths.length ? selectedPaths : [currentPath], destinationDir: currentPath, name, format }) }); await loadFiles(currentPath, token, 'none'); } catch (error: any) { setFileError(error.message); } }} className="px-2 py-1 bg-white/5 rounded">Tạo archive</button>
-                                <button onClick={async () => { const name = prompt('Tên symlink mới:', 'link')?.trim(); const targetPath = name && prompt('Đường dẫn đích:')?.trim(); if (!name || !targetPath) return; try { await requestFileApi('/api/files/symlink', { method: 'POST', body: JSON.stringify({ name, targetPath, destinationDir: currentPath }) }); await loadFiles(currentPath, token, 'none'); } catch (error: any) { setFileError(error.message); } }} className="px-2 py-1 bg-white/5 rounded">Tạo symlink</button>
+                                <button onClick={async () => { const name = prompt('Tên archive (gồm phần mở rộng):', 'archive.zip')?.trim(); if (!name) return; const format = name.endsWith('.tar.gz') ? 'tar.gz' : name.split('.').pop() || 'zip'; try { await requestFileApi('/api/files/archive/create', { method: 'POST', body: JSON.stringify({ paths: selectedPaths.length ? selectedPaths : [currentPath], destinationDir: currentPath, name, format }) }); await loadFiles(currentPath, null, 'none'); } catch (error: any) { setFileError(error.message); } }} className="px-2 py-1 bg-white/5 rounded">Tạo archive</button>
+                                <button onClick={async () => { const name = prompt('Tên symlink mới:', 'link')?.trim(); const targetPath = name && prompt('Đường dẫn đích:')?.trim(); if (!name || !targetPath) return; try { await requestFileApi('/api/files/symlink', { method: 'POST', body: JSON.stringify({ name, targetPath, destinationDir: currentPath }) }); await loadFiles(currentPath, null, 'none'); } catch (error: any) { setFileError(error.message); } }} className="px-2 py-1 bg-white/5 rounded">Tạo symlink</button>
                               </div>
                               <div className="overflow-x-auto">
                                 <table className="w-full text-left border-collapse text-sm">
@@ -2414,7 +2425,7 @@ export default function Home() {
                                                   </>
                                                  )}
                                                  <button onClick={async () => { try { const data = await requestFileApi(`/api/files/metadata?path=${encodeURIComponent(fullItemPath)}`); setMetadata({ path: fullItemPath, mode: String(data.mode ?? data.metadata?.mode ?? ''), uid: Number(data.uid ?? data.metadata?.uid ?? 0), gid: Number(data.gid ?? data.metadata?.gid ?? 0) }); } catch (error: any) { setFileError(error.message); } }} className="p-1.5 rounded bg-white/5 text-slate-400 border border-white/10" title="Quyền"><Lock className="w-3.5 h-3.5" /></button>
-                                                 {!file.isDirectory && /\.(zip|tar|tgz|tar\.gz)$/i.test(file.name) && <button onClick={async () => { const destinationDir = prompt('Giải nén vào:', currentPath)?.trim(); if (!destinationDir) return; try { await requestFileApi('/api/files/archive/extract', { method: 'POST', body: JSON.stringify({ archivePath: fullItemPath, destinationDir }) }); await loadFiles(currentPath, token, 'none'); } catch (error: any) { setFileError(error.message); } }} className="p-1.5 rounded bg-cyan-500/5 text-cyan-400 border border-cyan-500/10" title="Giải nén"><Download className="w-3.5 h-3.5" /></button>}
+                                                  {!file.isDirectory && /\.(zip|tar|tgz|tar\.gz)$/i.test(file.name) && <button onClick={async () => { const destinationDir = prompt('Giải nén vào:', currentPath)?.trim(); if (!destinationDir) return; try { await requestFileApi('/api/files/archive/extract', { method: 'POST', body: JSON.stringify({ archivePath: fullItemPath, destinationDir }) }); await loadFiles(currentPath, null, 'none'); } catch (error: any) { setFileError(error.message); } }} className="p-1.5 rounded bg-cyan-500/5 text-cyan-400 border border-cyan-500/10" title="Giải nén"><Download className="w-3.5 h-3.5" /></button>}
                                                  <button
                                                   onClick={() => moveOrRename(fullItemPath)}
                                                   className="p-1.5 rounded bg-amber-500/5 hover:bg-amber-500/20 text-amber-400 border border-amber-500/10 cursor-pointer transition-colors"
@@ -2448,7 +2459,7 @@ export default function Home() {
                       <p className="text-xs font-mono truncate">{metadata.path}</p>
                       <label className="block text-xs">Mode<input value={metadata.mode} onChange={(e) => setMetadata({ ...metadata, mode: e.target.value })} className="mt-1 w-full bg-black border border-white/10 rounded p-2 font-mono" /></label>
                       <div className="grid grid-cols-2 gap-3"><label className="text-xs">UID<input type="number" value={metadata.uid} onChange={(e) => setMetadata({ ...metadata, uid: Number(e.target.value) })} className="mt-1 w-full bg-black border border-white/10 rounded p-2" /></label><label className="text-xs">GID<input type="number" value={metadata.gid} onChange={(e) => setMetadata({ ...metadata, gid: Number(e.target.value) })} className="mt-1 w-full bg-black border border-white/10 rounded p-2" /></label></div>
-                      <button onClick={async () => { try { await requestFileApi('/api/files/metadata', { method: 'PATCH', body: JSON.stringify(metadata) }); setMetadata(null); await loadFiles(currentPath, token, 'none'); } catch (error: any) { setFileError(error.message); } }} className="w-full bg-blue-600 rounded py-2 text-sm text-white">Lưu quyền</button>
+                      <button onClick={async () => { try { await requestFileApi('/api/files/metadata', { method: 'PATCH', body: JSON.stringify(metadata) }); setMetadata(null); await loadFiles(currentPath, null, 'none'); } catch (error: any) { setFileError(error.message); } }} className="w-full bg-blue-600 rounded py-2 text-sm text-white">Lưu quyền</button>
                     </div></div>}
                     {showTrash && <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"><div className="w-full max-w-2xl max-h-[80vh] overflow-auto rounded-xl border border-white/10 bg-[#111116] p-5 space-y-4">
                       <div className="flex items-center"><h4 className="font-bold text-white">Thùng rác</h4><button onClick={() => setShowTrash(false)} className="ml-auto"><X className="w-4 h-4" /></button></div>

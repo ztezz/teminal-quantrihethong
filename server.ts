@@ -3,6 +3,7 @@ import next from 'next';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import crypto from 'crypto';
+import argon2 from 'argon2';
 import * as pty from 'node-pty';
 import { createFileManagerRouter } from './lib/file-manager-router';
 import os from 'os';
@@ -15,6 +16,8 @@ const nextApp = backendOnly ? null : next({ dev });
 const handle = nextApp?.getRequestHandler();
 const FILE_MANAGER_ROOT = path.resolve(process.env.FILE_MANAGER_ROOT || process.cwd());
 const FILE_MANAGER_TRASH_DIR = path.resolve(process.env.FILE_MANAGER_TRASH_DIR || path.join(process.cwd(), '.terminal-trash'));
+const SESSION_COOKIE = 'terminal_session';
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
 // Pure JavaScript File-Based Database to bypass binary sqlite3 GLIBC errors
 const DB_FILE = path.join(process.cwd(), 'terminal_database.json');
@@ -24,7 +27,7 @@ class JsonDatabase {
     settings: Record<string, string>;
     terminal_settings: Record<string, string>;
     logs: Array<{ id: number; event: string; ip: string; timestamp: string }>;
-    sessions: string[];
+    sessions: Array<{ tokenHash: string; expiresAt: number }>;
   };
 
   constructor() {
@@ -42,6 +45,7 @@ class JsonDatabase {
       if (fs.existsSync(DB_FILE)) {
         const fileContent = fs.readFileSync(DB_FILE, 'utf8');
         this.data = JSON.parse(fileContent);
+        if (!Array.isArray(this.data.sessions) || this.data.sessions.some(session => typeof session === 'string')) this.data.sessions = [];
       } else {
         this.save();
       }
@@ -136,24 +140,30 @@ class JsonDatabase {
 
   addSession(token: string) {
     if (!this.data.sessions) this.data.sessions = [];
-    if (!this.data.sessions.includes(token)) {
-      this.data.sessions.push(token);
-      this.save();
-    }
+    this.data.sessions = this.data.sessions.filter(session => session.expiresAt > Date.now());
+    this.data.sessions.push({ tokenHash: crypto.createHash('sha256').update(token).digest('hex'), expiresAt: Date.now() + SESSION_TTL_MS });
+    this.save();
   }
 
   removeSession(token: string) {
     if (!this.data.sessions) return;
-    this.data.sessions = this.data.sessions.filter(t => t !== token);
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    this.data.sessions = this.data.sessions.filter(session => session.tokenHash !== tokenHash);
     this.save();
   }
 
   hasSession(token: string): boolean {
     if (!this.data.sessions) return false;
-    return this.data.sessions.includes(token);
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    return this.data.sessions.some(session => session.tokenHash === tokenHash && session.expiresAt > Date.now());
   }
 
-  getSessions(): string[] {
+  clearSessions() {
+    this.data.sessions = [];
+    this.save();
+  }
+
+  getSessions(): Array<{ tokenHash: string; expiresAt: number }> {
     return this.data.sessions || [];
   }
 }
@@ -168,6 +178,64 @@ let db: any = null;
 // Helper: check session via persistent database
 function hasSession(token: string): boolean {
   return db ? db.hasSession(token) : false;
+}
+
+function sessionTokenFromCookie(cookieHeader: string | undefined): string {
+  const cookies = String(cookieHeader || '').split(';');
+  for (const cookie of cookies) {
+    const [name, ...value] = cookie.trim().split('=');
+    if (name === SESSION_COOKIE) return decodeURIComponent(value.join('='));
+  }
+  return '';
+}
+
+function sessionToken(req: express.Request): string {
+  return sessionTokenFromCookie(req.headers.cookie);
+}
+
+function authenticated(req: express.Request): boolean {
+  const token = sessionToken(req);
+  return Boolean(token && hasSession(token));
+}
+
+function setSessionCookie(res: express.Response, token: string) {
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL_MS / 1000}${secure}`);
+}
+
+function clearSessionCookie(res: express.Response) {
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`);
+}
+
+const previewTickets = new Map<string, { path: string; expiresAt: number }>();
+const socketTickets = new Map<string, number>();
+function createTicket<T>(store: Map<string, T>, value: T): string {
+  const ticket = crypto.randomBytes(32).toString('base64url');
+  store.set(ticket, value);
+  return ticket;
+}
+function consumePreviewTicket(ticket: string, filePath: string): boolean {
+  const entry = previewTickets.get(ticket);
+  if (!entry || entry.expiresAt <= Date.now() || entry.path !== filePath) return false;
+  return true;
+}
+function consumeSocketTicket(ticket: string): boolean {
+  const expiresAt = socketTickets.get(ticket);
+  socketTickets.delete(ticket);
+  return Boolean(expiresAt && expiresAt > Date.now());
+}
+
+async function verifyPassword(password: string): Promise<boolean> {
+  const hashRow = await db.get('SELECT value FROM settings WHERE key = ?', 'password_hash');
+  if (!hashRow) return false;
+  if (hashRow.value.startsWith('$argon2')) return argon2.verify(hashRow.value, password);
+  const saltRow = await db.get('SELECT value FROM settings WHERE key = ?', 'password_salt');
+  if (!saltRow) return false;
+  const legacyHash = hashPassword(password, saltRow.value);
+  const valid = legacyHash.length === hashRow.value.length && crypto.timingSafeEqual(Buffer.from(legacyHash), Buffer.from(hashRow.value));
+  if (valid) await db.run('UPDATE settings SET value = ? WHERE key = ?', await argon2.hash(password, { type: argon2.argon2id }), 'password_hash');
+  return valid;
 }
 
 // Simple rate limiter for auth endpoint: max 10 attempts per IP per 15 minutes
@@ -187,11 +255,6 @@ function checkRateLimit(ip: string): boolean {
 }
 function resetRateLimit(ip: string) {
   authAttempts.delete(ip);
-}
-
-// Helper functions for password hashing
-function generateSalt(): string {
-  return crypto.randomBytes(16).toString('hex');
 }
 
 function hashPassword(password: string, salt: string): string {
@@ -230,10 +293,8 @@ async function initializeDatabase() {
   // Check if password setting exists, otherwise set a default
   const dbPasswordHash = await db.get('SELECT value FROM settings WHERE key = ?', 'password_hash');
   if (!dbPasswordHash) {
-    const salt = generateSalt();
     const defaultPassword = process.env.TERMINAL_PASSWORD || 'admin';
-    const hash = hashPassword(defaultPassword, salt);
-    await db.run('INSERT INTO settings (key, value) VALUES (?, ?)', 'password_salt', salt);
+    const hash = await argon2.hash(defaultPassword, { type: argon2.argon2id });
     await db.run('INSERT INTO settings (key, value) VALUES (?, ?)', 'password_hash', hash);
     console.log(`[DB] Initialized default terminal password. Defaults to: "${defaultPassword}"`);
   }
@@ -256,7 +317,8 @@ async function startServer() {
   // Set up socket.io server
   const io = new Server(httpServer, {
     cors: {
-      origin: '*',
+      origin: process.env.FRONTEND_ORIGIN || false,
+      credentials: true,
       methods: ['GET', 'POST', 'PATCH', 'DELETE']
     }
   });
@@ -264,12 +326,15 @@ async function startServer() {
   expressApp.use(express.json({ limit: '2mb' }));
 
   if (backendOnly) {
-    const allowedOrigin = process.env.FRONTEND_ORIGIN || '*';
+    const allowedOrigin = process.env.FRONTEND_ORIGIN;
+    if (!allowedOrigin) throw new Error('FRONTEND_ORIGIN is required in backend-only mode');
     expressApp.use((req, res, nextMiddleware) => {
       res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
       res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-File-Name, X-Directory');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-File-Name, X-Directory');
       if (req.method === 'OPTIONS') return res.sendStatus(204);
+      if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && req.headers.origin !== allowedOrigin) return res.status(403).json({ success: false, error: 'Invalid request origin' });
       nextMiddleware();
     });
   }
@@ -299,23 +364,15 @@ async function startServer() {
         return res.status(400).json({ success: false, error: 'Password is required' });
       }
 
-      const saltRow = await db.get('SELECT value FROM settings WHERE key = ?', 'password_salt');
-      const hashRow = await db.get('SELECT value FROM settings WHERE key = ?', 'password_hash');
-
-      if (!saltRow || !hashRow) {
-        return res.status(500).json({ success: false, error: 'Internal auth configuration missing' });
-      }
-
-      const calculatedHash = hashPassword(password, saltRow.value);
-
-      if (calculatedHash === hashRow.value) {
+      if (await verifyPassword(password)) {
         // Correct password, generate token & reset rate limit
         resetRateLimit(clientIp);
         const token = crypto.randomBytes(32).toString('hex');
         db.addSession(token);
+        setSessionCookie(res, token);
         
         await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', 'Login successful - Session started', clientIp);
-        return res.json({ success: true, token });
+        return res.json({ success: true });
       } else {
         await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', 'Login failed: Incorrect password attempt', clientIp);
         return res.status(401).json({ success: false, error: 'Incorrect password!' });
@@ -328,8 +385,7 @@ async function startServer() {
 
   // Verify session token
   expressApp.post('/api/auth/verify', (req, res) => {
-    const { token } = req.body;
-      if (token && hasSession(token)) {
+    if (authenticated(req)) {
       return res.json({ success: true });
     }
     return res.status(401).json({ success: false, error: 'Invalid or expired session token' });
@@ -338,10 +394,7 @@ async function startServer() {
   // Fetch log history
   expressApp.get('/api/logs', async (req, res) => {
     try {
-      const authHeader = req.headers.authorization;
-      const token = authHeader ? authHeader.replace('Bearer ', '') : '';
-
-      if (!token || !hasSession(token)) {
+      if (!authenticated(req)) {
         return res.status(401).json({ success: false, error: 'Unauthorized' });
       }
 
@@ -355,10 +408,7 @@ async function startServer() {
   // Get terminal settings
   expressApp.get('/api/settings', async (req, res) => {
     try {
-      const authHeader = req.headers.authorization;
-      const token = authHeader ? authHeader.replace('Bearer ', '') : '';
-
-      if (!token || !hasSession(token)) {
+      if (!authenticated(req)) {
         return res.status(401).json({ success: false, error: 'Unauthorized' });
       }
 
@@ -380,10 +430,7 @@ async function startServer() {
   // Save terminal settings
   expressApp.post('/api/settings', async (req, res) => {
     try {
-      const authHeader = req.headers.authorization;
-      const token = authHeader ? authHeader.replace('Bearer ', '') : '';
-
-      if (!token || !hasSession(token)) {
+      if (!authenticated(req)) {
         return res.status(401).json({ success: false, error: 'Unauthorized' });
       }
 
@@ -404,10 +451,7 @@ async function startServer() {
   // Change password endpoint
   expressApp.post('/api/settings/password', async (req, res) => {
     try {
-      const authHeader = req.headers.authorization;
-      const token = authHeader ? authHeader.replace('Bearer ', '') : '';
-
-      if (!token || !hasSession(token)) {
+      if (!authenticated(req)) {
         return res.status(401).json({ success: false, error: 'Unauthorized' });
       }
 
@@ -415,25 +459,21 @@ async function startServer() {
       if (!currentPassword || !newPassword) {
         return res.status(400).json({ success: false, error: 'Both current and new passwords are required' });
       }
-
-      const saltRow = await db.get('SELECT value FROM settings WHERE key = ?', 'password_salt');
-      const hashRow = await db.get('SELECT value FROM settings WHERE key = ?', 'password_hash');
-
-      if (!saltRow || !hashRow) {
-        return res.status(500).json({ success: false, error: 'Internal auth configuration missing' });
+      if (typeof newPassword !== 'string' || newPassword.length < 12) {
+        return res.status(400).json({ success: false, error: 'New password must be at least 12 characters long' });
       }
 
-      const calculatedHash = hashPassword(currentPassword, saltRow.value);
-      if (calculatedHash !== hashRow.value) {
+      if (!await verifyPassword(currentPassword)) {
         return res.status(400).json({ success: false, error: 'Incorrect current password' });
       }
 
       // Update password hash and salt
-      const newSalt = generateSalt();
-      const newHash = hashPassword(newPassword, newSalt);
-
-      await db.run('UPDATE settings SET value = ? WHERE key = ?', newSalt, 'password_salt');
+      const newHash = await argon2.hash(newPassword, { type: argon2.argon2id });
       await db.run('UPDATE settings SET value = ? WHERE key = ?', newHash, 'password_hash');
+      db.clearSessions();
+      const nextToken = crypto.randomBytes(32).toString('hex');
+      db.addSession(nextToken);
+      setSessionCookie(res, nextToken);
 
       const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
       await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', 'Master password was changed successfully', clientIp);
@@ -447,9 +487,7 @@ async function startServer() {
   // System metrics endpoint (CPU & RAM usage)
   expressApp.get('/api/metrics', async (req, res) => {
     try {
-      const authHeader = req.headers.authorization;
-      const token = authHeader ? authHeader.replace('Bearer ', '') : '';
-      if (!token || !hasSession(token)) {
+      if (!authenticated(req)) {
         return res.status(401).json({ success: false, error: 'Unauthorized' });
       }
 
@@ -498,20 +536,32 @@ async function startServer() {
   // Log logout event
   expressApp.post('/api/auth/logout', async (req, res) => {
     try {
-      const { token } = req.body;
+      const token = sessionToken(req);
       if (token) {
         db.removeSession(token);
         const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
         await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', 'User logged out', clientIp);
       }
+      clearSessionCookie(res);
       return res.json({ success: true });
     } catch (error: any) {
       return res.status(500).json({ success: false, error: error.message });
     }
   });
 
+  expressApp.post('/api/auth/socket-ticket', (req, res) => {
+    if (!authenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    return res.json({ success: true, ticket: createTicket(socketTickets, Date.now() + 30_000) });
+  });
+
+  expressApp.post('/api/auth/preview-ticket', (req, res) => {
+    if (!authenticated(req) || typeof req.body.path !== 'string') return res.status(401).json({ success: false, error: 'Unauthorized' });
+    return res.json({ success: true, ticket: createTicket(previewTickets, { path: req.body.path, expiresAt: Date.now() + 60_000 }) });
+  });
+
   expressApp.use('/api/files', createFileManagerRouter({
     hasSession,
+    consumePreviewTicket,
     log: (event, ip) => db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', event, ip),
     rootDir: FILE_MANAGER_ROOT,
     trashDir: FILE_MANAGER_TRASH_DIR
@@ -520,8 +570,8 @@ async function startServer() {
   // --- Socket.io Terminal Implementation ---
 
   io.use((socket, nextFn) => {
-    const token = socket.handshake.auth?.token || socket.handshake.query?.token;
-      if (token && hasSession(token)) {
+    const ticket = socket.handshake.auth?.ticket;
+      if (typeof ticket === 'string' && consumeSocketTicket(ticket)) {
         return nextFn();
       }
     console.log('[SOCKET] Rejecting unauthenticated socket connection attempt.');
