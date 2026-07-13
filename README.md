@@ -13,6 +13,7 @@
 - Nén ZIP/TAR/TAR.GZ, giải nén ZIP và tạo symbolic link.
 - Chỉnh quyền `chmod`, `chown` và xem metadata tệp.
 - Xem CPU, RAM và dung lượng ổ đĩa.
+- Quản lý systemd service, journal logs và Linux processes.
 - Nhật ký đăng nhập và thao tác quản trị.
 - Trình chỉnh sửa tệp văn bản với kiểm tra xung đột khi lưu.
 - Xem trước video, âm thanh, hình ảnh và PDF.
@@ -105,6 +106,9 @@ Mở `http://localhost:3000`.
 | `FRONTEND_ORIGIN` | Backend | Origin frontend chính xác, ví dụ `https://terminal.example.com`; không có dấu `/` cuối. |
 | `FILE_MANAGER_ROOT` | Backend | Thư mục gốc hiển thị trong File Manager. Dùng `/` để quản lý toàn máy chủ. |
 | `FILE_MANAGER_TRASH_DIR` | Backend | Nơi lưu thùng rác, phải có quyền ghi. |
+| `FILE_MANAGER_SNAPSHOT_DIR` | Backend | Kho snapshot nội bộ, không đặt trong thư mục được web server phục vụ. |
+| `SNAPSHOT_MAX_FILE_MB` | Backend | Dung lượng tối đa mỗi file được snapshot, mặc định `100`. |
+| `SNAPSHOT_MAX_TOTAL_MB` | Backend | Tổng quota snapshot, mặc định `2048`; tự xóa bản cũ nhất khi vượt quota. |
 | `LIBREOFFICE_PATH` | Backend | Binary LibreOffice, thường là `/usr/bin/libreoffice`. |
 | `AUTH_ENCRYPTION_KEY` | Backend | Khóa tối thiểu 32 ký tự dùng mã hóa AES-256-GCM cho TOTP secret. Không được thay đổi sau khi bật 2FA. |
 | `TOTP_ISSUER` | Backend | Tên hiển thị trong ứng dụng Authenticator, mặc định `Terminal Admin`. |
@@ -124,6 +128,9 @@ FRONTEND_ORIGIN=https://terminal.example.com
 TERMINAL_PASSWORD=mat-khau-khoi-tao-rat-manh
 FILE_MANAGER_ROOT=/
 FILE_MANAGER_TRASH_DIR=/root/.terminal-trash
+FILE_MANAGER_SNAPSHOT_DIR=/root/.terminal-snapshots
+SNAPSHOT_MAX_FILE_MB=100
+SNAPSHOT_MAX_TOTAL_MB=2048
 LIBREOFFICE_PATH=/usr/bin/libreoffice
 AUTH_ENCRYPTION_KEY='thay-bang-mot-khoa-ngau-nhien-toi-thieu-32-ky-tu'
 TOTP_ISSUER=Terminal Admin
@@ -296,6 +303,42 @@ Mật khẩu hiện tại không thay đổi.
 | `root` | Có | Có | Có | Có | Có | Có |
 
 Quyền được kiểm tra tại backend. Việc ẩn nút trên frontend chỉ hỗ trợ trải nghiệm và không phải lớp bảo mật chính.
+
+## Xác Nhận Thao Tác Nguy Hiểm
+
+Backend yêu cầu xác nhận lại mật khẩu và mã 2FA trước các thao tác nhạy cảm:
+
+- Ghi, move, upload, archive hoặc xóa trong `/etc`, `/boot`, `/usr`, `/root`, `/var`, `/bin`, `/sbin`, `/lib`.
+- Thay đổi `chmod` hoặc `chown`.
+- Khôi phục, xóa vĩnh viễn hoặc dọn thùng rác.
+
+Sau khi xác nhận, quyền tăng cường tồn tại trong cookie `HttpOnly` riêng và hết hạn sau 5 phút. Cookie được gắn với session hiện tại, không thể dùng lại với session khác. Nếu user đã bật 2FA thì cần cả mật khẩu và mã TOTP/recovery code; nếu chưa bật 2FA thì chỉ cần mật khẩu.
+
+## Snapshot Và Khôi Phục
+
+Backend tự tạo snapshot cho file thường trước khi chỉnh sửa, move/rename, đổi metadata hoặc chuyển vào thùng rác. Snapshot gồm nội dung file, đường dẫn gốc, mode, mtime và checksum SHA-256.
+
+- File lớn hơn `SNAPSHOT_MAX_FILE_MB` không được snapshot tự động.
+- Thư mục không được sao chép đệ quy tự động.
+- Khi tổng kho vượt `SNAPSHOT_MAX_TOTAL_MB`, bản cũ nhất bị xóa trước.
+- Khôi phục xác minh checksum, snapshot trạng thái hiện tại rồi ghi file theo cách atomic.
+- Khôi phục và xóa snapshot luôn yêu cầu step-up authorization.
+- Kho snapshot bị chặn khỏi File Manager thông thường.
+
+## Quản Lý Systemd Và Process
+
+Tab `Hệ thống` dành cho role `admin` và `root`:
+
+- Liệt kê tất cả systemd service và trạng thái `active/sub`.
+- Start, stop, restart, enable và disable service.
+- Xem 200 dòng `journalctl` gần nhất của từng unit.
+- Liệt kê tối đa 500 process theo CPU.
+- Xem PID, PPID, user, CPU, RAM, RSS, elapsed time và command.
+- Gửi `SIGTERM` hoặc `SIGKILL`.
+
+Mọi action thay đổi service hoặc gửi signal đều yêu cầu step-up authorization và được ghi audit. Backend không dùng shell string; `systemctl`, `journalctl` và `ps` được gọi bằng `execFile` với danh sách tham số đã kiểm tra. Không cho gửi signal tới PID 1 hoặc PID của chính backend.
+
+Tính năng này chỉ hoạt động trên Linux có systemd và các lệnh `systemctl`, `journalctl`, `ps`. User chạy backend phải có quyền tương ứng; cấu hình hiện tại chạy root nên có đầy đủ quyền.
 
 ## Xem Trước Tệp
 

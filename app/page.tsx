@@ -78,6 +78,7 @@ interface SecuritySession {
 }
 type UserRole = 'viewer' | 'operator' | 'admin' | 'root';
 interface ManagedUser { id: string; username: string; role: UserRole; enabled: boolean; twoFactorEnabled: boolean; createdAt: number; sessions: number }
+interface FileSnapshot { id: string; originalPath: string; createdAt: string; reason: string; size: number; mode: number; mtime: string; checksum: string }
 
 interface FileMetadata {
   path: string;
@@ -93,12 +94,14 @@ interface TrashItem {
   deletedAt?: string;
 }
 
-type ActiveTab = 'terminal' | 'logs' | 'settings' | 'files';
+type ActiveTab = 'terminal' | 'logs' | 'settings' | 'files' | 'system';
+interface SystemService { unit: string; load: string; active: string; sub: string; description: string }
+interface SystemProcess { pid: number; ppid: number; user: string; cpu: number; memory: number; rssKB: number; elapsed: string; command: string }
 
 function getSavedActiveTab(): ActiveTab {
   if (typeof window === 'undefined') return 'terminal';
   const saved = localStorage.getItem('vps_terminal_active_tab');
-  return saved === 'logs' || saved === 'settings' || saved === 'files' ? saved : 'terminal';
+  return saved === 'logs' || saved === 'settings' || saved === 'files' || saved === 'system' ? saved : 'terminal';
 }
 
 function getSavedSidebarState(): boolean {
@@ -207,6 +210,13 @@ export default function Home() {
   const [logIntegrity, setLogIntegrity] = useState<{ valid: boolean; checked: number; brokenAt?: number } | null>(null);
   const [activeTab, setActiveTab] = useState<ActiveTab>(getSavedActiveTab);
   const [isSidebarOpen, setIsSidebarOpen] = useState(getSavedSidebarState);
+  const [systemView, setSystemView] = useState<'services' | 'processes'>('services');
+  const [services, setServices] = useState<SystemService[]>([]);
+  const [processes, setProcesses] = useState<SystemProcess[]>([]);
+  const [systemQuery, setSystemQuery] = useState('');
+  const [systemLoading, setSystemLoading] = useState(false);
+  const [systemError, setSystemError] = useState<string | null>(null);
+  const [serviceLogs, setServiceLogs] = useState<{ unit: string; logs: string } | null>(null);
 
   useEffect(() => {
     localStorage.setItem('vps_terminal_active_tab', activeTab);
@@ -217,7 +227,7 @@ export default function Home() {
   }, [isSidebarOpen]);
 
   useEffect(() => {
-    if (currentUser && !['admin', 'root'].includes(currentUser.role) && ['terminal', 'logs'].includes(activeTab)) setTimeout(() => setActiveTab('files'), 0);
+    if (currentUser && !['admin', 'root'].includes(currentUser.role) && ['terminal', 'logs', 'system'].includes(activeTab)) setTimeout(() => setActiveTab('files'), 0);
   }, [currentUser, activeTab]);
 
   // System metrics
@@ -259,6 +269,9 @@ export default function Home() {
   const [trashItems, setTrashItems] = useState<TrashItem[]>([]);
   const [selectedTrashIds, setSelectedTrashIds] = useState<string[]>([]);
   const [showTrash, setShowTrash] = useState(false);
+  const [showSnapshots, setShowSnapshots] = useState(false);
+  const [snapshots, setSnapshots] = useState<FileSnapshot[]>([]);
+  const [snapshotPath, setSnapshotPath] = useState('');
   const [editorOriginal, setEditorOriginal] = useState('');
   const [editorFind, setEditorFind] = useState('');
   const [editorReplace, setEditorReplace] = useState('');
@@ -336,7 +349,7 @@ export default function Home() {
 
   const requestFileApi = async (endpoint: string, options: RequestInit = {}) => {
     if (!sessionReady) throw new Error('Phiên đăng nhập đã hết hạn');
-    const response = await fetch(`${API_URL}${endpoint}`, {
+    let response = await fetch(`${API_URL}${endpoint}`, {
       ...options,
       credentials: 'include',
       headers: {
@@ -344,9 +357,46 @@ export default function Home() {
         ...options.headers,
       },
     });
+    if (response.status === 428 && await requestStepUp()) response = await fetch(`${API_URL}${endpoint}`, { ...options, credentials: 'include', headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers } });
     const data = await response.json();
     if (!response.ok && response.status !== 207) throw new Error(data.error || 'Thao tác thất bại');
     return data;
+  };
+
+  const requestStepUp = () => new Promise<boolean>((resolve) => setStepUpPrompt({ resolve }));
+  const fetchWithStepUp = async (url: string, options: RequestInit) => {
+    let response = await fetch(url, { ...options, credentials: 'include' });
+    if (response.status === 428 && await requestStepUp()) response = await fetch(url, { ...options, credentials: 'include' });
+    return response;
+  };
+
+  const loadSystemData = useCallback(async (view: 'services' | 'processes' = systemView) => {
+    if (!sessionReady || !currentUser || !['admin', 'root'].includes(currentUser.role)) return;
+    setSystemLoading(true); setSystemError(null);
+    try {
+      const res = await fetch(`${API_URL}/api/system/${view}`, { credentials: 'include' }); const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Không thể tải dữ liệu hệ thống');
+      if (view === 'services') setServices(data.services || []); else setProcesses(data.processes || []);
+    } catch (error: any) { setSystemError(error.message); }
+    finally { setSystemLoading(false); }
+  }, [systemView, sessionReady, currentUser, setSystemLoading, setSystemError, setServices, setProcesses]);
+
+  const serviceAction = async (unit: string, action: string) => {
+    try {
+      const res = await fetchWithStepUp(`${API_URL}/api/system/services/${encodeURIComponent(unit)}/action`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) });
+      const data = await res.json(); if (!data.success) throw new Error(data.error); await loadSystemData('services');
+    } catch (error: any) { setSystemError(error.message); }
+  };
+
+  const openServiceLogs = async (unit: string) => {
+    try { const res = await fetch(`${API_URL}/api/system/services/${encodeURIComponent(unit)}/logs?lines=200`, { credentials: 'include' }); const data = await res.json(); if (!data.success) throw new Error(data.error); setServiceLogs({ unit, logs: data.logs }); }
+    catch (error: any) { setSystemError(error.message); }
+  };
+
+  const signalProcess = async (pid: number, signal: 'SIGTERM' | 'SIGKILL') => {
+    if (!confirm(`${signal} tiến trình PID ${pid}?`)) return;
+    try { const res = await fetchWithStepUp(`${API_URL}/api/system/processes/${pid}/signal`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ signal }) }); const data = await res.json(); if (!data.success) throw new Error(data.error); await loadSystemData('processes'); }
+    catch (error: any) { setSystemError(error.message); }
   };
 
   const navigateHistory = (offset: number) => {
@@ -408,7 +458,11 @@ export default function Home() {
         if (event.lengthComputable) setUploadProgress((progress) => ({ ...progress, [key]: Math.round(event.loaded / event.total * 100) }));
       };
       xhr.onerror = () => setFileError(`Upload ${file.name} thất bại`);
-      xhr.onload = () => {
+      xhr.onload = async () => {
+        if (xhr.status === 428 && await requestStepUp()) {
+          uploadFiles([file]);
+          return;
+        }
         if (xhr.status >= 400) {
           try { setFileError(JSON.parse(xhr.responseText).error || `Upload ${file.name} thất bại`); }
           catch { setFileError(`Upload ${file.name} thất bại`); }
@@ -440,6 +494,31 @@ export default function Home() {
       await openTrash();
       await loadFiles(currentPath, null, 'none');
     } catch (error: any) { setFileError(error.message); }
+  };
+
+  const openSnapshots = async (filePath = '') => {
+    try {
+      const data = await requestFileApi(`/api/files/snapshots${filePath ? `?path=${encodeURIComponent(filePath)}` : ''}`);
+      setSnapshots(data.items || []); setSnapshotPath(filePath); setShowSnapshots(true);
+    } catch (error: any) { setFileError(error.message); }
+  };
+
+  const restoreSnapshot = async (id: string) => {
+    if (!confirm('Khôi phục phiên bản này và ghi đè file hiện tại?')) return;
+    try { await requestFileApi('/api/files/snapshots/restore', { method: 'POST', body: JSON.stringify({ id }) }); await openSnapshots(snapshotPath); await loadFiles(currentPath, null, 'none'); }
+    catch (error: any) { setFileError(error.message); }
+  };
+
+  const deleteSnapshot = async (id: string) => {
+    if (!confirm('Xóa vĩnh viễn snapshot này?')) return;
+    try { await requestFileApi('/api/files/snapshots', { method: 'DELETE', body: JSON.stringify({ id }) }); await openSnapshots(snapshotPath); }
+    catch (error: any) { setFileError(error.message); }
+  };
+
+  const downloadSnapshot = async (id: string, fileName: string) => {
+    const res = await fetch(`${API_URL}/api/files/snapshots/download?id=${encodeURIComponent(id)}`, { credentials: 'include' });
+    if (!res.ok) return setFileError('Không thể tải snapshot');
+    const url = URL.createObjectURL(await res.blob()); const link = document.createElement('a'); link.href = url; link.download = fileName; link.click(); URL.revokeObjectURL(url);
   };
 
   const openFile = async (filePath: string) => {
@@ -487,7 +566,7 @@ export default function Home() {
     setFileLoading(true);
     setFileError(null);
     try {
-      const res = await fetch(`${API_URL}/api/files/write`, {
+      const res = await fetchWithStepUp(`${API_URL}/api/files/write`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -516,7 +595,7 @@ export default function Home() {
     setFileLoading(true);
     setFileError(null);
     try {
-      const res = await fetch(`${API_URL}/api/files?path=${encodeURIComponent(filePath)}`, {
+      const res = await fetchWithStepUp(`${API_URL}/api/files?path=${encodeURIComponent(filePath)}`, {
         method: 'DELETE',
         credentials: 'include'
       });
@@ -542,7 +621,7 @@ export default function Home() {
     setFileLoading(true);
     setFileError(null);
     try {
-      const res = await fetch(`${API_URL}/api/files/mkdir`, {
+      const res = await fetchWithStepUp(`${API_URL}/api/files/mkdir`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -570,7 +649,7 @@ export default function Home() {
     setFileLoading(true);
     setFileError(null);
     try {
-      const res = await fetch(`${API_URL}/api/files/create`, {
+      const res = await fetchWithStepUp(`${API_URL}/api/files/create`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -616,7 +695,7 @@ export default function Home() {
     const currentName = filePath.split('/').pop() || '';
     const newName = prompt('Tên mới:', currentName)?.trim();
     if (!newName || newName === currentName) return;
-    const res = await fetch(`${API_URL}/api/files/move`, {
+    const res = await fetchWithStepUp(`${API_URL}/api/files/move`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -640,6 +719,20 @@ export default function Home() {
   const [securityMessage, setSecurityMessage] = useState<string | null>(null);
   const [managedUsers, setManagedUsers] = useState<ManagedUser[]>([]);
   const [newUser, setNewUser] = useState<{ username: string; password: string; role: UserRole }>({ username: '', password: '', role: 'viewer' });
+  const [stepUpPrompt, setStepUpPrompt] = useState<{ resolve: (granted: boolean) => void } | null>(null);
+  const [stepUpPassword, setStepUpPassword] = useState('');
+  const [stepUpCode, setStepUpCode] = useState('');
+  const [stepUpError, setStepUpError] = useState<string | null>(null);
+
+  const submitStepUp = async () => {
+    setStepUpError(null);
+    try {
+      const res = await fetch(`${API_URL}/api/auth/step-up`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: stepUpPassword, code: stepUpCode }) });
+      const data = await res.json(); if (!data.success) throw new Error(data.error || 'Xác nhận thất bại');
+      const prompt = stepUpPrompt; setStepUpPrompt(null); setStepUpPassword(''); setStepUpCode(''); prompt?.resolve(true);
+    } catch (err: any) { setStepUpError(err.message); }
+  };
+  const cancelStepUp = () => { const prompt = stepUpPrompt; setStepUpPrompt(null); setStepUpPassword(''); setStepUpCode(''); setStepUpError(null); prompt?.resolve(false); };
 
   // Terminal and socket refs
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -867,6 +960,11 @@ export default function Home() {
     return () => clearTimeout(timer);
   }, [sessionReady, activeTab, loadLogs]);
 
+  useEffect(() => {
+    if (!sessionReady || activeTab !== 'system') return;
+    const timer = setTimeout(() => loadSystemData(systemView), 0); return () => clearTimeout(timer);
+  }, [sessionReady, activeTab, systemView, loadSystemData]);
+
   // Handle master password validation
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -925,7 +1023,7 @@ export default function Home() {
       const data = await res.json();
       if (data.success) setSecurityStatus(data);
     } catch (err) { console.error('Failed to load security status:', err); }
-  }, [sessionReady]);
+  }, [sessionReady, setSecurityStatus]);
 
   const securityRequest = async (endpoint: string, options: RequestInit = {}) => {
     setSecurityMessage(null);
@@ -971,7 +1069,7 @@ export default function Home() {
     if (!sessionReady || currentUser?.role !== 'root') return;
     const res = await fetch(`${API_URL}/api/users`, { credentials: 'include' }); const data = await res.json();
     if (data.success) setManagedUsers(data.users);
-  }, [sessionReady, currentUser]);
+  }, [sessionReady, currentUser, setManagedUsers]);
 
   const createUser = async () => {
     try {
@@ -1613,6 +1711,8 @@ export default function Home() {
                           <span>Cửa Sổ Dòng Lệnh</span>
                         </button>}
 
+                        {currentUser && ['admin', 'root'].includes(currentUser.role) && <button onClick={() => setActiveTab('system')} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded text-xs font-semibold uppercase tracking-wider transition ${activeTab === 'system' ? 'bg-blue-600/10 text-blue-400 border border-blue-500/20' : 'text-slate-400 hover:bg-white/5 hover:text-white'}`}><Database className="w-4 h-4" /><span>Hệ Thống</span></button>}
+
                         {currentUser && ['admin', 'root'].includes(currentUser.role) && <button
                           onClick={() => {
                             setActiveTab('logs');
@@ -1866,6 +1966,17 @@ export default function Home() {
                         </div>
                       </motion.div>
                     )}
+
+                    {activeTab === 'system' && currentUser && ['admin', 'root'].includes(currentUser.role) && <motion.div key="system-tab" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="w-full h-full p-6 overflow-y-auto bg-[#0a0a0c]">
+                      <div className="max-w-7xl mx-auto space-y-5">
+                        <div className="flex flex-col sm:flex-row sm:items-center gap-3 border-b border-white/10 pb-4"><div className="mr-auto"><h3 className="text-lg font-bold text-white uppercase tracking-wider">Quản Trị Hệ Thống</h3><p className="text-xs text-slate-500 font-mono">systemd services và Linux processes</p></div><div className="flex rounded border border-white/10 overflow-hidden"><button onClick={() => setSystemView('services')} className={`px-3 py-2 text-xs ${systemView === 'services' ? 'bg-blue-600 text-white' : 'bg-black'}`}>Services</button><button onClick={() => setSystemView('processes')} className={`px-3 py-2 text-xs ${systemView === 'processes' ? 'bg-blue-600 text-white' : 'bg-black'}`}>Processes</button></div><button onClick={() => loadSystemData()} className="px-3 py-2 text-xs border border-white/10 rounded"><RefreshCw className={`inline w-3.5 h-3.5 mr-1 ${systemLoading ? 'animate-spin' : ''}`} />Tải lại</button></div>
+                        <input value={systemQuery} onChange={(e) => setSystemQuery(e.target.value)} placeholder="Tìm service, PID, user hoặc command..." className="w-full bg-black border border-white/10 rounded px-3 py-2 text-xs" />
+                        {systemError && <div className="p-3 rounded border border-red-500/20 bg-red-500/5 text-red-400 text-xs">{systemError}</div>}
+                        <div className="rounded-xl border border-white/10 overflow-x-auto bg-[#0d0d12]/60"><table className="w-full text-left text-xs"><thead className="bg-[#111116] text-[10px] uppercase text-slate-500"><tr>{systemView === 'services' ? <><th className="p-3">Service</th><th className="p-3">Trạng thái</th><th className="p-3">Mô tả</th><th className="p-3">Thao tác</th></> : <><th className="p-3">PID / User</th><th className="p-3">CPU / RAM</th><th className="p-3">Command</th><th className="p-3">Signal</th></>}</tr></thead><tbody className="divide-y divide-white/5 font-mono">
+                          {systemView === 'services' ? services.filter(service => `${service.unit} ${service.description}`.toLowerCase().includes(systemQuery.toLowerCase())).map(service => <tr key={service.unit}><td className="p-3 text-white">{service.unit}</td><td className="p-3"><span className={service.active === 'active' ? 'text-emerald-400' : service.active === 'failed' ? 'text-red-400' : 'text-amber-400'}>{service.active}/{service.sub}</span></td><td className="p-3 text-slate-400 max-w-md truncate">{service.description}</td><td className="p-3"><div className="flex flex-wrap gap-2"><button onClick={() => openServiceLogs(service.unit)} className="text-blue-400">Logs</button><button onClick={() => serviceAction(service.unit, service.active === 'active' ? 'restart' : 'start')} className="text-emerald-400">{service.active === 'active' ? 'Restart' : 'Start'}</button>{currentUser?.role === 'root' && <>{service.active === 'active' && <button onClick={() => confirm(`Dừng ${service.unit}?`) && serviceAction(service.unit, 'stop')} className="text-red-400">Stop</button>}<button onClick={() => serviceAction(service.unit, 'disable')} className="text-amber-400">Disable</button></>}<button onClick={() => serviceAction(service.unit, 'enable')} className="text-slate-400">Enable</button></div></td></tr>) : processes.filter(process => `${process.pid} ${process.user} ${process.command}`.toLowerCase().includes(systemQuery.toLowerCase())).map(process => <tr key={process.pid}><td className="p-3"><span className="text-white">{process.pid}</span><span className="block text-[10px] text-slate-500">{process.user} · PPID {process.ppid} · {process.elapsed}</span></td><td className="p-3"><span className="text-blue-400">{process.cpu}%</span> / <span className="text-purple-400">{process.memory}%</span><span className="block text-[10px] text-slate-500">{(process.rssKB / 1024).toFixed(1)} MB</span></td><td className="p-3 text-slate-300 max-w-2xl break-all">{process.command}</td><td className="p-3"><div className="flex gap-2"><button disabled={process.pid <= 1} onClick={() => signalProcess(process.pid, 'SIGTERM')} className="text-amber-400 disabled:opacity-20">TERM</button>{currentUser?.role === 'root' && <button disabled={process.pid <= 1} onClick={() => signalProcess(process.pid, 'SIGKILL')} className="text-red-400 disabled:opacity-20">KILL</button>}</div></td></tr>)}
+                        </tbody></table></div>
+                      </div>
+                    </motion.div>}
 
                     {/* TAB 3: Admin Configurations & Security Settings */}
                     {activeTab === 'settings' && (
@@ -2263,6 +2374,7 @@ export default function Home() {
                                 <History className="w-3.5 h-3.5" />
                                 <span>Thùng rác</span>
                               </button>
+                              <button onClick={() => openSnapshots()} className="flex items-center gap-1.5 px-3 py-1.5 bg-[#111116] hover:bg-[#1a1a24] text-xs font-semibold text-slate-300 border border-white/10 rounded"><Database className="w-3.5 h-3.5" /><span>Snapshots</span></button>
                               <button
                                 onClick={() => { setShowCreateFolder(true); setShowCreateFile(false); }}
                                 className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-xs font-semibold text-white rounded transition cursor-pointer"
@@ -2454,6 +2566,7 @@ export default function Home() {
                                   </span>
                                 </div>
                                 <div className="flex gap-2">
+                                  <button onClick={() => openSnapshots(viewingFile)} className="px-3 py-1.5 bg-amber-500/10 text-amber-300 border border-amber-500/20 rounded text-xs">Lịch sử</button>
                                   {previewKind(viewingFile) !== 'text' ? null : isEditingFile ? (
                                     <>
                                       <button
@@ -2715,6 +2828,11 @@ export default function Home() {
                       {trashItems.length === 0 ? <p className="text-sm text-slate-500">Thùng rác trống.</p> : trashItems.map((item) => <label key={item.id} className="flex gap-3 p-3 border border-white/5 rounded text-xs"><input type="checkbox" checked={selectedTrashIds.includes(item.id)} onChange={() => setSelectedTrashIds((ids) => ids.includes(item.id) ? ids.filter((id) => id !== item.id) : [...ids, item.id])} /><span className="flex-1 min-w-0"><span className="block text-white truncate">{item.name || item.originalPath.split('/').pop()}</span><span className="text-slate-500 font-mono break-all">{item.originalPath}</span></span><span className="text-slate-500">{item.deletedAt ? new Date(item.deletedAt).toLocaleString() : ''}</span></label>)}
                       <div className="flex flex-wrap gap-2"><button disabled={!selectedTrashIds.length} onClick={() => trashAction('restore', selectedTrashIds)} className="px-3 py-2 bg-emerald-600 rounded text-xs disabled:opacity-30">Khôi phục</button><button disabled={!selectedTrashIds.length} onClick={() => confirm('Xóa vĩnh viễn các mục đã chọn?') && trashAction('delete', selectedTrashIds)} className="px-3 py-2 bg-red-600 rounded text-xs disabled:opacity-30">Xóa vĩnh viễn</button><button onClick={() => confirm('Dọn sạch toàn bộ thùng rác?') && trashAction('empty')} className="ml-auto px-3 py-2 bg-red-950 text-red-300 rounded text-xs">Dọn sạch</button></div>
                     </div></div>}
+                    {showSnapshots && <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"><div className="w-full max-w-4xl max-h-[85vh] overflow-auto rounded-xl border border-white/10 bg-[#111116] p-5 space-y-4">
+                      <div className="flex items-center gap-3"><Database className="w-5 h-5 text-amber-400" /><div><h4 className="font-bold text-white">Lịch sử snapshot</h4><p className="text-[10px] text-slate-500 font-mono">{snapshotPath || 'Tất cả tệp'} · {snapshots.length} phiên bản</p></div><button onClick={() => setShowSnapshots(false)} className="ml-auto"><X className="w-4 h-4" /></button></div>
+                      {snapshots.length === 0 ? <p className="py-12 text-center text-sm text-slate-500">Chưa có snapshot phù hợp.</p> : <div className="space-y-2">{snapshots.map(snapshot => <div key={snapshot.id} className="grid md:grid-cols-[1fr_180px_auto] gap-3 items-center p-3 rounded border border-white/5 bg-black/40"><div className="min-w-0"><div className="text-xs text-white truncate">{snapshot.originalPath}</div><div className="mt-1 text-[10px] text-slate-500 font-mono">{snapshot.reason} · {(snapshot.size / 1024).toFixed(1)} KB · mode {snapshot.mode.toString(8)}</div><code className="block mt-1 text-[9px] text-slate-600 truncate" title={snapshot.checksum}>SHA-256 {snapshot.checksum}</code></div><div className="text-[10px] text-slate-500">{new Date(snapshot.createdAt).toLocaleString()}</div><div className="flex gap-2"><button onClick={() => downloadSnapshot(snapshot.id, snapshot.originalPath.split('/').pop() || 'snapshot')} className="text-xs text-blue-400">Tải</button>{currentUser?.role !== 'viewer' && <><button onClick={() => restoreSnapshot(snapshot.id)} className="text-xs text-emerald-400">Khôi phục</button><button onClick={() => deleteSnapshot(snapshot.id)} className="text-xs text-red-400">Xóa</button></>}</div></div>)}</div>}
+                    </div></div>}
+                    {serviceLogs && <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"><div className="w-full max-w-5xl max-h-[85vh] flex flex-col rounded-xl border border-white/10 bg-[#111116] p-5 gap-4"><div className="flex items-center"><div><h4 className="font-bold text-white">Journal: {serviceLogs.unit}</h4><p className="text-[10px] text-slate-500">200 dòng gần nhất</p></div><button onClick={() => setServiceLogs(null)} className="ml-auto"><X className="w-4 h-4" /></button></div><pre className="flex-1 overflow-auto whitespace-pre-wrap break-words bg-black border border-white/5 rounded p-4 text-[11px] leading-relaxed text-slate-300 font-mono">{serviceLogs.logs || 'Không có log.'}</pre></div></div>}
                   </AnimatePresence>
                 </div>
               </main>
@@ -2739,6 +2857,13 @@ export default function Home() {
           </motion.div>
         )}
       </AnimatePresence>
+      {stepUpPrompt && <div className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center p-4"><div className="w-full max-w-md rounded-xl border border-red-500/30 bg-[#111116] p-6 space-y-4 shadow-2xl">
+        <div className="flex items-start gap-3"><ShieldCheck className="w-6 h-6 text-red-400 shrink-0" /><div><h3 className="font-bold text-white">Xác nhận thao tác nguy hiểm</h3><p className="mt-1 text-xs text-slate-400">Quyền xác nhận có hiệu lực 5 phút cho session hiện tại.</p></div></div>
+        <input type="password" value={stepUpPassword} onChange={(e) => setStepUpPassword(e.target.value)} placeholder="Mật khẩu hiện tại" autoFocus className="w-full bg-black border border-white/10 rounded px-3 py-2 text-sm" />
+        <input value={stepUpCode} onChange={(e) => setStepUpCode(e.target.value)} placeholder="Mã 2FA hoặc recovery code (nếu đã bật)" autoComplete="one-time-code" className="w-full bg-black border border-white/10 rounded px-3 py-2 text-sm" />
+        {stepUpError && <p className="text-xs text-red-400">{stepUpError}</p>}
+        <div className="flex justify-end gap-2"><button onClick={cancelStepUp} className="px-4 py-2 text-xs border border-white/10 rounded">Hủy</button><button onClick={submitStepUp} disabled={!stepUpPassword} className="px-4 py-2 text-xs bg-red-600 text-white rounded disabled:opacity-40">Xác nhận</button></div>
+      </div></div>}
     </div>
   );
 }

@@ -12,6 +12,8 @@ import { createFileManagerRouter } from './lib/file-manager-router';
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 
 dotenv.config({ path: path.join(process.cwd(), '.env'), override: false, quiet: true });
 
@@ -21,8 +23,12 @@ const nextApp = backendOnly ? null : next({ dev });
 const handle = nextApp?.getRequestHandler();
 const FILE_MANAGER_ROOT = path.resolve(process.env.FILE_MANAGER_ROOT || process.cwd());
 const FILE_MANAGER_TRASH_DIR = path.resolve(process.env.FILE_MANAGER_TRASH_DIR || path.join(process.cwd(), '.terminal-trash'));
+const FILE_MANAGER_SNAPSHOT_DIR = path.resolve(process.env.FILE_MANAGER_SNAPSHOT_DIR || path.join(process.cwd(), '.terminal-snapshots'));
 const SESSION_COOKIE = 'terminal_session';
+const STEP_UP_COOKIE = 'terminal_step_up';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const STEP_UP_TTL_MS = 5 * 60 * 1000;
+const execFileAsync = promisify(execFile);
 type Role = 'viewer' | 'operator' | 'admin' | 'root';
 type StoredUser = { id: string; username: string; passwordHash: string; legacySalt?: string; role: Role; enabled: boolean; createdAt: number; totpSecret?: string; recoveryCodes?: string[]; pendingTotpSecret?: string };
 type StoredSession = { tokenHash: string; userId: string; createdAt: number; expiresAt: number; ip: string; userAgent: string };
@@ -258,17 +264,17 @@ function hasSession(token: string): boolean {
 }
 function sessionRole(token: string): Role | null { const session = db?.getSession(token); return session ? db.getUserById(session.userId)?.role || null : null; }
 
-function sessionTokenFromCookie(cookieHeader: string | undefined): string {
+function cookieValue(cookieHeader: string | undefined, targetName: string): string {
   const cookies = String(cookieHeader || '').split(';');
   for (const cookie of cookies) {
     const [name, ...value] = cookie.trim().split('=');
-    if (name === SESSION_COOKIE) return decodeURIComponent(value.join('='));
+    if (name === targetName) return decodeURIComponent(value.join('='));
   }
   return '';
 }
 
 function sessionToken(req: express.Request): string {
-  return sessionTokenFromCookie(req.headers.cookie);
+  return cookieValue(req.headers.cookie, SESSION_COOKIE);
 }
 
 function authenticated(req: express.Request): boolean {
@@ -297,6 +303,18 @@ function setSessionCookie(res: express.Response, token: string) {
 function clearSessionCookie(res: express.Response) {
   const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
   res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`);
+}
+
+const stepUpGrants = new Map<string, { sessionHash: string; expiresAt: number }>();
+function setStepUpCookie(req: express.Request, res: express.Response) {
+  const grant = crypto.randomBytes(32).toString('base64url'); const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  stepUpGrants.set(grant, { sessionHash: crypto.createHash('sha256').update(sessionToken(req)).digest('hex'), expiresAt: Date.now() + STEP_UP_TTL_MS });
+  res.setHeader('Set-Cookie', `${STEP_UP_COOKIE}=${encodeURIComponent(grant)}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=${STEP_UP_TTL_MS / 1000}${secure}`);
+}
+function hasStepUp(req: express.Request): boolean {
+  const grant = cookieValue(req.headers.cookie, STEP_UP_COOKIE);
+  const entry = grant ? stepUpGrants.get(grant) : undefined; const token = sessionToken(req);
+  return Boolean(entry && token && entry.expiresAt > Date.now() && entry.sessionHash === crypto.createHash('sha256').update(token).digest('hex'));
 }
 
 const previewTickets = new Map<string, { path: string; expiresAt: number }>();
@@ -382,6 +400,14 @@ function redactCommand(command: string): string {
     .replace(/((?:password|passwd|token|secret|api[_-]?key)\s*[=:]\s*)([^\s]+)/gi, '$1[REDACTED]')
     .replace(/(authorization:\s*bearer\s+)[^\s]+/gi, '$1[REDACTED]');
 }
+
+async function runSystemCommand(file: string, args: string[], timeout = 15_000) {
+  if (process.platform === 'win32') throw Object.assign(new Error('Tính năng này chỉ hỗ trợ Linux'), { status: 501 });
+  try { return await execFileAsync(file, args, { timeout, maxBuffer: 2 * 1024 * 1024, encoding: 'utf8' }); }
+  catch (error: any) { throw Object.assign(new Error(String(error.stderr || error.message).trim()), { status: error.code === 'ENOENT' ? 501 : 422 }); }
+}
+
+function validUnitName(value: unknown): value is string { return typeof value === 'string' && /^[A-Za-z0-9@_.:-]{1,255}$/.test(value); }
 
 function createSession(req: express.Request, res: express.Response, userId: string) {
   const token = crypto.randomBytes(32).toString('hex');
@@ -772,6 +798,24 @@ async function startServer() {
     return res.json({ success: true, ticket: createTicket(previewTickets, { path: req.body.path, expiresAt: Date.now() + 60_000 }) });
   });
 
+  expressApp.post('/api/auth/step-up', async (req, res) => {
+    const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    try {
+      const rateKey = `step-up:${requestInfo(req).ip}`;
+      if (!checkRateLimit(rateKey)) return res.status(429).json({ success: false, error: 'Quá nhiều lần thử. Vui lòng đợi 15 phút.' });
+      const passwordValid = await verifyPassword(String(req.body?.password || ''), context.user);
+      const secondFactorValid = !context.user.totpSecret || await verifySecondFactor(String(req.body?.code || ''), context.user);
+      if (!passwordValid || !secondFactorValid) {
+        auditRequest(req, { category: 'security', action: 'step_up', event: 'Step-up authorization failed', level: 'warning', result: 'failure' });
+        return res.status(401).json({ success: false, error: 'Mật khẩu hoặc mã xác thực không đúng' });
+      }
+      resetRateLimit(rateKey);
+      setStepUpCookie(req, res);
+      auditRequest(req, { category: 'security', action: 'step_up', event: 'Step-up authorization granted', level: 'critical' });
+      return res.json({ success: true, expiresIn: STEP_UP_TTL_MS / 1000 });
+    } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message }); }
+  });
+
   expressApp.get('/api/security', async (req, res) => {
     const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
     const currentHash = crypto.createHash('sha256').update(sessionToken(req)).digest('hex');
@@ -878,13 +922,73 @@ async function startServer() {
     return res.json({ success: true });
   });
 
+  expressApp.get('/api/system/services', async (req, res) => {
+    if (!requireRole(req, res, 'admin')) return;
+    try {
+      const { stdout } = await runSystemCommand('systemctl', ['list-units', '--type=service', '--all', '--no-legend', '--no-pager', '--plain']);
+      const services = stdout.split(/\r?\n/).filter(Boolean).map(line => {
+        line = line.replace(/^\s*[●*]\s*/, '');
+        const match = /^\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(.*)$/.exec(line);
+        return match ? { unit: match[1], load: match[2], active: match[3], sub: match[4], description: match[5] } : null;
+      }).filter(Boolean).slice(0, 1000);
+      return res.json({ success: true, services });
+    } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message }); }
+  });
+
+  expressApp.get('/api/system/services/:unit/logs', async (req, res) => {
+    if (!requireRole(req, res, 'admin')) return;
+    if (!validUnitName(req.params.unit)) return res.status(400).json({ success: false, error: 'Tên service không hợp lệ' });
+    try {
+      const lines = Math.min(500, Math.max(10, Number(req.query.lines) || 100));
+      const { stdout } = await runSystemCommand('journalctl', ['-u', req.params.unit, '-n', String(lines), '--no-pager', '--output=short-iso'], 20_000);
+      return res.json({ success: true, unit: req.params.unit, logs: stdout });
+    } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message }); }
+  });
+
+  expressApp.post('/api/system/services/:unit/action', async (req, res) => {
+    const context = requireRole(req, res, 'admin'); if (!context) return;
+    if (!hasStepUp(req)) return res.status(428).json({ success: false, code: 'STEP_UP_REQUIRED', error: 'Điều khiển service yêu cầu xác nhận lại danh tính' });
+    const action = req.body?.action; if (!validUnitName(req.params.unit) || !['start', 'stop', 'restart', 'enable', 'disable'].includes(action)) return res.status(400).json({ success: false, error: 'Service hoặc hành động không hợp lệ' });
+    if (['stop', 'disable'].includes(action) && context.user.role !== 'root') return res.status(403).json({ success: false, error: 'Chỉ root được dừng hoặc disable service' });
+    try {
+      await runSystemCommand('systemctl', [action, req.params.unit], 30_000);
+      auditRequest(req, { category: 'system', action: `service_${action}`, event: `Service ${action}: ${req.params.unit}`, level: ['stop', 'disable'].includes(action) ? 'critical' : 'warning', metadata: { unit: req.params.unit } });
+      return res.json({ success: true });
+    } catch (error: any) { auditRequest(req, { category: 'system', action: `service_${action}`, event: `Service action failed: ${req.params.unit}`, level: 'critical', result: 'failure', metadata: { unit: req.params.unit, error: error.message } }); return res.status(error.status || 500).json({ success: false, error: error.message }); }
+  });
+
+  expressApp.get('/api/system/processes', async (req, res) => {
+    const context = requireRole(req, res, 'admin'); if (!context) return;
+    try {
+      const { stdout } = await runSystemCommand('ps', ['-eo', 'pid=,ppid=,user=,%cpu=,%mem=,rss=,etime=,args=', '--sort=-%cpu']);
+      const processes = stdout.split(/\r?\n/).filter(Boolean).slice(0, 500).map(line => {
+        const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line);
+        return match ? { pid: Number(match[1]), ppid: Number(match[2]), user: match[3], cpu: Number(match[4]), memory: Number(match[5]), rssKB: Number(match[6]), elapsed: match[7], command: match[8] } : null;
+      }).filter(Boolean);
+      return res.json({ success: true, processes });
+    } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message }); }
+  });
+
+  expressApp.post('/api/system/processes/:pid/signal', async (req, res) => {
+    const context = requireRole(req, res, 'admin'); if (!context) return;
+    if (!hasStepUp(req)) return res.status(428).json({ success: false, code: 'STEP_UP_REQUIRED', error: 'Gửi signal yêu cầu xác nhận lại danh tính' });
+    const pid = Number(req.params.pid); const signal = req.body?.signal;
+    if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid || !['SIGTERM', 'SIGKILL'].includes(signal)) return res.status(400).json({ success: false, error: 'PID hoặc signal không hợp lệ' });
+    if (signal === 'SIGKILL' && context.user.role !== 'root') return res.status(403).json({ success: false, error: 'Chỉ root được gửi SIGKILL' });
+    try {
+      process.kill(pid, signal); auditRequest(req, { category: 'system', action: 'process_signal', event: `${signal} sent to process ${pid}`, level: signal === 'SIGKILL' ? 'critical' : 'warning', metadata: { pid, signal } }); return res.json({ success: true });
+    } catch (error: any) { auditRequest(req, { category: 'system', action: 'process_signal', event: `Failed to signal process ${pid}`, level: 'critical', result: 'failure', metadata: { pid, signal, error: error.message } }); return res.status(error.code === 'ESRCH' ? 404 : 500).json({ success: false, error: error.message }); }
+  });
+
   expressApp.use('/api/files', createFileManagerRouter({
     hasSession,
     sessionRole,
+    hasStepUp,
     consumePreviewTicket,
     log: async (event, ip, details) => audit({ category: 'file', action: details?.action || event.split(':', 1)[0].slice(0, 80), event, level: details?.level || (/xóa|metadata|quyền/i.test(event) ? 'warning' : 'info'), result: details?.result || 'success', ip, metadata: details?.metadata }),
     rootDir: FILE_MANAGER_ROOT,
-    trashDir: FILE_MANAGER_TRASH_DIR
+    trashDir: FILE_MANAGER_TRASH_DIR,
+    snapshotDir: FILE_MANAGER_SNAPSHOT_DIR
   }));
 
   // --- Socket.io Terminal Implementation ---

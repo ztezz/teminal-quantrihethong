@@ -43,13 +43,16 @@ const OFFICE_EXTENSIONS = new Set(['.doc', '.docx', '.xls', '.xlsx', '.ppt', '.p
 type Options = {
   hasSession: (token: string) => boolean;
   sessionRole: (token: string) => 'viewer' | 'operator' | 'admin' | 'root' | null;
+  hasStepUp: (req: Request) => boolean;
   consumePreviewTicket: (ticket: string, filePath: string) => boolean;
   log: (event: string, ip: string, details?: { action?: string; level?: 'info' | 'warning' | 'critical'; result?: 'success' | 'failure'; metadata?: Record<string, unknown> }) => Promise<unknown>;
   rootDir?: string;
   trashDir?: string;
+  snapshotDir?: string;
 };
 
 type TrashMetadata = { originalPath: string; deletedAt: string };
+type SnapshotMetadata = { id: string; originalPath: string; createdAt: string; reason: string; size: number; mode: number; mtime: string; checksum: string };
 
 function clientIp(req: Request) {
   return (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() || req.socket.remoteAddress || '127.0.0.1';
@@ -71,10 +74,13 @@ function modeInfo(mode: number) {
   };
 }
 
-export function createFileManagerRouter({ hasSession, sessionRole, consumePreviewTicket, log, rootDir, trashDir }: Options) {
+export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, consumePreviewTicket, log, rootDir, trashDir, snapshotDir }: Options) {
   const router = Router();
   const root = path.resolve(rootDir || process.cwd());
   const trashRoot = path.resolve(trashDir || path.join(process.cwd(), '.terminal-trash'));
+  const snapshotRoot = path.resolve(snapshotDir || path.join(process.cwd(), '.terminal-snapshots'));
+  const maxSnapshotFileSize = Number(process.env.SNAPSHOT_MAX_FILE_MB || 100) * 1024 * 1024;
+  const maxSnapshotTotalSize = Number(process.env.SNAPSHOT_MAX_TOTAL_MB || 2048) * 1024 * 1024;
 
   const cookieToken = (req: Request) => {
     const encodedToken = String(req.headers.cookie || '').split(';').map(cookie => cookie.trim().split('=')).find(([name]) => name === 'terminal_session')?.slice(1).join('=') || '';
@@ -83,6 +89,19 @@ export function createFileManagerRouter({ hasSession, sessionRole, consumePrevie
   const authenticate = (req: Request) => { const token = cookieToken(req); return Boolean(token && hasSession(token)); };
   const relative = (absolutePath: string) => path.relative(root, absolutePath).split(path.sep).join('/');
   const httpError = (status: number, message: string) => Object.assign(new Error(message), { status });
+  const sensitivePath = (value: unknown) => {
+    if (typeof value !== 'string') return false;
+    let decoded = value; try { decoded = decodeURIComponent(value); } catch { /* Invalid encoding is handled by the route. */ }
+    const normalized = decoded.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
+    return /^(etc|boot|usr|root|var|bin|sbin|lib|lib32|lib64)(?:\/|$)/.test(normalized);
+  };
+  const dangerousRequest = (req: Request) => {
+    if ((req.method === 'POST' && req.path === '/snapshots/restore') || (req.method === 'DELETE' && req.path === '/snapshots')) return true;
+    if (req.method === 'PATCH' && req.path === '/metadata') return true;
+    if ((req.method === 'DELETE' && (req.path === '/trash' || req.path === '/trash/empty')) || (req.method === 'POST' && req.path === '/trash/restore')) return true;
+    const values = [req.query.path, req.body?.path, req.body?.filePath, req.body?.dirPath, req.body?.sourcePath, req.body?.destinationDir, req.body?.destinationPath, req.body?.archivePath, req.body?.targetPath, req.body?.paths, req.body?.ids, req.headers['x-directory']];
+    return values.flatMap(value => Array.isArray(value) ? value : [value]).some(sensitivePath);
+  };
   const resolveInsideRoot = (userPath: unknown, allowTrash = false) => {
     if (typeof userPath !== 'string' && userPath !== undefined) throw httpError(400, 'Đường dẫn không hợp lệ');
     const normalized = typeof userPath === 'string' ? userPath.replace(/^[/\\]+/, '') : '';
@@ -91,6 +110,8 @@ export function createFileManagerRouter({ hasSession, sessionRole, consumePrevie
     if (relativeTarget.startsWith('..' + path.sep) || relativeTarget === '..' || path.isAbsolute(relativeTarget)) throw httpError(403, 'Đường dẫn nằm ngoài thư mục quản lý');
     const relativeTrash = path.relative(trashRoot, target);
     if (!allowTrash && (relativeTrash === '' || (!relativeTrash.startsWith('..' + path.sep) && relativeTrash !== '..' && !path.isAbsolute(relativeTrash)))) throw httpError(403, 'Không thể truy cập trực tiếp thùng rác');
+    const relativeSnapshots = path.relative(snapshotRoot, target);
+    if (relativeSnapshots === '' || (!relativeSnapshots.startsWith('..' + path.sep) && relativeSnapshots !== '..' && !path.isAbsolute(relativeSnapshots))) throw httpError(403, 'Không thể truy cập trực tiếp kho snapshot');
     return target;
   };
   const fail = (res: Response, error: any) => {
@@ -150,6 +171,29 @@ export function createFileManagerRouter({ hasSession, sessionRole, consumePrevie
     try { return { success: true, ...(await action(value)) }; }
     catch (error: any) { return { success: false, path: value, code: error.code || `HTTP_${error.status || 500}`, error: error.message || 'Thao tác thất bại' }; }
   }));
+  const checksumFile = (filePath: string) => new Promise<string>((resolve, reject) => {
+    const hash = crypto.createHash('sha256'); fs.createReadStream(filePath).on('data', chunk => hash.update(chunk)).on('end', () => resolve(hash.digest('hex'))).on('error', reject);
+  });
+  const pruneSnapshots = async () => {
+    const files = await fsp.readdir(snapshotRoot).catch(() => []); const metadataFiles = files.filter(name => name.endsWith('.json'));
+    const entries = (await Promise.all(metadataFiles.map(async name => { try { const metadata = JSON.parse(await fsp.readFile(path.join(snapshotRoot, name), 'utf8')) as SnapshotMetadata; return { metadata, metadataFile: path.join(snapshotRoot, name), dataFile: path.join(snapshotRoot, `${metadata.id}.data`) }; } catch { return null; } }))).filter(Boolean) as Array<{ metadata: SnapshotMetadata; metadataFile: string; dataFile: string }>;
+    let total = entries.reduce((sum, entry) => sum + entry.metadata.size, 0);
+    for (const entry of entries.sort((a, b) => a.metadata.createdAt.localeCompare(b.metadata.createdAt))) {
+      if (total <= maxSnapshotTotalSize) break;
+      await fsp.rm(entry.dataFile, { force: true }); await fsp.rm(entry.metadataFile, { force: true }); total -= entry.metadata.size;
+    }
+  };
+  const createSnapshot = async (target: string, reason: string) => {
+    let stat: fs.Stats; try { stat = await fsp.stat(target); } catch (error: any) { if (error.code === 'ENOENT') return null; throw error; }
+    if (!stat.isFile() || stat.size > maxSnapshotFileSize) return null;
+    await fsp.mkdir(snapshotRoot, { recursive: true });
+    const id = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}`; const dataFile = path.join(snapshotRoot, `${id}.data`); const metadataFile = path.join(snapshotRoot, `${id}.json`);
+    await fsp.copyFile(target, dataFile, fs.constants.COPYFILE_EXCL);
+    const metadata: SnapshotMetadata = { id, originalPath: relative(target), createdAt: new Date().toISOString(), reason, size: stat.size, mode: stat.mode & 0o7777, mtime: stat.mtime.toISOString(), checksum: await checksumFile(dataFile) };
+    await fsp.writeFile(metadataFile, JSON.stringify(metadata), { flag: 'wx' }); await pruneSnapshots();
+    await log(`Đã tạo snapshot: ${metadata.originalPath}`, 'system', { action: 'snapshot_create', metadata: { id, reason, size: stat.size } });
+    return metadata;
+  };
 
   router.use((req, res, next) => {
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
@@ -164,6 +208,10 @@ export function createFileManagerRouter({ hasSession, sessionRole, consumePrevie
     const role = sessionRole(cookieToken(req));
     if (!acceptsQueryToken && !['GET', 'HEAD', 'OPTIONS'].includes(req.method) && role === 'viewer') return res.status(403).json({ success: false, code: 'READ_ONLY', error: 'Tài khoản chỉ có quyền xem' });
     if (req.method === 'PATCH' && req.path === '/metadata' && role !== 'root') return res.status(403).json({ success: false, code: 'ROOT_REQUIRED', error: 'Chỉ tài khoản root được thay đổi quyền và chủ sở hữu' });
+    if (!acceptsQueryToken && !['GET', 'HEAD', 'OPTIONS'].includes(req.method) && dangerousRequest(req) && !hasStepUp(req)) {
+      void log(`Step-up required: ${req.method} ${req.path}`, clientIp(req), { action: 'step_up_required', level: 'warning', result: 'failure', metadata: { path: req.query.path || req.body?.path || req.body?.filePath || req.body?.dirPath || req.body?.sourcePath || req.headers['x-directory'] } });
+      return res.status(428).json({ success: false, code: 'STEP_UP_REQUIRED', error: 'Thao tác nguy hiểm yêu cầu xác nhận lại danh tính' });
+    }
     return next();
   });
 
@@ -172,7 +220,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, consumePrevie
       const target = resolveInsideRoot(req.query.path);
       await mustBeDirectory(target);
       const entries = await fsp.readdir(target, { withFileTypes: true });
-      const files = (await Promise.all(entries.filter(entry => path.join(target, entry.name) !== trashRoot).map(entry => itemDetails(path.join(target, entry.name))))).sort((a, b) => Number(b.isDirectory) - Number(a.isDirectory) || a.name.localeCompare(b.name));
+      const files = (await Promise.all(entries.filter(entry => ![trashRoot, snapshotRoot].includes(path.join(target, entry.name))).map(entry => itemDetails(path.join(target, entry.name))))).sort((a, b) => Number(b.isDirectory) - Number(a.isDirectory) || a.name.localeCompare(b.name));
       return res.json({ success: true, currentPath: relative(target), parentPath: target === root ? null : relative(path.dirname(target)), platform: process.platform, files });
     } catch (error) { return fail(res, error); }
   });
@@ -275,6 +323,50 @@ export function createFileManagerRouter({ hasSession, sessionRole, consumePrevie
     }
   });
 
+  const readSnapshot = async (id: unknown) => {
+    if (!validName(id)) throw httpError(400, 'Snapshot không hợp lệ');
+    const metadata = JSON.parse(await fsp.readFile(path.join(snapshotRoot, `${id}.json`), 'utf8')) as SnapshotMetadata;
+    if (metadata.id !== id) throw httpError(400, 'Metadata snapshot không hợp lệ');
+    return { metadata, dataFile: path.join(snapshotRoot, `${id}.data`) };
+  };
+
+  router.get('/snapshots', async (req, res) => {
+    try {
+      const requestedPath = typeof req.query.path === 'string' ? req.query.path.replace(/^[/\\]+/, '') : '';
+      const files = await fsp.readdir(snapshotRoot).catch(() => []);
+      const items = (await Promise.all(files.filter(name => name.endsWith('.json')).map(async name => { try { return JSON.parse(await fsp.readFile(path.join(snapshotRoot, name), 'utf8')) as SnapshotMetadata; } catch { return null; } }))).filter((item): item is SnapshotMetadata => Boolean(item && (!requestedPath || item.originalPath === requestedPath))).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      return res.json({ success: true, items: items.slice(0, 500), maxFileMB: maxSnapshotFileSize / 1024 / 1024, maxTotalMB: maxSnapshotTotalSize / 1024 / 1024 });
+    } catch (error) { return fail(res, error); }
+  });
+
+  router.get('/snapshots/download', async (req, res) => {
+    try {
+      const { metadata, dataFile } = await readSnapshot(req.query.id); const stat = await fsp.stat(dataFile);
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(metadata.originalPath))}`); res.setHeader('Content-Length', stat.size);
+      return fs.createReadStream(dataFile).on('error', error => res.destroy(error)).pipe(res);
+    } catch (error) { return fail(res, error); }
+  });
+
+  router.post('/snapshots/restore', async (req, res) => {
+    let temp: string | undefined;
+    try {
+      const { metadata, dataFile } = await readSnapshot(req.body?.id); const checksum = await checksumFile(dataFile);
+      if (checksum !== metadata.checksum) throw httpError(409, 'Snapshot hỏng hoặc đã bị thay đổi');
+      const target = resolveInsideRoot(metadata.originalPath); await fsp.mkdir(path.dirname(target), { recursive: true }); await createSnapshot(target, 'before_snapshot_restore');
+      temp = path.join(path.dirname(target), `.${path.basename(target)}.${crypto.randomUUID()}.restore`); await fsp.copyFile(dataFile, temp, fs.constants.COPYFILE_EXCL); await fsp.chmod(temp, metadata.mode); await fsp.rename(temp, target); temp = undefined;
+      await log(`Đã khôi phục snapshot: ${metadata.originalPath}`, clientIp(req), { action: 'snapshot_restore', level: 'critical', metadata: { id: metadata.id, checksum } });
+      return res.json({ success: true, path: metadata.originalPath });
+    } catch (error) { if (temp) await fsp.rm(temp, { force: true }).catch(() => undefined); return fail(res, error); }
+  });
+
+  router.delete('/snapshots', async (req, res) => {
+    try {
+      const { metadata, dataFile } = await readSnapshot(req.body?.id); await fsp.rm(dataFile); await fsp.rm(path.join(snapshotRoot, `${metadata.id}.json`));
+      await log(`Đã xóa snapshot: ${metadata.originalPath}`, clientIp(req), { action: 'snapshot_delete', level: 'critical', metadata: { id: metadata.id } });
+      return res.json({ success: true });
+    } catch (error) { return fail(res, error); }
+  });
+
   router.post('/create', async (req, res) => {
     try {
       const { dirPath, name } = req.body; if (!validName(name)) throw httpError(400, 'Tên tệp không hợp lệ');
@@ -292,6 +384,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, consumePrevie
       const target = resolveInsideRoot(filePath); const stat = await fsp.stat(target);
       if (!stat.isFile()) throw httpError(400, 'Đường dẫn không phải tệp tin');
       if (!expectedMtime || stat.mtime.toISOString() !== expectedMtime) throw httpError(409, 'Tệp đã thay đổi trên máy chủ. Hãy tải lại trước khi lưu.');
+      await createSnapshot(target, 'before_write');
       temp = path.join(path.dirname(target), `.${path.basename(target)}.${crypto.randomUUID()}.tmp`);
       await fsp.writeFile(temp, content, { encoding: 'utf8', flag: 'wx', mode: stat.mode }); await fsp.rename(temp, target); temp = undefined;
       const updated = await fsp.stat(target); await log(`Đã chỉnh sửa tệp: ${relative(target)}`, clientIp(req));
@@ -327,7 +420,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, consumePrevie
     try {
       const { sourcePath, destinationDir, newName } = req.body; const source = resolveInsideRoot(sourcePath); const destination = resolveInsideRoot(destinationDir); await mustBeDirectory(destination);
       const name = newName || path.basename(source); if (!validName(name)) throw httpError(400, 'Tên mới không hợp lệ');
-      const target = path.join(destination, name); await ensureMissing(target); await fsp.rename(source, target); await log(`Đã di chuyển/đổi tên: ${relative(source)} -> ${relative(target)}`, clientIp(req));
+      const target = path.join(destination, name); await ensureMissing(target); await createSnapshot(source, 'before_move'); await fsp.rename(source, target); await log(`Đã di chuyển/đổi tên: ${relative(source)} -> ${relative(target)}`, clientIp(req));
       return res.json({ success: true, path: relative(target) });
     } catch (error) { return fail(res, error); }
   });
@@ -340,7 +433,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, consumePrevie
         const source = resolveInsideRoot(value); if (source === root) throw httpError(400, 'Không thể chuyển thư mục gốc');
         const target = path.join(destination, path.basename(source)); if (target === source || target.startsWith(source + path.sep)) throw httpError(400, 'Đích không thể nằm trong nguồn');
         await ensureMissing(target);
-        if (operation === 'copy') await fsp.cp(source, target, { recursive: true, errorOnExist: true }); else await fsp.rename(source, target);
+        if (operation === 'copy') await fsp.cp(source, target, { recursive: true, errorOnExist: true }); else { await createSnapshot(source, 'before_bulk_move'); await fsp.rename(source, target); }
         return { sourcePath: relative(source), path: relative(target) };
       });
       await log(`Đã ${operation === 'copy' ? 'sao chép' : 'di chuyển'} hàng loạt ${results.filter(item => item.success).length} mục`, clientIp(req));
@@ -359,17 +452,22 @@ export function createFileManagerRouter({ hasSession, sessionRole, consumePrevie
     try {
       const target = resolveInsideRoot(req.body.path); const { mode, uid, gid } = req.body;
       if (mode === undefined && uid === undefined && gid === undefined) throw httpError(400, 'Cần cung cấp mode, uid hoặc gid');
+      let parsedMode: number | undefined;
       if (mode !== undefined) {
-        const parsed = typeof mode === 'string' ? Number.parseInt(mode, 8) : mode;
-        if (!Number.isInteger(parsed) || parsed < 0 || parsed > 0o7777) throw httpError(400, 'Mode không hợp lệ');
-        await fsp.chmod(target, parsed);
+        const candidate = typeof mode === 'string' ? Number.parseInt(mode, 8) : Number(mode);
+        if (!Number.isInteger(candidate) || candidate < 0 || candidate > 0o7777) throw httpError(400, 'Mode không hợp lệ');
+        parsedMode = candidate;
       }
+      let ownership: { uid: number; gid: number } | undefined;
       if (uid !== undefined || gid !== undefined) {
         if (process.platform === 'win32') throw httpError(501, 'Chown không được hỗ trợ trên Windows');
         const stat = await fsp.stat(target); const nextUid = uid === undefined ? stat.uid : Number(uid); const nextGid = gid === undefined ? stat.gid : Number(gid);
         if (!Number.isInteger(nextUid) || !Number.isInteger(nextGid) || nextUid < 0 || nextGid < 0) throw httpError(400, 'UID/GID không hợp lệ');
-        await fsp.chown(target, nextUid, nextGid);
+        ownership = { uid: nextUid, gid: nextGid };
       }
+      await createSnapshot(target, 'before_metadata_change');
+      if (parsedMode !== undefined) await fsp.chmod(target, parsedMode);
+      if (ownership) await fsp.chown(target, ownership.uid, ownership.gid);
       await log(`Đã cập nhật metadata: ${relative(target)}`, clientIp(req)); return res.json({ success: true, ...(await itemDetails(target)) });
     } catch (error) { return fail(res, error); }
   });
@@ -417,13 +515,13 @@ export function createFileManagerRouter({ hasSession, sessionRole, consumePrevie
   });
 
   router.delete('/', async (req, res) => {
-    try { const result = await trashOne(req.query.path); await log(`Đã chuyển vào thùng rác: ${result.path}`, clientIp(req)); return res.json({ success: true, message: 'Đã chuyển vào thùng rác', ...result }); }
+    try { const target = resolveInsideRoot(req.query.path); await createSnapshot(target, 'before_trash'); const result = await trashOne(req.query.path); await log(`Đã chuyển vào thùng rác: ${result.path}`, clientIp(req)); return res.json({ success: true, message: 'Đã chuyển vào thùng rác', ...result }); }
     catch (error) { return fail(res, error); }
   });
 
   router.post('/trash', async (req, res) => {
     try {
-      const results = await runItems(pathsFrom(req.body), trashOne); await log(`Đã chuyển hàng loạt ${results.filter(item => item.success).length} mục vào thùng rác`, clientIp(req));
+      const results = await runItems(pathsFrom(req.body), async value => { await createSnapshot(resolveInsideRoot(value), 'before_bulk_trash'); return trashOne(value); }); await log(`Đã chuyển hàng loạt ${results.filter(item => item.success).length} mục vào thùng rác`, clientIp(req));
       return res.status(results.some(item => !item.success) ? 207 : 200).json({ success: results.every(item => item.success), results });
     } catch (error) { return fail(res, error); }
   });
