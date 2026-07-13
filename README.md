@@ -18,6 +18,7 @@
 - Xem trước video, âm thanh, hình ảnh và PDF.
 - Chuyển tài liệu Office sang PDF để xem bằng LibreOffice.
 - Xác thực Argon2id và session cookie `HttpOnly`.
+- Nhiều tài khoản với vai trò viewer, operator, admin và root.
 - Vé ngắn hạn cho Socket.IO và URL xem trước, không đưa session token vào URL.
 
 ## Kiến Trúc
@@ -276,6 +277,25 @@ https://api-terminal.example.com
 ```
 
 Cookie `SameSite=Strict` có thể không hoạt động nếu frontend dùng `*.pages.dev` nhưng backend nằm trên domain gốc khác.
+
+## Phân Quyền
+
+Sau lần chạy đầu tiên của phiên bản nhiều người dùng, tài khoản và 2FA hiện tại được chuyển thành user `root`. Tên đăng nhập mặc định là:
+
+```text
+root
+```
+
+Mật khẩu hiện tại không thay đổi.
+
+| Vai trò | Xem file | Sửa file | Terminal | Audit log | Quản lý user | chmod/chown |
+| --- | --- | --- | --- | --- | --- | --- |
+| `viewer` | Có | Không | Không | Không | Không | Không |
+| `operator` | Có | Có | Không | Không | Không | Không |
+| `admin` | Có | Có | Có | Có | Không | Không |
+| `root` | Có | Có | Có | Có | Có | Có |
+
+Quyền được kiểm tra tại backend. Việc ẩn nút trên frontend chỉ hỗ trợ trải nghiệm và không phải lớp bảo mật chính.
 
 ## Xem Trước Tệp
 

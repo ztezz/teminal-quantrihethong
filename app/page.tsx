@@ -69,12 +69,15 @@ interface FileBookmark {
 
 interface SecuritySession {
   id: string;
+  username?: string;
   createdAt: number;
   expiresAt: number;
   ip: string;
   userAgent: string;
   current: boolean;
 }
+type UserRole = 'viewer' | 'operator' | 'admin' | 'root';
+interface ManagedUser { id: string; username: string; role: UserRole; enabled: boolean; twoFactorEnabled: boolean; createdAt: number; sessions: number }
 
 interface FileMetadata {
   path: string;
@@ -173,6 +176,8 @@ function getFileIcon(fileName: string) {
 export default function Home() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [password, setPassword] = useState('');
+  const [username, setUsername] = useState('root');
+  const [currentUser, setCurrentUser] = useState<{ username: string; role: UserRole } | null>(null);
   const [sessionReady, setSessionReady] = useState(false);
   const [previewTicket, setPreviewTicket] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -210,6 +215,10 @@ export default function Home() {
   useEffect(() => {
     localStorage.setItem('vps_terminal_sidebar_open', String(isSidebarOpen));
   }, [isSidebarOpen]);
+
+  useEffect(() => {
+    if (currentUser && !['admin', 'root'].includes(currentUser.role) && ['terminal', 'logs'].includes(activeTab)) setTimeout(() => setActiveTab('files'), 0);
+  }, [currentUser, activeTab]);
 
   // System metrics
   const [cpuPercent, setCpuPercent] = useState<number>(0);
@@ -629,6 +638,8 @@ export default function Home() {
   const [twoFactorSetup, setTwoFactorSetup] = useState<{ secret: string; qrCode: string } | null>(null);
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
   const [securityMessage, setSecurityMessage] = useState<string | null>(null);
+  const [managedUsers, setManagedUsers] = useState<ManagedUser[]>([]);
+  const [newUser, setNewUser] = useState<{ username: string; password: string; role: UserRole }>({ username: '', password: '', role: 'viewer' });
 
   // Terminal and socket refs
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -825,6 +836,7 @@ export default function Home() {
       .then(res => res.json())
       .then(data => {
         if (data.success) {
+          setCurrentUser(data.user);
           setSessionReady(true);
           setIsAuthenticated(true);
         } else {
@@ -867,7 +879,7 @@ export default function Home() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ password })
+        body: JSON.stringify({ username, password })
       });
       const data = await res.json();
 
@@ -878,6 +890,7 @@ export default function Home() {
           return;
         }
         setSessionReady(true);
+        setCurrentUser(data.user);
         setIsAuthenticated(true);
       } else {
         setError(data.error || 'Authentication failed');
@@ -900,7 +913,7 @@ export default function Home() {
       });
       const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Mã xác thực không hợp lệ');
-      setTwoFactorChallenge(null); setTwoFactorCode(''); setSessionReady(true); setIsAuthenticated(true);
+      setTwoFactorChallenge(null); setTwoFactorCode(''); setCurrentUser(data.user); setSessionReady(true); setIsAuthenticated(true);
     } catch (err: any) { setError(err.message); }
     finally { setLoading(false); }
   };
@@ -954,11 +967,40 @@ export default function Home() {
     } catch (err: any) { setSecurityMessage(err.message); }
   };
 
+  const loadUsers = useCallback(async () => {
+    if (!sessionReady || currentUser?.role !== 'root') return;
+    const res = await fetch(`${API_URL}/api/users`, { credentials: 'include' }); const data = await res.json();
+    if (data.success) setManagedUsers(data.users);
+  }, [sessionReady, currentUser]);
+
+  const createUser = async () => {
+    try {
+      await securityRequest('/api/users', { method: 'POST', body: JSON.stringify(newUser) });
+      setNewUser({ username: '', password: '', role: 'viewer' }); setSecurityMessage('Đã tạo tài khoản.'); await loadUsers();
+    } catch (err: any) { setSecurityMessage(err.message); }
+  };
+
+  const updateUser = async (id: string, changes: Record<string, unknown>) => {
+    try { await securityRequest(`/api/users/${id}`, { method: 'PATCH', body: JSON.stringify(changes) }); await loadUsers(); }
+    catch (err: any) { setSecurityMessage(err.message); }
+  };
+
+  const deleteUser = async (id: string) => {
+    if (!confirm('Xóa tài khoản và toàn bộ phiên của tài khoản này?')) return;
+    try { await securityRequest(`/api/users/${id}`, { method: 'DELETE' }); await loadUsers(); }
+    catch (err: any) { setSecurityMessage(err.message); }
+  };
+
   useEffect(() => {
     if (!sessionReady || activeTab !== 'settings') return;
     const timer = setTimeout(() => loadSecurity(), 0);
     return () => clearTimeout(timer);
   }, [sessionReady, activeTab, loadSecurity]);
+
+  useEffect(() => {
+    if (!sessionReady || activeTab !== 'settings' || currentUser?.role !== 'root') return;
+    const timer = setTimeout(() => loadUsers(), 0); return () => clearTimeout(timer);
+  }, [sessionReady, activeTab, currentUser, loadUsers]);
 
   // Handle password modification
   const handlePasswordChange = async (e: React.FormEvent) => {
@@ -1018,6 +1060,7 @@ export default function Home() {
     }
 
     setSessionReady(false);
+    setCurrentUser(null);
     setIsAuthenticated(false);
     setPassword('');
   };
@@ -1409,6 +1452,7 @@ export default function Home() {
               </div>
 
               <form onSubmit={twoFactorChallenge ? handleTwoFactorLogin : handleLogin} className="space-y-5">
+                {!twoFactorChallenge && <input type="text" required value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Tên đăng nhập" autoComplete="username" className="w-full bg-black border border-white/10 rounded-lg py-3 px-4 text-center text-white focus:outline-none focus:border-blue-500" />}
                 <div>
                   <input
                     type={twoFactorChallenge ? 'text' : 'password'}
@@ -1557,7 +1601,7 @@ export default function Home() {
                     <div className="p-4 border-b border-white/10">
                       <h3 className="text-[10px] uppercase font-bold text-slate-500 tracking-widest mb-3 px-2">DI CHUYỂN</h3>
                       <nav className="space-y-1">
-                        <button
+                        {currentUser && ['admin', 'root'].includes(currentUser.role) && <button
                           onClick={() => setActiveTab('terminal')}
                           className={`w-full flex items-center gap-3 px-3 py-2.5 rounded text-xs font-semibold uppercase tracking-wider transition cursor-pointer ${
                             activeTab === 'terminal' 
@@ -1567,9 +1611,9 @@ export default function Home() {
                         >
                           <TerminalIcon className="w-4 h-4" />
                           <span>Cửa Sổ Dòng Lệnh</span>
-                        </button>
+                        </button>}
 
-                        <button
+                        {currentUser && ['admin', 'root'].includes(currentUser.role) && <button
                           onClick={() => {
                             setActiveTab('logs');
                             loadLogs();
@@ -1582,7 +1626,7 @@ export default function Home() {
                         >
                           <History className="w-4 h-4" />
                           <span>Nhật Ký Bảo Mật</span>
-                        </button>
+                        </button>}
 
                         <button
                           onClick={() => {
@@ -1640,7 +1684,7 @@ export default function Home() {
                 <div className="flex-1 overflow-hidden relative">
                   <AnimatePresence mode="wait">
                     {/* TAB 1: Real-time Terminal Canvas */}
-                    {activeTab === 'terminal' && (
+                    {activeTab === 'terminal' && currentUser && ['admin', 'root'].includes(currentUser.role) && (
                       <motion.div
                         key="terminal-tab"
                         initial={{ opacity: 0 }}
@@ -1760,7 +1804,7 @@ export default function Home() {
                     )}
 
                     {/* TAB 2: Security Event Log history */}
-                    {activeTab === 'logs' && (
+                    {activeTab === 'logs' && currentUser && ['admin', 'root'].includes(currentUser.role) && (
                       <motion.div
                         key="logs-tab"
                         initial={{ opacity: 0, y: 10 }}
@@ -2116,11 +2160,17 @@ export default function Home() {
                             <div className="space-y-2">
                               {securityStatus?.sessions.map(session => <div key={session.id} className="flex flex-col sm:flex-row sm:items-center gap-3 p-3 bg-black/50 rounded border border-white/5">
                                 <Monitor className="w-4 h-4 text-blue-400 shrink-0" />
-                                <div className="flex-1 min-w-0"><div className="text-xs text-white truncate">{session.userAgent}</div><div className="text-[10px] text-slate-500 font-mono">{session.ip} · tạo {new Date(session.createdAt).toLocaleString()} · hết hạn {new Date(session.expiresAt).toLocaleString()}</div></div>
+                                <div className="flex-1 min-w-0"><div className="text-xs text-white truncate">{session.username && <span className="text-blue-400 mr-2">{session.username}</span>}{session.userAgent}</div><div className="text-[10px] text-slate-500 font-mono">{session.ip} · tạo {new Date(session.createdAt).toLocaleString()} · hết hạn {new Date(session.expiresAt).toLocaleString()}</div></div>
                                 {session.current ? <span className="text-[10px] text-emerald-400">Phiên hiện tại</span> : <button type="button" onClick={() => revokeSession(session.id)} className="text-xs text-red-400">Thu hồi</button>}
                               </div>)}
                             </div>
                           </div>
+
+                          {currentUser?.role === 'root' && <div className="p-6 rounded-xl border border-white/10 bg-[#111116]/40 space-y-5">
+                            <div><h3 className="text-base font-bold text-white uppercase tracking-wider mb-1">Quản Lý Người Dùng</h3><p className="text-xs text-slate-500 font-mono">Viewer chỉ xem; Operator sửa file; Admin có terminal; Root toàn quyền.</p></div>
+                            <div className="grid sm:grid-cols-4 gap-2"><input value={newUser.username} onChange={(e) => setNewUser({ ...newUser, username: e.target.value })} placeholder="Username" className="bg-black border border-white/10 rounded px-3 py-2 text-xs" /><input type="password" value={newUser.password} onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} placeholder="Mật khẩu ≥ 12 ký tự" className="bg-black border border-white/10 rounded px-3 py-2 text-xs" /><select value={newUser.role} onChange={(e) => setNewUser({ ...newUser, role: e.target.value as UserRole })} className="bg-black border border-white/10 rounded px-3 py-2 text-xs"><option value="viewer">Viewer</option><option value="operator">Operator</option><option value="admin">Admin</option><option value="root">Root</option></select><button onClick={createUser} className="bg-blue-600 rounded text-xs font-semibold">Tạo tài khoản</button></div>
+                            <div className="space-y-2">{managedUsers.map(user => <div key={user.id} className="grid sm:grid-cols-[1fr_120px_90px_auto] items-center gap-3 bg-black/50 border border-white/5 rounded p-3"><div><div className="text-sm text-white">{user.username} {user.id === 'root' && <span className="text-[9px] text-red-400">PRIMARY</span>}</div><div className="text-[10px] text-slate-500">{user.sessions} phiên · 2FA {user.twoFactorEnabled ? 'bật' : 'tắt'} · tạo {new Date(user.createdAt).toLocaleDateString()}</div></div><select value={user.role} disabled={user.id === 'root'} onChange={(e) => updateUser(user.id, { role: e.target.value })} className="bg-black border border-white/10 rounded px-2 py-1.5 text-xs disabled:opacity-50"><option value="viewer">Viewer</option><option value="operator">Operator</option><option value="admin">Admin</option><option value="root">Root</option></select><button disabled={user.id === 'root'} onClick={() => updateUser(user.id, { enabled: !user.enabled })} className={`text-xs ${user.enabled ? 'text-emerald-400' : 'text-slate-500'} disabled:opacity-30`}>{user.enabled ? 'Đang bật' : 'Đã khóa'}</button><div className="flex gap-2">{user.id !== 'root' && <><button onClick={() => { const password = prompt('Mật khẩu mới (ít nhất 12 ký tự):'); if (password) updateUser(user.id, { password }); }} className="text-xs text-blue-400">Reset MK</button><button onClick={() => deleteUser(user.id)} className="text-xs text-red-400">Xóa</button></>}</div></div>)}</div>
+                          </div>}
 
                           {/* Floating Toast Notification */}
                           <AnimatePresence>
@@ -2170,8 +2220,9 @@ export default function Home() {
                             <div>
                               <h3 className="text-lg font-bold text-white uppercase tracking-wider mb-1">Quản Lý Tệp Tin</h3>
                               <p className="text-xs text-slate-500 font-mono">Duyệt, xem, tạo, sửa và xóa tệp tin trên hệ thống VPS</p>
+                              {currentUser?.role === 'viewer' && <span className="mt-2 inline-block text-[10px] px-2 py-1 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">CHẾ ĐỘ CHỈ ĐỌC</span>}
                             </div>
-                            <div className="flex flex-wrap gap-2">
+                            <div className={`flex flex-wrap gap-2 ${currentUser?.role === 'viewer' ? 'pointer-events-none opacity-40' : ''}`}>
                               <input
                                 ref={uploadInputRef}
                                 type="file"
@@ -2355,7 +2406,7 @@ export default function Home() {
                           </div>
                           {!viewingFile && <label className="flex items-center gap-2 text-[11px] text-slate-400"><input type="checkbox" checked={recursiveSearch} onChange={(e) => { setRecursiveSearch(e.target.checked); setSearchResults(null); }} /> Tìm đệ quy (Enter để tìm){searchTruncated && <span className="text-amber-400">Kết quả đã bị giới hạn</span>}</label>}
 
-                          {!viewingFile && selectedPaths.length > 0 && <div className="flex flex-wrap items-center gap-2 rounded border border-blue-500/20 bg-blue-500/5 p-2 text-xs">
+                          {!viewingFile && currentUser?.role !== 'viewer' && selectedPaths.length > 0 && <div className="flex flex-wrap items-center gap-2 rounded border border-blue-500/20 bg-blue-500/5 p-2 text-xs">
                             <span className="mr-auto">Đã chọn {selectedPaths.length} mục</span>
                             <button onClick={() => setFileClipboard({ operation: 'copy', paths: selectedPaths })} className="px-2 py-1 bg-white/10 rounded">Sao chép</button>
                             <button onClick={() => setFileClipboard({ operation: 'move', paths: selectedPaths })} className="px-2 py-1 bg-white/10 rounded">Cắt</button>
@@ -2513,7 +2564,7 @@ export default function Home() {
                             <div className="rounded-xl border border-white/10 bg-[#0d0d12]/60 overflow-hidden shadow-2xl" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); uploadFiles(Array.from(event.dataTransfer.files)); }}>
                               <div className="flex flex-wrap gap-2 p-2 border-b border-white/10 text-[11px]">
                                 <span className="text-slate-500 mr-auto">Kéo nhiều tệp từ máy tính vào đây để upload</span>
-                                <button onClick={() => { pendingTerminalCwdRef.current = currentPath; setActiveTab('terminal'); }} className="px-2 py-1 bg-white/5 rounded">Mở Terminal tại đây</button>
+                                {currentUser && ['admin', 'root'].includes(currentUser.role) && <button onClick={() => { pendingTerminalCwdRef.current = currentPath; setActiveTab('terminal'); }} className="px-2 py-1 bg-white/5 rounded">Mở Terminal tại đây</button>}
                                 <button onClick={async () => { const name = prompt('Tên archive (gồm phần mở rộng):', 'archive.zip')?.trim(); if (!name) return; const format = name.endsWith('.tar.gz') ? 'tar.gz' : name.split('.').pop() || 'zip'; try { await requestFileApi('/api/files/archive/create', { method: 'POST', body: JSON.stringify({ paths: selectedPaths.length ? selectedPaths : [currentPath], destinationDir: currentPath, name, format }) }); await loadFiles(currentPath, null, 'none'); } catch (error: any) { setFileError(error.message); } }} className="px-2 py-1 bg-white/5 rounded">Tạo archive</button>
                                 <button onClick={async () => { const name = prompt('Tên symlink mới:', 'link')?.trim(); const targetPath = name && prompt('Đường dẫn đích:')?.trim(); if (!name || !targetPath) return; try { await requestFileApi('/api/files/symlink', { method: 'POST', body: JSON.stringify({ name, targetPath, destinationDir: currentPath }) }); await loadFiles(currentPath, null, 'none'); } catch (error: any) { setFileError(error.message); } }} className="px-2 py-1 bg-white/5 rounded">Tạo symlink</button>
                               </div>

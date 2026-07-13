@@ -23,7 +23,9 @@ const FILE_MANAGER_ROOT = path.resolve(process.env.FILE_MANAGER_ROOT || process.
 const FILE_MANAGER_TRASH_DIR = path.resolve(process.env.FILE_MANAGER_TRASH_DIR || path.join(process.cwd(), '.terminal-trash'));
 const SESSION_COOKIE = 'terminal_session';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
-type StoredSession = { tokenHash: string; createdAt: number; expiresAt: number; ip: string; userAgent: string };
+type Role = 'viewer' | 'operator' | 'admin' | 'root';
+type StoredUser = { id: string; username: string; passwordHash: string; legacySalt?: string; role: Role; enabled: boolean; createdAt: number; totpSecret?: string; recoveryCodes?: string[]; pendingTotpSecret?: string };
+type StoredSession = { tokenHash: string; userId: string; createdAt: number; expiresAt: number; ip: string; userAgent: string };
 type AuditLevel = 'info' | 'warning' | 'critical';
 type AuditResult = 'success' | 'failure';
 type AuditEntry = { id: number; category: string; action: string; event: string; level: AuditLevel; result: AuditResult; ip: string; sessionId?: string; metadata?: Record<string, unknown>; timestamp: string; previousHash: string; hash: string };
@@ -37,6 +39,7 @@ class JsonDatabase {
     terminal_settings: Record<string, string>;
     logs: AuditEntry[];
     sessions: StoredSession[];
+    users: StoredUser[];
   };
 
   constructor() {
@@ -44,7 +47,8 @@ class JsonDatabase {
       settings: {},
       terminal_settings: {},
       logs: [],
-      sessions: []
+      sessions: [],
+      users: []
     };
     this.load();
   }
@@ -55,7 +59,8 @@ class JsonDatabase {
         const fileContent = fs.readFileSync(DB_FILE, 'utf8');
         this.data = JSON.parse(fileContent);
         if (!Array.isArray(this.data.sessions) || this.data.sessions.some(session => typeof session === 'string')) this.data.sessions = [];
-        else this.data.sessions = this.data.sessions.map(session => ({ ...session, createdAt: session.createdAt || Date.now(), ip: session.ip || 'unknown', userAgent: session.userAgent || 'unknown' }));
+        else this.data.sessions = this.data.sessions.map(session => ({ ...session, userId: session.userId || 'root', createdAt: session.createdAt || Date.now(), ip: session.ip || 'unknown', userAgent: session.userAgent || 'unknown' }));
+        if (!Array.isArray(this.data.users)) this.data.users = [];
         if (!Array.isArray(this.data.logs)) this.data.logs = [];
         this.data.logs = this.data.logs.map((entry: any, index) => this.normalizeAuditEntry(entry, index));
       } else {
@@ -187,10 +192,10 @@ class JsonDatabase {
     return [];
   }
 
-  addSession(token: string, ip = 'unknown', userAgent = 'unknown') {
+  addSession(token: string, userId: string, ip = 'unknown', userAgent = 'unknown') {
     if (!this.data.sessions) this.data.sessions = [];
     this.data.sessions = this.data.sessions.filter(session => session.expiresAt > Date.now());
-    this.data.sessions.push({ tokenHash: crypto.createHash('sha256').update(token).digest('hex'), createdAt: Date.now(), expiresAt: Date.now() + SESSION_TTL_MS, ip, userAgent: userAgent.slice(0, 300) });
+    this.data.sessions.push({ tokenHash: crypto.createHash('sha256').update(token).digest('hex'), userId, createdAt: Date.now(), expiresAt: Date.now() + SESSION_TTL_MS, ip, userAgent: userAgent.slice(0, 300) });
     this.save();
   }
 
@@ -204,7 +209,8 @@ class JsonDatabase {
   hasSession(token: string): boolean {
     if (!this.data.sessions) return false;
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-    return this.data.sessions.some(session => session.tokenHash === tokenHash && session.expiresAt > Date.now());
+    const session = this.data.sessions.find(session => session.tokenHash === tokenHash && session.expiresAt > Date.now());
+    return Boolean(session && this.data.users.find(user => user.id === session.userId && user.enabled));
   }
 
   clearSessions() {
@@ -225,6 +231,18 @@ class JsonDatabase {
   getSessions(): StoredSession[] {
     return (this.data.sessions || []).filter(session => session.expiresAt > Date.now());
   }
+
+  getSession(token: string): StoredSession | undefined {
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    return this.getSessions().find(session => session.tokenHash === tokenHash);
+  }
+
+  getUsers(): StoredUser[] { return this.data.users || []; }
+  getUserById(id: string): StoredUser | undefined { return this.data.users.find(user => user.id === id); }
+  getUserByName(username: string): StoredUser | undefined { return this.data.users.find(user => user.username.toLowerCase() === username.toLowerCase()); }
+  saveUser(user: StoredUser) { const index = this.data.users.findIndex(item => item.id === user.id); if (index >= 0) this.data.users[index] = user; else this.data.users.push(user); this.save(); }
+  deleteUser(id: string) { this.data.users = this.data.users.filter(user => user.id !== id); this.data.sessions = this.data.sessions.filter(session => session.userId !== id); this.save(); }
+  clearUserSessions(userId: string) { this.data.sessions = this.data.sessions.filter(session => session.userId !== userId); this.save(); }
 }
 
 // Mimic sqlite pack API
@@ -238,6 +256,7 @@ let db: any = null;
 function hasSession(token: string): boolean {
   return db ? db.hasSession(token) : false;
 }
+function sessionRole(token: string): Role | null { const session = db?.getSession(token); return session ? db.getUserById(session.userId)?.role || null : null; }
 
 function sessionTokenFromCookie(cookieHeader: string | undefined): string {
   const cookies = String(cookieHeader || '').split(';');
@@ -253,8 +272,21 @@ function sessionToken(req: express.Request): string {
 }
 
 function authenticated(req: express.Request): boolean {
-  const token = sessionToken(req);
-  return Boolean(token && hasSession(token));
+  return Boolean(authContext(req));
+}
+
+function authContext(req: express.Request): { token: string; session: StoredSession; user: StoredUser } | null {
+  const token = sessionToken(req); const session = token ? db?.getSession(token) : undefined; const user = session ? db?.getUserById(session.userId) : undefined;
+  return session && user?.enabled ? { token, session, user } : null;
+}
+
+const roleRank: Record<Role, number> = { viewer: 0, operator: 1, admin: 2, root: 3 };
+function isRole(value: unknown): value is Role { return typeof value === 'string' && value in roleRank; }
+function requireRole(req: express.Request, res: express.Response, minimum: Role) {
+  const context = authContext(req);
+  if (!context) { res.status(401).json({ success: false, error: 'Unauthorized' }); return null; }
+  if (roleRank[context.user.role] < roleRank[minimum]) { res.status(403).json({ success: false, error: 'Bạn không có quyền thực hiện thao tác này' }); return null; }
+  return context;
 }
 
 function setSessionCookie(res: express.Response, token: string) {
@@ -268,8 +300,8 @@ function clearSessionCookie(res: express.Response) {
 }
 
 const previewTickets = new Map<string, { path: string; expiresAt: number }>();
-const socketTickets = new Map<string, number>();
-const loginChallenges = new Map<string, { expiresAt: number; ip: string; userAgent: string }>();
+const socketTickets = new Map<string, { expiresAt: number; userId: string }>();
+const loginChallenges = new Map<string, { expiresAt: number; ip: string; userAgent: string; userId: string }>();
 function createTicket<T>(store: Map<string, T>, value: T): string {
   const ticket = crypto.randomBytes(32).toString('base64url');
   store.set(ticket, value);
@@ -280,13 +312,20 @@ function consumePreviewTicket(ticket: string, filePath: string): boolean {
   if (!entry || entry.expiresAt <= Date.now() || entry.path !== filePath) return false;
   return true;
 }
-function consumeSocketTicket(ticket: string): boolean {
-  const expiresAt = socketTickets.get(ticket);
+function consumeSocketTicket(ticket: string): string | null {
+  const entry = socketTickets.get(ticket);
   socketTickets.delete(ticket);
-  return Boolean(expiresAt && expiresAt > Date.now());
+  return entry && entry.expiresAt > Date.now() ? entry.userId : null;
 }
 
-async function verifyPassword(password: string): Promise<boolean> {
+async function verifyPassword(password: string, user?: StoredUser): Promise<boolean> {
+  if (user?.passwordHash) {
+    if (user.passwordHash.startsWith('$argon2')) return argon2.verify(user.passwordHash, password);
+    if (!user.legacySalt) return false;
+    const legacyHash = hashPassword(password, user.legacySalt); const valid = legacyHash.length === user.passwordHash.length && crypto.timingSafeEqual(Buffer.from(legacyHash), Buffer.from(user.passwordHash));
+    if (valid) { user.passwordHash = await argon2.hash(password, { type: argon2.argon2id }); delete user.legacySalt; db.saveUser(user); }
+    return valid;
+  }
   const hashRow = await db.get('SELECT value FROM settings WHERE key = ?', 'password_hash');
   if (!hashRow) return false;
   if (hashRow.value.startsWith('$argon2')) return argon2.verify(hashRow.value, password);
@@ -334,7 +373,8 @@ function audit(entry: { category: string; action: string; event: string; level?:
 
 function auditRequest(req: express.Request, entry: Omit<Parameters<typeof audit>[0], 'ip' | 'sessionId'>) {
   const token = sessionToken(req);
-  audit({ ...entry, ip: requestInfo(req).ip, sessionId: token ? crypto.createHash('sha256').update(token).digest('hex').slice(0, 16) : undefined });
+  const context = authContext(req);
+  audit({ ...entry, ip: requestInfo(req).ip, sessionId: token ? crypto.createHash('sha256').update(token).digest('hex').slice(0, 16) : undefined, metadata: { username: context?.user.username, ...(entry.metadata || {}) } });
 }
 
 function redactCommand(command: string): string {
@@ -343,10 +383,10 @@ function redactCommand(command: string): string {
     .replace(/(authorization:\s*bearer\s+)[^\s]+/gi, '$1[REDACTED]');
 }
 
-function createSession(req: express.Request, res: express.Response) {
+function createSession(req: express.Request, res: express.Response, userId: string) {
   const token = crypto.randomBytes(32).toString('hex');
   const { ip, userAgent } = requestInfo(req);
-  db.addSession(token, ip, userAgent);
+  db.addSession(token, userId, ip, userAgent);
   setSessionCookie(res, token);
 }
 
@@ -354,16 +394,14 @@ function recoveryHash(code: string): string {
   return crypto.createHash('sha256').update(code.replace(/\s|-/g, '').toUpperCase()).digest('hex');
 }
 
-async function verifySecondFactor(code: string): Promise<boolean> {
-  const secretRow = await db.get('SELECT value FROM settings WHERE key = ?', 'totp_secret');
-  if (!secretRow || typeof code !== 'string') return false;
+async function verifySecondFactor(code: string, user: StoredUser): Promise<boolean> {
+  if (!user.totpSecret || typeof code !== 'string') return false;
   const normalized = code.replace(/\s/g, '');
-  if (/^\d{6}$/.test(normalized) && authenticator.check(normalized, decryptSecret(secretRow.value))) return true;
-  const recoveryRow = await db.get('SELECT value FROM settings WHERE key = ?', 'recovery_codes');
-  const hashes: string[] = recoveryRow ? JSON.parse(recoveryRow.value) : [];
+  if (/^\d{6}$/.test(normalized) && authenticator.check(normalized, decryptSecret(user.totpSecret))) return true;
+  const hashes = user.recoveryCodes || [];
   const hash = recoveryHash(normalized);
   if (!hashes.includes(hash)) return false;
-  await db.run('UPDATE settings SET value = ? WHERE key = ?', JSON.stringify(hashes.filter(item => item !== hash)), 'recovery_codes');
+  user.recoveryCodes = hashes.filter(item => item !== hash); db.saveUser(user);
   return true;
 }
 
@@ -428,6 +466,16 @@ async function initializeDatabase() {
     console.log(`[DB] Initialized default terminal password. Defaults to: "${defaultPassword}"`);
   }
 
+  if (!db.getUsers().length) {
+    const passwordRow = await db.get('SELECT value FROM settings WHERE key = ?', 'password_hash');
+    const legacySalt = await db.get('SELECT value FROM settings WHERE key = ?', 'password_salt');
+    const passwordHash = passwordRow?.value;
+    const totpRow = await db.get('SELECT value FROM settings WHERE key = ?', 'totp_secret');
+    const recoveryRow = await db.get('SELECT value FROM settings WHERE key = ?', 'recovery_codes');
+    db.saveUser({ id: 'root', username: 'root', passwordHash, legacySalt: passwordHash?.startsWith('$argon2') ? undefined : legacySalt?.value, role: 'root', enabled: true, createdAt: Date.now(), totpSecret: totpRow?.value, recoveryCodes: recoveryRow ? JSON.parse(recoveryRow.value) : undefined });
+    console.log('[DB] Migrated existing credentials to root user.');
+  }
+
   // Set default terminal settings if not present
   const dbFontSize = await db.get('SELECT value FROM terminal_settings WHERE key = ?', 'font_size');
   if (!dbFontSize) {
@@ -482,7 +530,7 @@ async function startServer() {
   // Auth check & login endpoint
   expressApp.post('/api/auth', async (req, res) => {
     try {
-      const { password } = req.body;
+      const { username, password } = req.body;
       const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
 
       if (!checkRateLimit(clientIp)) {
@@ -490,21 +538,21 @@ async function startServer() {
         return res.status(429).json({ success: false, error: 'Quá nhiều lần thử. Vui lòng đợi 15 phút.' });
       }
 
-      if (!password) {
+      if (!username || !password) {
         audit({ category: 'auth', action: 'login', event: 'Auth attempt failed: Missing password input', level: 'warning', result: 'failure', ip: clientIp });
         return res.status(400).json({ success: false, error: 'Password is required' });
       }
 
-      if (await verifyPassword(password)) {
+      const user = db.getUserByName(String(username));
+      if (user?.enabled && await verifyPassword(password, user)) {
         resetRateLimit(clientIp);
-        const totpRow = await db.get('SELECT value FROM settings WHERE key = ?', 'totp_secret');
-        if (totpRow) {
-          const challenge = createTicket(loginChallenges, { expiresAt: Date.now() + 5 * 60_000, ...requestInfo(req) });
+        if (user.totpSecret) {
+          const challenge = createTicket(loginChallenges, { expiresAt: Date.now() + 5 * 60_000, userId: user.id, ...requestInfo(req) });
           return res.json({ success: true, requiresTwoFactor: true, challenge });
         }
-        createSession(req, res);
-        audit({ category: 'auth', action: 'login', event: 'Login successful - Session started', ip: clientIp });
-        return res.json({ success: true });
+        createSession(req, res, user.id);
+        audit({ category: 'auth', action: 'login', event: 'Login successful - Session started', ip: clientIp, metadata: { username: user.username } });
+        return res.json({ success: true, user: { username: user.username, role: user.role } });
       } else {
         audit({ category: 'auth', action: 'login', event: 'Login failed: Incorrect password attempt', level: 'warning', result: 'failure', ip: clientIp });
         return res.status(401).json({ success: false, error: 'Incorrect password!' });
@@ -521,12 +569,13 @@ async function startServer() {
     if (!entry || entry.expiresAt <= Date.now() || entry.ip !== requestInfo(req).ip) return res.status(401).json({ success: false, error: 'Yêu cầu xác thực đã hết hạn' });
     if (!checkRateLimit(`2fa:${entry.ip}`)) return res.status(429).json({ success: false, error: 'Quá nhiều lần thử. Vui lòng đợi 15 phút.' });
     try {
-      if (!await verifySecondFactor(code)) return res.status(401).json({ success: false, error: 'Mã xác thực không hợp lệ' });
+      const user = db.getUserById(entry.userId);
+      if (!user?.enabled || !await verifySecondFactor(code, user)) return res.status(401).json({ success: false, error: 'Mã xác thực không hợp lệ' });
       loginChallenges.delete(challenge);
       resetRateLimit(`2fa:${entry.ip}`);
-      createSession(req, res);
+      createSession(req, res, user.id);
       audit({ category: 'auth', action: 'two_factor_login', event: 'Two-factor login successful', ip: entry.ip });
-      return res.json({ success: true });
+      return res.json({ success: true, user: { username: user.username, role: user.role } });
     } catch (error: any) {
       return res.status(error.status || 500).json({ success: false, error: error.message });
     }
@@ -534,8 +583,9 @@ async function startServer() {
 
   // Verify session token
   expressApp.post('/api/auth/verify', (req, res) => {
-    if (authenticated(req)) {
-      return res.json({ success: true });
+    const context = authContext(req);
+    if (context) {
+      return res.json({ success: true, user: { username: context.user.username, role: context.user.role } });
     }
     return res.status(401).json({ success: false, error: 'Invalid or expired session token' });
   });
@@ -543,9 +593,7 @@ async function startServer() {
   // Fetch log history
   expressApp.get('/api/logs', async (req, res) => {
     try {
-      if (!authenticated(req)) {
-        return res.status(401).json({ success: false, error: 'Unauthorized' });
-      }
+      if (!requireRole(req, res, 'admin')) return;
 
       const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
       const offset = Math.max(0, Number(req.query.offset) || 0);
@@ -557,7 +605,7 @@ async function startServer() {
   });
 
   expressApp.get('/api/logs/export', (req, res) => {
-    if (!authenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    if (!requireRole(req, res, 'admin')) return;
     const items = db.queryAudit({ query: typeof req.query.q === 'string' ? req.query.q : undefined, category: typeof req.query.category === 'string' ? req.query.category : undefined, level: typeof req.query.level === 'string' ? req.query.level : undefined, result: typeof req.query.result === 'string' ? req.query.result : undefined, offset: 0, limit: 20_000 }).items;
     if (req.query.format === 'csv') {
       const escape = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
@@ -568,7 +616,7 @@ async function startServer() {
   });
 
   expressApp.get('/api/logs/integrity', (req, res) => {
-    if (!authenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    if (!requireRole(req, res, 'admin')) return;
     return res.json({ success: true, ...db.verifyAuditIntegrity() });
   });
 
@@ -618,9 +666,7 @@ async function startServer() {
   // Change password endpoint
   expressApp.post('/api/settings/password', async (req, res) => {
     try {
-      if (!authenticated(req)) {
-        return res.status(401).json({ success: false, error: 'Unauthorized' });
-      }
+      const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
 
       const { currentPassword, newPassword } = req.body;
       if (!currentPassword || !newPassword) {
@@ -630,16 +676,16 @@ async function startServer() {
         return res.status(400).json({ success: false, error: 'New password must be at least 12 characters long' });
       }
 
-      if (!await verifyPassword(currentPassword)) {
+      if (!await verifyPassword(currentPassword, context.user)) {
         return res.status(400).json({ success: false, error: 'Incorrect current password' });
       }
 
       // Update password hash and salt
       const newHash = await argon2.hash(newPassword, { type: argon2.argon2id });
-      await db.run('UPDATE settings SET value = ? WHERE key = ?', newHash, 'password_hash');
-      db.clearSessions();
+      context.user.passwordHash = newHash; db.saveUser(context.user);
+      db.clearUserSessions(context.user.id);
       const nextToken = crypto.randomBytes(32).toString('hex');
-      db.addSession(nextToken);
+      const info = requestInfo(req); db.addSession(nextToken, context.user.id, info.ip, info.userAgent);
       setSessionCookie(res, nextToken);
 
       const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
@@ -717,8 +763,8 @@ async function startServer() {
   });
 
   expressApp.post('/api/auth/socket-ticket', (req, res) => {
-    if (!authenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
-    return res.json({ success: true, ticket: createTicket(socketTickets, Date.now() + 30_000) });
+    const context = requireRole(req, res, 'admin'); if (!context) return;
+    return res.json({ success: true, ticket: createTicket(socketTickets, { expiresAt: Date.now() + 30_000, userId: context.user.id }) });
   });
 
   expressApp.post('/api/auth/preview-ticket', (req, res) => {
@@ -727,27 +773,25 @@ async function startServer() {
   });
 
   expressApp.get('/api/security', async (req, res) => {
-    if (!authenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
-    const totpRow = await db.get('SELECT value FROM settings WHERE key = ?', 'totp_secret');
-    const recoveryRow = await db.get('SELECT value FROM settings WHERE key = ?', 'recovery_codes');
+    const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
     const currentHash = crypto.createHash('sha256').update(sessionToken(req)).digest('hex');
     return res.json({
       success: true,
-      twoFactorEnabled: Boolean(totpRow),
+      twoFactorEnabled: Boolean(context.user.totpSecret),
       twoFactorAvailable: Boolean(encryptionKey()),
-      recoveryCodesRemaining: recoveryRow ? JSON.parse(recoveryRow.value).length : 0,
-      sessions: db.getSessions().map((session: StoredSession) => ({ id: session.tokenHash.slice(0, 16), createdAt: session.createdAt, expiresAt: session.expiresAt, ip: session.ip, userAgent: session.userAgent, current: session.tokenHash === currentHash }))
+      recoveryCodesRemaining: context.user.recoveryCodes?.length || 0,
+      sessions: db.getSessions().filter((session: StoredSession) => context.user.role === 'root' || session.userId === context.user.id).map((session: StoredSession) => ({ id: session.tokenHash.slice(0, 16), username: db.getUserById(session.userId)?.username || 'unknown', createdAt: session.createdAt, expiresAt: session.expiresAt, ip: session.ip, userAgent: session.userAgent, current: session.tokenHash === currentHash }))
     });
   });
 
   expressApp.post('/api/security/2fa/setup', async (req, res) => {
-    if (!authenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
     try {
-      if (!await verifyPassword(req.body?.password)) return res.status(400).json({ success: false, error: 'Mật khẩu hiện tại không đúng' });
+      if (!await verifyPassword(req.body?.password, context.user)) return res.status(400).json({ success: false, error: 'Mật khẩu hiện tại không đúng' });
       const secret = authenticator.generateSecret();
       const issuer = process.env.TOTP_ISSUER || 'Terminal Admin';
-      const uri = authenticator.keyuri('root', issuer, secret);
-      await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'totp_pending_secret', encryptSecret(secret));
+      const uri = authenticator.keyuri(context.user.username, issuer, secret);
+      context.user.pendingTotpSecret = encryptSecret(secret); db.saveUser(context.user);
       return res.json({ success: true, secret, qrCode: await QRCode.toDataURL(uri) });
     } catch (error: any) {
       return res.status(error.status || 500).json({ success: false, error: error.message });
@@ -755,14 +799,12 @@ async function startServer() {
   });
 
   expressApp.post('/api/security/2fa/confirm', async (req, res) => {
-    if (!authenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
     try {
-      const pending = await db.get('SELECT value FROM settings WHERE key = ?', 'totp_pending_secret');
-      if (!pending || !authenticator.check(String(req.body?.code || ''), decryptSecret(pending.value))) return res.status(400).json({ success: false, error: 'Mã xác thực không hợp lệ' });
+      const pending = context.user.pendingTotpSecret;
+      if (!pending || !authenticator.check(String(req.body?.code || ''), decryptSecret(pending))) return res.status(400).json({ success: false, error: 'Mã xác thực không hợp lệ' });
       const recoveryCodes = Array.from({ length: 10 }, () => `${crypto.randomBytes(3).toString('hex').toUpperCase()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`);
-      await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'totp_secret', pending.value);
-      await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'recovery_codes', JSON.stringify(recoveryCodes.map(recoveryHash)));
-      db.deleteSetting('totp_pending_secret');
+      context.user.totpSecret = pending; context.user.recoveryCodes = recoveryCodes.map(recoveryHash); delete context.user.pendingTotpSecret; db.saveUser(context.user);
       auditRequest(req, { category: 'security', action: 'two_factor_enable', event: 'Two-factor authentication enabled', level: 'critical' });
       return res.json({ success: true, recoveryCodes });
     } catch (error: any) {
@@ -771,10 +813,10 @@ async function startServer() {
   });
 
   expressApp.post('/api/security/2fa/disable', async (req, res) => {
-    if (!authenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
     try {
-      if (!await verifyPassword(req.body?.password) || !await verifySecondFactor(req.body?.code)) return res.status(400).json({ success: false, error: 'Mật khẩu hoặc mã xác thực không đúng' });
-      db.deleteSetting('totp_secret'); db.deleteSetting('totp_pending_secret'); db.deleteSetting('recovery_codes');
+      if (!await verifyPassword(req.body?.password, context.user) || !await verifySecondFactor(req.body?.code, context.user)) return res.status(400).json({ success: false, error: 'Mật khẩu hoặc mã xác thực không đúng' });
+      delete context.user.totpSecret; delete context.user.pendingTotpSecret; delete context.user.recoveryCodes; db.saveUser(context.user);
       auditRequest(req, { category: 'security', action: 'two_factor_disable', event: 'Two-factor authentication disabled', level: 'critical' });
       return res.json({ success: true });
     } catch (error: any) {
@@ -783,24 +825,62 @@ async function startServer() {
   });
 
   expressApp.delete('/api/security/sessions/:id', (req, res) => {
-    if (!authenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
     const currentHash = crypto.createHash('sha256').update(sessionToken(req)).digest('hex');
     if (currentHash.startsWith(req.params.id)) return res.status(400).json({ success: false, error: 'Hãy dùng đăng xuất để kết thúc phiên hiện tại' });
+    const target = db.getSessions().find((session: StoredSession) => session.tokenHash.startsWith(req.params.id));
+    if (!target || context.user.role !== 'root' && target.userId !== context.user.id) return res.status(404).json({ success: false, error: 'Không tìm thấy phiên' });
     db.removeSessionById(req.params.id);
     auditRequest(req, { category: 'security', action: 'session_revoke', event: 'Session revoked', level: 'warning', metadata: { sessionId: req.params.id } });
     return res.json({ success: true });
   });
 
   expressApp.delete('/api/security/sessions', (req, res) => {
-    if (!authenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
     const currentToken = sessionToken(req); const info = requestInfo(req);
-    db.clearSessions(); db.addSession(currentToken, info.ip, info.userAgent);
+    if (context.user.role === 'root') { db.clearSessions(); db.addSession(currentToken, context.user.id, info.ip, info.userAgent); }
+    else { db.clearUserSessions(context.user.id); db.addSession(currentToken, context.user.id, info.ip, info.userAgent); }
     auditRequest(req, { category: 'security', action: 'sessions_revoke_others', event: 'All other sessions revoked', level: 'warning' });
+    return res.json({ success: true });
+  });
+
+  expressApp.get('/api/users', (req, res) => {
+    if (!requireRole(req, res, 'root')) return;
+    return res.json({ success: true, users: db.getUsers().map((user: StoredUser) => ({ id: user.id, username: user.username, role: user.role, enabled: user.enabled, twoFactorEnabled: Boolean(user.totpSecret), createdAt: user.createdAt, sessions: db.getSessions().filter((session: StoredSession) => session.userId === user.id).length })) });
+  });
+
+  expressApp.post('/api/users', async (req, res) => {
+    const context = requireRole(req, res, 'root'); if (!context) return;
+    const username = String(req.body?.username || '').trim(); const password = String(req.body?.password || ''); const role = req.body?.role as Role;
+    if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(username) || password.length < 12 || !['viewer', 'operator', 'admin', 'root'].includes(role)) return res.status(400).json({ success: false, error: 'Username, mật khẩu hoặc vai trò không hợp lệ' });
+    if (db.getUserByName(username)) return res.status(409).json({ success: false, error: 'Username đã tồn tại' });
+    const user: StoredUser = { id: crypto.randomUUID(), username, passwordHash: await argon2.hash(password, { type: argon2.argon2id }), role, enabled: true, createdAt: Date.now() };
+    db.saveUser(user); auditRequest(req, { category: 'security', action: 'user_create', event: 'User created', level: 'critical', metadata: { target: username, role } });
+    return res.status(201).json({ success: true });
+  });
+
+  expressApp.patch('/api/users/:id', async (req, res) => {
+    const context = requireRole(req, res, 'root'); if (!context) return;
+    const user = db.getUserById(req.params.id); if (!user) return res.status(404).json({ success: false, error: 'Không tìm thấy user' });
+    if (user.id === 'root' && (req.body.role && req.body.role !== 'root' || req.body.enabled === false)) return res.status(400).json({ success: false, error: 'Không thể khóa hoặc hạ quyền tài khoản root' });
+    if (req.body.role !== undefined) { if (!['viewer', 'operator', 'admin', 'root'].includes(req.body.role)) return res.status(400).json({ success: false, error: 'Vai trò không hợp lệ' }); user.role = req.body.role; }
+    if (req.body.enabled !== undefined) user.enabled = Boolean(req.body.enabled);
+    if (req.body.password !== undefined) { if (String(req.body.password).length < 12) return res.status(400).json({ success: false, error: 'Mật khẩu phải có ít nhất 12 ký tự' }); user.passwordHash = await argon2.hash(String(req.body.password), { type: argon2.argon2id }); db.clearUserSessions(user.id); }
+    db.saveUser(user); auditRequest(req, { category: 'security', action: 'user_update', event: 'User updated', level: 'critical', metadata: { target: user.username, role: user.role, enabled: user.enabled } });
+    return res.json({ success: true });
+  });
+
+  expressApp.delete('/api/users/:id', (req, res) => {
+    if (!requireRole(req, res, 'root')) return;
+    const user = db.getUserById(req.params.id); if (!user) return res.status(404).json({ success: false, error: 'Không tìm thấy user' });
+    if (user.id === 'root') return res.status(400).json({ success: false, error: 'Không thể xóa tài khoản root' });
+    db.deleteUser(user.id); auditRequest(req, { category: 'security', action: 'user_delete', event: 'User deleted', level: 'critical', metadata: { target: user.username } });
     return res.json({ success: true });
   });
 
   expressApp.use('/api/files', createFileManagerRouter({
     hasSession,
+    sessionRole,
     consumePreviewTicket,
     log: async (event, ip, details) => audit({ category: 'file', action: details?.action || event.split(':', 1)[0].slice(0, 80), event, level: details?.level || (/xóa|metadata|quyền/i.test(event) ? 'warning' : 'info'), result: details?.result || 'success', ip, metadata: details?.metadata }),
     rootDir: FILE_MANAGER_ROOT,
@@ -811,7 +891,10 @@ async function startServer() {
 
   io.use((socket, nextFn) => {
     const ticket = socket.handshake.auth?.ticket;
-      if (typeof ticket === 'string' && consumeSocketTicket(ticket)) {
+      const userId = typeof ticket === 'string' ? consumeSocketTicket(ticket) : null;
+      const user: StoredUser | undefined = userId ? db.getUserById(userId) : undefined;
+      if (user?.enabled && isRole(user.role) && roleRank[user.role] >= roleRank.admin) {
+        socket.data.user = { id: user.id, username: user.username, role: user.role };
         return nextFn();
       }
     console.log('[SOCKET] Rejecting unauthenticated socket connection attempt.');
@@ -822,7 +905,7 @@ async function startServer() {
     const clientIp = socket.handshake.address || '127.0.0.1';
     console.log(`[SOCKET] User connected to terminal session. Socket ID: ${socket.id} | IP: ${clientIp}`);
     
-    audit({ category: 'terminal', action: 'connect', event: 'Terminal process spawned', ip: clientIp, sessionId: socket.id });
+    audit({ category: 'terminal', action: 'connect', event: 'Terminal process spawned', ip: clientIp, sessionId: socket.id, metadata: { username: socket.data.user?.username } });
 
     // Spawn shell process. On Windows: cmd.exe. On POSIX: bash or sh.
     const isWin = os.platform() === 'win32';

@@ -42,6 +42,7 @@ const OFFICE_EXTENSIONS = new Set(['.doc', '.docx', '.xls', '.xlsx', '.ppt', '.p
 
 type Options = {
   hasSession: (token: string) => boolean;
+  sessionRole: (token: string) => 'viewer' | 'operator' | 'admin' | 'root' | null;
   consumePreviewTicket: (ticket: string, filePath: string) => boolean;
   log: (event: string, ip: string, details?: { action?: string; level?: 'info' | 'warning' | 'critical'; result?: 'success' | 'failure'; metadata?: Record<string, unknown> }) => Promise<unknown>;
   rootDir?: string;
@@ -70,16 +71,16 @@ function modeInfo(mode: number) {
   };
 }
 
-export function createFileManagerRouter({ hasSession, consumePreviewTicket, log, rootDir, trashDir }: Options) {
+export function createFileManagerRouter({ hasSession, sessionRole, consumePreviewTicket, log, rootDir, trashDir }: Options) {
   const router = Router();
   const root = path.resolve(rootDir || process.cwd());
   const trashRoot = path.resolve(trashDir || path.join(process.cwd(), '.terminal-trash'));
 
-  const authenticate = (req: Request) => {
+  const cookieToken = (req: Request) => {
     const encodedToken = String(req.headers.cookie || '').split(';').map(cookie => cookie.trim().split('=')).find(([name]) => name === 'terminal_session')?.slice(1).join('=') || '';
-    const token = encodedToken ? decodeURIComponent(encodedToken) : '';
-    return Boolean(token && hasSession(token));
+    return encodedToken ? decodeURIComponent(encodedToken) : '';
   };
+  const authenticate = (req: Request) => { const token = cookieToken(req); return Boolean(token && hasSession(token)); };
   const relative = (absolutePath: string) => path.relative(root, absolutePath).split(path.sep).join('/');
   const httpError = (status: number, message: string) => Object.assign(new Error(message), { status });
   const resolveInsideRoot = (userPath: unknown, allowTrash = false) => {
@@ -159,7 +160,11 @@ export function createFileManagerRouter({ hasSession, consumePreviewTicket, log,
     const acceptsQueryToken = req.path === '/media' || req.path === '/office-preview';
     const ticket = acceptsQueryToken && typeof req.query.ticket === 'string' ? req.query.ticket : '';
     const filePath = acceptsQueryToken && typeof req.query.path === 'string' ? req.query.path : '';
-    return authenticate(req) || Boolean(ticket && consumePreviewTicket(ticket, filePath)) ? next() : res.status(401).json({ success: false, code: 'UNAUTHORIZED', error: 'Unauthorized' });
+    if (!authenticate(req) && !Boolean(ticket && consumePreviewTicket(ticket, filePath))) return res.status(401).json({ success: false, code: 'UNAUTHORIZED', error: 'Unauthorized' });
+    const role = sessionRole(cookieToken(req));
+    if (!acceptsQueryToken && !['GET', 'HEAD', 'OPTIONS'].includes(req.method) && role === 'viewer') return res.status(403).json({ success: false, code: 'READ_ONLY', error: 'Tài khoản chỉ có quyền xem' });
+    if (req.method === 'PATCH' && req.path === '/metadata' && role !== 'root') return res.status(403).json({ success: false, code: 'ROOT_REQUIRED', error: 'Chỉ tài khoản root được thay đổi quyền và chủ sở hữu' });
+    return next();
   });
 
   router.get('/', async (req, res) => {
