@@ -6,11 +6,14 @@ import crypto from 'crypto';
 import argon2 from 'argon2';
 import { authenticator } from 'otplib';
 import QRCode from 'qrcode';
+import dotenv from 'dotenv';
 import * as pty from 'node-pty';
 import { createFileManagerRouter } from './lib/file-manager-router';
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
+
+dotenv.config({ path: path.join(process.cwd(), '.env'), override: false, quiet: true });
 
 const dev = process.env.NODE_ENV !== 'production';
 const backendOnly = process.argv.includes('--backend');
@@ -439,6 +442,8 @@ async function startServer() {
   await nextApp?.prepare();
   const expressApp = express();
   const httpServer = createServer(expressApp);
+  const authKeyLength = process.env.AUTH_ENCRYPTION_KEY?.length || 0;
+  console.log(`[SECURITY] AUTH_ENCRYPTION_KEY: ${authKeyLength >= 32 ? 'configured' : authKeyLength ? `invalid (${authKeyLength} characters)` : 'missing'}`);
   
   // Set up socket.io server
   const io = new Server(httpServer, {

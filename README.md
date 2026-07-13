@@ -124,7 +124,7 @@ TERMINAL_PASSWORD=mat-khau-khoi-tao-rat-manh
 FILE_MANAGER_ROOT=/
 FILE_MANAGER_TRASH_DIR=/root/.terminal-trash
 LIBREOFFICE_PATH=/usr/bin/libreoffice
-AUTH_ENCRYPTION_KEY=thay-bang-mot-khoa-ngau-nhien-toi-thieu-32-ky-tu
+AUTH_ENCRYPTION_KEY='thay-bang-mot-khoa-ngau-nhien-toi-thieu-32-ky-tu'
 TOTP_ISSUER=Terminal Admin
 ```
 
@@ -135,6 +135,12 @@ openssl rand -base64 48
 ```
 
 Sao lưu `AUTH_ENCRYPTION_KEY` ở nơi an toàn. Nếu mất hoặc thay khóa sau khi bật 2FA, backend không thể giải mã TOTP secret hiện tại.
+
+Đặt giá trị trong dấu nháy nếu khóa chứa `#`, khoảng trắng hoặc ký tự đặc biệt. Trong file `.env`, ký tự `#` không được đặt trong dấu nháy sẽ bắt đầu một comment và làm khóa bị cắt ngắn. Backend in trạng thái lúc khởi động nhưng không in nội dung khóa:
+
+```text
+[SECURITY] AUTH_ENCRYPTION_KEY: configured
+```
 
 Cài dependency và build:
 
