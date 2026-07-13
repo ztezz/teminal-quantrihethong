@@ -85,6 +85,17 @@ function getSavedSidebarState(): boolean {
 
 const LAST_FILE_PATH_KEY = 'vps_terminal_last_file_path';
 const FILE_BOOKMARKS_KEY = 'vps_terminal_file_bookmarks';
+type PreviewKind = 'video' | 'audio' | 'image' | 'pdf' | 'office' | 'text';
+
+function previewKind(filePath: string): PreviewKind {
+  const ext = filePath.split('.').pop()?.toLowerCase() || '';
+  if (['mp4', 'webm', 'ogv', 'mov', 'm4v'].includes(ext)) return 'video';
+  if (['mp3', 'wav', 'ogg', 'oga', 'aac', 'm4a', 'flac', 'opus'].includes(ext)) return 'audio';
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp', 'svg', 'ico'].includes(ext)) return 'image';
+  if (ext === 'pdf') return 'pdf';
+  if (['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp'].includes(ext)) return 'office';
+  return 'text';
+}
 
 function getSavedFilePath(): string {
   if (typeof window === 'undefined') return '';
@@ -395,6 +406,14 @@ export default function Home() {
 
   const openFile = async (filePath: string) => {
     if (!token) return;
+    if (previewKind(filePath) !== 'text') {
+      setViewingFile(filePath);
+      setFileContent(null);
+      setFileMtime(null);
+      setIsEditingFile(false);
+      setFileError(null);
+      return;
+    }
     setFileLoading(true);
     setFileError(null);
     try {
@@ -2171,11 +2190,11 @@ export default function Home() {
                                     {viewingFile.replace(/\\/g, '/').split('/').pop()}
                                   </span>
                                   <span className="text-[10px] uppercase font-bold px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-400 border border-purple-500/20">
-                                    {isEditingFile ? (fileContent !== editorOriginal ? 'Chưa lưu' : 'Đang chỉnh sửa') : 'Chỉ xem'}
+                                    {previewKind(viewingFile) !== 'text' ? previewKind(viewingFile) : isEditingFile ? (fileContent !== editorOriginal ? 'Chưa lưu' : 'Đang chỉnh sửa') : 'Chỉ xem'}
                                   </span>
                                 </div>
                                 <div className="flex gap-2">
-                                  {isEditingFile ? (
+                                  {previewKind(viewingFile) !== 'text' ? null : isEditingFile ? (
                                     <>
                                       <button
                                         onClick={saveEditedFile}
@@ -2204,7 +2223,7 @@ export default function Home() {
                                     </button>
                                   )}
                                   <button
-                                    onClick={() => { if (fileContent !== editorOriginal && !confirm('Bỏ các thay đổi chưa lưu?')) return; setViewingFile(null); setFileContent(null); }}
+                                    onClick={() => { if (isEditingFile && fileContent !== editorOriginal && !confirm('Bỏ các thay đổi chưa lưu?')) return; setViewingFile(null); setFileContent(null); }}
                                     className="flex items-center gap-1.5 px-3 py-1.5 bg-[#111116] hover:bg-[#1c1c24] text-xs font-semibold text-slate-400 border border-white/10 rounded transition cursor-pointer"
                                   >
                                     <ArrowLeft className="w-3.5 h-3.5" />
@@ -2214,7 +2233,49 @@ export default function Home() {
                               </div>
 
                               {/* Editor Content */}
-                              <div className="p-4 bg-black">
+                              {previewKind(viewingFile) === 'video' ? (
+                                <div className="bg-black p-4 flex justify-center">
+                                  <video
+                                    key={viewingFile}
+                                    src={`${API_URL}/api/files/media?path=${encodeURIComponent(viewingFile)}&token=${encodeURIComponent(token || '')}`}
+                                    controls
+                                    playsInline
+                                    preload="metadata"
+                                    className="max-h-[70vh] w-full bg-black"
+                                  >
+                                    Trình duyệt không hỗ trợ phát video này.
+                                  </video>
+                                </div>
+                              ) : previewKind(viewingFile) === 'audio' ? (
+                                <div className="min-h-64 bg-gradient-to-br from-slate-950 via-purple-950/40 to-black p-8 flex items-center justify-center">
+                                  <audio
+                                    key={viewingFile}
+                                    src={`${API_URL}/api/files/media?path=${encodeURIComponent(viewingFile)}&token=${encodeURIComponent(token || '')}`}
+                                    controls
+                                    preload="metadata"
+                                    className="w-full max-w-2xl"
+                                  >
+                                    Trình duyệt không hỗ trợ phát âm thanh này.
+                                  </audio>
+                                </div>
+                              ) : previewKind(viewingFile) === 'image' ? (
+                                <div className="min-h-96 bg-[linear-gradient(45deg,#111_25%,transparent_25%),linear-gradient(-45deg,#111_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#111_75%),linear-gradient(-45deg,transparent_75%,#111_75%)] bg-[length:24px_24px] bg-[position:0_0,0_12px,12px_-12px,-12px_0px] p-4 flex items-center justify-center overflow-auto">
+                                  {/* Authenticated filesystem images cannot use Next's build-time image optimizer. */}
+                                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                                  <img
+                                    src={`${API_URL}/api/files/media?path=${encodeURIComponent(viewingFile)}&token=${encodeURIComponent(token || '')}`}
+                                    alt={viewingFile.replace(/\\/g, '/').split('/').pop() || 'Ảnh xem trước'}
+                                    className="max-h-[75vh] max-w-full object-contain shadow-2xl"
+                                  />
+                                </div>
+                              ) : previewKind(viewingFile) === 'pdf' || previewKind(viewingFile) === 'office' ? (
+                                <iframe
+                                  key={viewingFile}
+                                  src={`${API_URL}/api/files/${previewKind(viewingFile) === 'office' ? 'office-preview' : 'media'}?path=${encodeURIComponent(viewingFile)}&token=${encodeURIComponent(token || '')}`}
+                                  title={`Xem trước ${viewingFile}`}
+                                  className="h-[75vh] w-full bg-white"
+                                />
+                              ) : <div className="p-4 bg-black">
                                 <div className="flex flex-wrap gap-2 mb-2">
                                   <input value={editorFind} onChange={(e) => setEditorFind(e.target.value)} placeholder="Tìm" className="bg-[#111116] border border-white/10 px-2 py-1 text-xs rounded" />
                                   <input value={editorReplace} onChange={(e) => setEditorReplace(e.target.value)} placeholder="Thay thế" className="bg-[#111116] border border-white/10 px-2 py-1 text-xs rounded" />
@@ -2236,7 +2297,7 @@ export default function Home() {
                                   placeholder="Nội dung tệp rỗng..."
                                 />
                                 <div className="mt-2 text-right text-[10px] font-mono text-slate-500">Dòng {editorPosition.line}, ký tự {editorPosition.char} | {(fileContent || '').length} ký tự | Ctrl+S để lưu</div>
-                              </div>
+                              </div>}
                             </div>
                           ) : (
                             /* Directory List */

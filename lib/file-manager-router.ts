@@ -2,6 +2,8 @@ import { Router, raw, type Request, type Response } from 'express';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import os from 'os';
+import { execFile } from 'child_process';
 import * as archiver from 'archiver';
 import unzipper from 'unzipper';
 
@@ -11,6 +13,32 @@ const MAX_UPLOAD_SIZE = 25 * 1024 * 1024;
 const MAX_BULK_ITEMS = 100;
 const MAX_SEARCH_RESULTS = 500;
 const MAX_SEARCH_ENTRIES = 20_000;
+const PREVIEW_TYPES: Record<string, string> = {
+  '.aac': 'audio/aac',
+  '.avif': 'image/avif',
+  '.bmp': 'image/bmp',
+  '.flac': 'audio/flac',
+  '.gif': 'image/gif',
+  '.ico': 'image/x-icon',
+  '.jpeg': 'image/jpeg',
+  '.jpg': 'image/jpeg',
+  '.m4v': 'video/x-m4v',
+  '.m4a': 'audio/mp4',
+  '.mov': 'video/quicktime',
+  '.mp4': 'video/mp4',
+  '.mp3': 'audio/mpeg',
+  '.oga': 'audio/ogg',
+  '.ogg': 'audio/ogg',
+  '.ogv': 'video/ogg',
+  '.opus': 'audio/ogg',
+  '.pdf': 'application/pdf',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.wav': 'audio/wav',
+  '.webm': 'video/webm',
+  '.webp': 'image/webp'
+};
+const OFFICE_EXTENSIONS = new Set(['.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.ods', '.odp']);
 
 type Options = {
   hasSession: (token: string) => boolean;
@@ -120,7 +148,11 @@ export function createFileManagerRouter({ hasSession, log, rootDir, trashDir }: 
     catch (error: any) { return { success: false, path: value, code: error.code || `HTTP_${error.status || 500}`, error: error.message || 'Thao tác thất bại' }; }
   }));
 
-  router.use((req, res, next) => authenticate(req) ? next() : res.status(401).json({ success: false, code: 'UNAUTHORIZED', error: 'Unauthorized' }));
+  router.use((req, res, next) => {
+    const acceptsQueryToken = req.path === '/media' || req.path === '/office-preview';
+    const mediaToken = acceptsQueryToken && typeof req.query.token === 'string' ? req.query.token : '';
+    return authenticate(req) || Boolean(mediaToken && hasSession(mediaToken)) ? next() : res.status(401).json({ success: false, code: 'UNAUTHORIZED', error: 'Unauthorized' });
+  });
 
   router.get('/', async (req, res) => {
     try {
@@ -171,6 +203,63 @@ export function createFileManagerRouter({ hasSession, log, rootDir, trashDir }: 
       if (buffer.subarray(0, 512).includes(0)) return res.json({ success: true, isBinary: true, size: stat.size, mtime: stat.mtime.toISOString() });
       return res.json({ success: true, isBinary: false, content: buffer.toString('utf8'), size: stat.size, mtime: stat.mtime.toISOString() });
     } catch (error) { return fail(res, error); }
+  });
+
+  router.get('/media', async (req, res) => {
+    try {
+      const target = resolveInsideRoot(req.query.path); const stat = await fsp.stat(target);
+      if (!stat.isFile()) throw httpError(400, 'Đường dẫn không phải tệp tin');
+      const contentType = PREVIEW_TYPES[path.extname(target).toLowerCase()];
+      if (!contentType) throw httpError(415, 'Định dạng xem trước không được hỗ trợ');
+      const range = req.headers.range;
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(path.basename(target))}`);
+      if (!range) {
+        res.setHeader('Content-Length', stat.size);
+        return fs.createReadStream(target).on('error', error => res.destroy(error)).pipe(res);
+      }
+      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+      if (!match) { res.setHeader('Content-Range', `bytes */${stat.size}`); return res.sendStatus(416); }
+      const start = match[1] ? Number(match[1]) : Math.max(0, stat.size - Number(match[2]));
+      const end = match[2] && match[1] ? Number(match[2]) : stat.size - 1;
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start > end || start >= stat.size) {
+        res.setHeader('Content-Range', `bytes */${stat.size}`); return res.sendStatus(416);
+      }
+      const boundedEnd = Math.min(end, stat.size - 1);
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${start}-${boundedEnd}/${stat.size}`);
+      res.setHeader('Content-Length', boundedEnd - start + 1);
+      return fs.createReadStream(target, { start, end: boundedEnd }).on('error', error => res.destroy(error)).pipe(res);
+    } catch (error) { return fail(res, error); }
+  });
+
+  router.get('/office-preview', async (req, res) => {
+    let tempDir: string | undefined;
+    try {
+      const target = resolveInsideRoot(req.query.path); const stat = await fsp.stat(target);
+      if (!stat.isFile() || !OFFICE_EXTENSIONS.has(path.extname(target).toLowerCase())) throw httpError(415, 'Định dạng Office không được hỗ trợ');
+      tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'terminal-office-'));
+      await new Promise<void>((resolve, reject) => {
+        execFile(process.env.LIBREOFFICE_PATH || 'libreoffice', ['--headless', '--convert-to', 'pdf', '--outdir', tempDir!, target], { timeout: 120_000, maxBuffer: 1024 * 1024 }, (error) => error ? reject(error) : resolve());
+      }).catch((error: any) => {
+        if (error.code === 'ENOENT') throw httpError(501, 'Chưa cài LibreOffice trên backend. Hãy cài gói libreoffice để xem tài liệu Office.');
+        throw httpError(422, `Không thể chuyển tài liệu Office sang PDF: ${error.message}`);
+      });
+      const pdfPath = path.join(tempDir, `${path.parse(target).name}.pdf`);
+      const pdfStat = await fsp.stat(pdfPath);
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Length', pdfStat.size);
+      res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(`${path.parse(target).name}.pdf`)}`);
+      const cleanup = () => tempDir && fsp.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+      res.once('finish', cleanup); res.once('close', cleanup);
+      return fs.createReadStream(pdfPath).on('error', error => res.destroy(error)).pipe(res);
+    } catch (error) {
+      if (tempDir) await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+      return fail(res, error);
+    }
   });
 
   router.post('/create', async (req, res) => {
