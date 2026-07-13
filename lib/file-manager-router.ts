@@ -43,7 +43,7 @@ const OFFICE_EXTENSIONS = new Set(['.doc', '.docx', '.xls', '.xlsx', '.ppt', '.p
 type Options = {
   hasSession: (token: string) => boolean;
   consumePreviewTicket: (ticket: string, filePath: string) => boolean;
-  log: (event: string, ip: string) => Promise<unknown>;
+  log: (event: string, ip: string, details?: { action?: string; level?: 'info' | 'warning' | 'critical'; result?: 'success' | 'failure'; metadata?: Record<string, unknown> }) => Promise<unknown>;
   rootDir?: string;
   trashDir?: string;
 };
@@ -151,6 +151,11 @@ export function createFileManagerRouter({ hasSession, consumePreviewTicket, log,
   }));
 
   router.use((req, res, next) => {
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+      res.once('finish', () => {
+        if (res.statusCode >= 400) void log(`File operation failed: ${req.method} ${req.path}`, clientIp(req), { action: `${req.method.toLowerCase()}_${req.path.replace(/\W+/g, '_')}`, level: res.statusCode >= 500 ? 'critical' : 'warning', result: 'failure', metadata: { status: res.statusCode } });
+      });
+    }
     const acceptsQueryToken = req.path === '/media' || req.path === '/office-preview';
     const ticket = acceptsQueryToken && typeof req.query.ticket === 'string' ? req.query.ticket : '';
     const filePath = acceptsQueryToken && typeof req.query.path === 'string' ? req.query.path : '';

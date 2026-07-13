@@ -21,6 +21,9 @@ const FILE_MANAGER_TRASH_DIR = path.resolve(process.env.FILE_MANAGER_TRASH_DIR |
 const SESSION_COOKIE = 'terminal_session';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 type StoredSession = { tokenHash: string; createdAt: number; expiresAt: number; ip: string; userAgent: string };
+type AuditLevel = 'info' | 'warning' | 'critical';
+type AuditResult = 'success' | 'failure';
+type AuditEntry = { id: number; category: string; action: string; event: string; level: AuditLevel; result: AuditResult; ip: string; sessionId?: string; metadata?: Record<string, unknown>; timestamp: string; previousHash: string; hash: string };
 
 // Pure JavaScript File-Based Database to bypass binary sqlite3 GLIBC errors
 const DB_FILE = path.join(process.cwd(), 'terminal_database.json');
@@ -29,7 +32,7 @@ class JsonDatabase {
   private data: {
     settings: Record<string, string>;
     terminal_settings: Record<string, string>;
-    logs: Array<{ id: number; event: string; ip: string; timestamp: string }>;
+    logs: AuditEntry[];
     sessions: StoredSession[];
   };
 
@@ -50,6 +53,8 @@ class JsonDatabase {
         this.data = JSON.parse(fileContent);
         if (!Array.isArray(this.data.sessions) || this.data.sessions.some(session => typeof session === 'string')) this.data.sessions = [];
         else this.data.sessions = this.data.sessions.map(session => ({ ...session, createdAt: session.createdAt || Date.now(), ip: session.ip || 'unknown', userAgent: session.userAgent || 'unknown' }));
+        if (!Array.isArray(this.data.logs)) this.data.logs = [];
+        this.data.logs = this.data.logs.map((entry: any, index) => this.normalizeAuditEntry(entry, index));
       } else {
         this.save();
       }
@@ -64,6 +69,48 @@ class JsonDatabase {
     } catch (err) {
       console.error('[DB] Error saving database file:', err);
     }
+  }
+
+  private normalizeAuditEntry(entry: any, index: number): AuditEntry {
+    return {
+      id: Number(entry.id) || index + 1,
+      category: entry.category || 'legacy', action: entry.action || 'event', event: String(entry.event || 'Unknown event'),
+      level: entry.level || 'info', result: entry.result || 'success', ip: String(entry.ip || 'unknown'),
+      sessionId: entry.sessionId, metadata: entry.metadata, timestamp: entry.timestamp || new Date().toISOString(),
+      previousHash: entry.previousHash || '', hash: entry.hash || ''
+    };
+  }
+
+  addAudit(entry: Omit<AuditEntry, 'id' | 'timestamp' | 'previousHash' | 'hash'>) {
+    this.load();
+    const previousHash = this.data.logs.at(-1)?.hash || '';
+    const base = { id: (this.data.logs.at(-1)?.id || 0) + 1, ...entry, timestamp: new Date().toISOString(), previousHash };
+    const hash = crypto.createHash('sha256').update(JSON.stringify(base)).digest('hex');
+    this.data.logs.push({ ...base, hash });
+    this.save();
+  }
+
+  queryAudit(filters: { query?: string; category?: string; level?: string; result?: string; offset: number; limit: number }) {
+    this.load();
+    const query = filters.query?.toLocaleLowerCase();
+    const items = [...this.data.logs].reverse().filter(entry =>
+      (!query || `${entry.event} ${entry.action} ${entry.ip} ${JSON.stringify(entry.metadata || {})}`.toLocaleLowerCase().includes(query)) &&
+      (!filters.category || entry.category === filters.category) && (!filters.level || entry.level === filters.level) && (!filters.result || entry.result === filters.result)
+    );
+    return { total: items.length, items: items.slice(filters.offset, filters.offset + filters.limit) };
+  }
+
+  verifyAuditIntegrity() {
+    let checked = 0;
+    let previousHash = '';
+    for (const entry of this.data.logs) {
+      if (!entry.hash) continue;
+      const { hash, ...base } = entry;
+      if (entry.previousHash !== previousHash || crypto.createHash('sha256').update(JSON.stringify(base)).digest('hex') !== hash) return { valid: false, checked, brokenAt: entry.id };
+      previousHash = hash;
+      checked++;
+    }
+    return { valid: true, checked };
   }
 
   async exec(sql: string) {
@@ -119,11 +166,8 @@ class JsonDatabase {
     if (normalized.includes('insert into logs')) {
       const event = params[0];
       const ip = params[1];
-      const id = this.data.logs.length + 1;
-      const timestamp = new Date().toISOString();
-      this.data.logs.push({ id, event, ip, timestamp });
-      this.save();
-      return { lastID: id, changes: 1 };
+      this.addAudit({ category: 'legacy', action: 'event', event, level: 'info', result: 'success', ip });
+      return { lastID: this.data.logs.at(-1)?.id || 0, changes: 1 };
     }
 
     return { lastID: 0, changes: 0 };
@@ -134,9 +178,7 @@ class JsonDatabase {
     const normalized = sql.toLowerCase().trim();
 
     if (normalized.includes('select event, ip, timestamp from logs')) {
-      return [...this.data.logs]
-        .reverse()
-        .slice(0, 50);
+      return this.queryAudit({ offset: 0, limit: 50 }).items;
     }
 
     return [];
@@ -283,6 +325,21 @@ function requestInfo(req: express.Request) {
   };
 }
 
+function audit(entry: { category: string; action: string; event: string; level?: AuditLevel; result?: AuditResult; ip: string; sessionId?: string; metadata?: Record<string, unknown> }) {
+  db.addAudit({ level: 'info', result: 'success', ...entry });
+}
+
+function auditRequest(req: express.Request, entry: Omit<Parameters<typeof audit>[0], 'ip' | 'sessionId'>) {
+  const token = sessionToken(req);
+  audit({ ...entry, ip: requestInfo(req).ip, sessionId: token ? crypto.createHash('sha256').update(token).digest('hex').slice(0, 16) : undefined });
+}
+
+function redactCommand(command: string): string {
+  return command.slice(0, 2000)
+    .replace(/((?:password|passwd|token|secret|api[_-]?key)\s*[=:]\s*)([^\s]+)/gi, '$1[REDACTED]')
+    .replace(/(authorization:\s*bearer\s+)[^\s]+/gi, '$1[REDACTED]');
+}
+
 function createSession(req: express.Request, res: express.Response) {
   const token = crypto.randomBytes(32).toString('hex');
   const { ip, userAgent } = requestInfo(req);
@@ -424,12 +481,12 @@ async function startServer() {
       const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
 
       if (!checkRateLimit(clientIp)) {
-        await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', 'Auth blocked: Rate limit exceeded', clientIp);
+        audit({ category: 'auth', action: 'rate_limit', event: 'Auth blocked: Rate limit exceeded', level: 'critical', result: 'failure', ip: clientIp });
         return res.status(429).json({ success: false, error: 'Quá nhiều lần thử. Vui lòng đợi 15 phút.' });
       }
 
       if (!password) {
-        await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', 'Auth attempt failed: Missing password input', clientIp);
+        audit({ category: 'auth', action: 'login', event: 'Auth attempt failed: Missing password input', level: 'warning', result: 'failure', ip: clientIp });
         return res.status(400).json({ success: false, error: 'Password is required' });
       }
 
@@ -441,10 +498,10 @@ async function startServer() {
           return res.json({ success: true, requiresTwoFactor: true, challenge });
         }
         createSession(req, res);
-        await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', 'Login successful - Session started', clientIp);
+        audit({ category: 'auth', action: 'login', event: 'Login successful - Session started', ip: clientIp });
         return res.json({ success: true });
       } else {
-        await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', 'Login failed: Incorrect password attempt', clientIp);
+        audit({ category: 'auth', action: 'login', event: 'Login failed: Incorrect password attempt', level: 'warning', result: 'failure', ip: clientIp });
         return res.status(401).json({ success: false, error: 'Incorrect password!' });
       }
     } catch (error: any) {
@@ -463,7 +520,7 @@ async function startServer() {
       loginChallenges.delete(challenge);
       resetRateLimit(`2fa:${entry.ip}`);
       createSession(req, res);
-      await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', 'Two-factor login successful', entry.ip);
+      audit({ category: 'auth', action: 'two_factor_login', event: 'Two-factor login successful', ip: entry.ip });
       return res.json({ success: true });
     } catch (error: any) {
       return res.status(error.status || 500).json({ success: false, error: error.message });
@@ -485,11 +542,29 @@ async function startServer() {
         return res.status(401).json({ success: false, error: 'Unauthorized' });
       }
 
-      const history = await db.all('SELECT event, ip, timestamp FROM logs ORDER BY id DESC LIMIT 50');
-      return res.json({ success: true, logs: history });
+      const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+      const offset = Math.max(0, Number(req.query.offset) || 0);
+      const history = db.queryAudit({ query: typeof req.query.q === 'string' ? req.query.q : undefined, category: typeof req.query.category === 'string' ? req.query.category : undefined, level: typeof req.query.level === 'string' ? req.query.level : undefined, result: typeof req.query.result === 'string' ? req.query.result : undefined, offset, limit });
+      return res.json({ success: true, logs: history.items, total: history.total, offset, limit });
     } catch (error: any) {
       return res.status(500).json({ success: false, error: error.message });
     }
+  });
+
+  expressApp.get('/api/logs/export', (req, res) => {
+    if (!authenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const items = db.queryAudit({ query: typeof req.query.q === 'string' ? req.query.q : undefined, category: typeof req.query.category === 'string' ? req.query.category : undefined, level: typeof req.query.level === 'string' ? req.query.level : undefined, result: typeof req.query.result === 'string' ? req.query.result : undefined, offset: 0, limit: 20_000 }).items;
+    if (req.query.format === 'csv') {
+      const escape = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+      const csv = ['timestamp,category,action,level,result,ip,sessionId,event,metadata', ...items.map((entry: AuditEntry) => [entry.timestamp, entry.category, entry.action, entry.level, entry.result, entry.ip, entry.sessionId, entry.event, JSON.stringify(entry.metadata || {})].map(escape).join(','))].join('\n');
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8'); res.setHeader('Content-Disposition', 'attachment; filename="audit-log.csv"'); return res.send('\uFEFF' + csv);
+    }
+    res.setHeader('Content-Type', 'application/json'); res.setHeader('Content-Disposition', 'attachment; filename="audit-log.json"'); return res.send(JSON.stringify(items, null, 2));
+  });
+
+  expressApp.get('/api/logs/integrity', (req, res) => {
+    if (!authenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    return res.json({ success: true, ...db.verifyAuditIntegrity() });
   });
 
   // Get terminal settings
@@ -563,7 +638,7 @@ async function startServer() {
       setSessionCookie(res, nextToken);
 
       const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
-      await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', 'Master password was changed successfully', clientIp);
+      audit({ category: 'security', action: 'password_change', event: 'Master password was changed successfully', level: 'critical', ip: clientIp });
 
       return res.json({ success: true, message: 'Password updated successfully' });
     } catch (error: any) {
@@ -627,7 +702,7 @@ async function startServer() {
       if (token) {
         db.removeSession(token);
         const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
-        await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', 'User logged out', clientIp);
+        audit({ category: 'auth', action: 'logout', event: 'User logged out', ip: clientIp });
       }
       clearSessionCookie(res);
       return res.json({ success: true });
@@ -683,6 +758,7 @@ async function startServer() {
       await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'totp_secret', pending.value);
       await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'recovery_codes', JSON.stringify(recoveryCodes.map(recoveryHash)));
       db.deleteSetting('totp_pending_secret');
+      auditRequest(req, { category: 'security', action: 'two_factor_enable', event: 'Two-factor authentication enabled', level: 'critical' });
       return res.json({ success: true, recoveryCodes });
     } catch (error: any) {
       return res.status(error.status || 500).json({ success: false, error: error.message });
@@ -694,6 +770,7 @@ async function startServer() {
     try {
       if (!await verifyPassword(req.body?.password) || !await verifySecondFactor(req.body?.code)) return res.status(400).json({ success: false, error: 'Mật khẩu hoặc mã xác thực không đúng' });
       db.deleteSetting('totp_secret'); db.deleteSetting('totp_pending_secret'); db.deleteSetting('recovery_codes');
+      auditRequest(req, { category: 'security', action: 'two_factor_disable', event: 'Two-factor authentication disabled', level: 'critical' });
       return res.json({ success: true });
     } catch (error: any) {
       return res.status(error.status || 500).json({ success: false, error: error.message });
@@ -705,6 +782,7 @@ async function startServer() {
     const currentHash = crypto.createHash('sha256').update(sessionToken(req)).digest('hex');
     if (currentHash.startsWith(req.params.id)) return res.status(400).json({ success: false, error: 'Hãy dùng đăng xuất để kết thúc phiên hiện tại' });
     db.removeSessionById(req.params.id);
+    auditRequest(req, { category: 'security', action: 'session_revoke', event: 'Session revoked', level: 'warning', metadata: { sessionId: req.params.id } });
     return res.json({ success: true });
   });
 
@@ -712,13 +790,14 @@ async function startServer() {
     if (!authenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
     const currentToken = sessionToken(req); const info = requestInfo(req);
     db.clearSessions(); db.addSession(currentToken, info.ip, info.userAgent);
+    auditRequest(req, { category: 'security', action: 'sessions_revoke_others', event: 'All other sessions revoked', level: 'warning' });
     return res.json({ success: true });
   });
 
   expressApp.use('/api/files', createFileManagerRouter({
     hasSession,
     consumePreviewTicket,
-    log: (event, ip) => db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', event, ip),
+    log: async (event, ip, details) => audit({ category: 'file', action: details?.action || event.split(':', 1)[0].slice(0, 80), event, level: details?.level || (/xóa|metadata|quyền/i.test(event) ? 'warning' : 'info'), result: details?.result || 'success', ip, metadata: details?.metadata }),
     rootDir: FILE_MANAGER_ROOT,
     trashDir: FILE_MANAGER_TRASH_DIR
   }));
@@ -738,7 +817,7 @@ async function startServer() {
     const clientIp = socket.handshake.address || '127.0.0.1';
     console.log(`[SOCKET] User connected to terminal session. Socket ID: ${socket.id} | IP: ${clientIp}`);
     
-    await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', `SSH/Local Terminal process spawned (Socket: ${socket.id})`, clientIp);
+    audit({ category: 'terminal', action: 'connect', event: 'Terminal process spawned', ip: clientIp, sessionId: socket.id });
 
     // Spawn shell process. On Windows: cmd.exe. On POSIX: bash or sh.
     const isWin = os.platform() === 'win32';
@@ -758,6 +837,8 @@ async function startServer() {
     }
 
     let shell: pty.IPty | null = null;
+    let commandBuffer = '';
+    let acceptingCommandInput = false;
 
     try {
       shell = pty.spawn(shellExec, args, {
@@ -780,18 +861,29 @@ async function startServer() {
     }
 
     // Stream shell output back to frontend
-    shell.onData((data) => socket.emit('output', data));
+    shell.onData((data) => {
+      socket.emit('output', data);
+      if (/(?:^|[\r\n])[^\r\n]*[#$]\s$/.test(data)) acceptingCommandInput = true;
+    });
 
     // Handle clean close from the shell itself
     shell.onExit(async ({ exitCode }) => {
       console.log(`[SHELL] Shell process exited with code ${exitCode}. Socket ID: ${socket.id}`);
       socket.emit('output', `\r\n\r\n\x1b[33m[SHELL EXIT] Terminal process exited (code ${exitCode}). Closing connection...\x1b[0m\r\n`);
-      await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', `Terminal shell exited with code ${exitCode}`, clientIp);
+      audit({ category: 'terminal', action: 'exit', event: `Terminal shell exited with code ${exitCode}`, level: exitCode === 0 ? 'info' : 'warning', result: exitCode === 0 ? 'success' : 'failure', ip: clientIp, sessionId: socket.id, metadata: { exitCode } });
       socket.disconnect();
     });
 
     // Handle inputs from frontend
     socket.on('input', (data: string) => {
+      for (const char of acceptingCommandInput ? data : '') {
+        if (char === '\r' || char === '\n') {
+          const command = commandBuffer.trim(); commandBuffer = '';
+          if (command) audit({ category: 'terminal', action: 'command', event: 'Terminal command executed', ip: clientIp, sessionId: socket.id, metadata: { command: redactCommand(command), cwd: terminalCwd } });
+          acceptingCommandInput = false;
+        } else if (char === '\u007f') commandBuffer = commandBuffer.slice(0, -1);
+        else if (char >= ' ' && commandBuffer.length < 2000) commandBuffer += char;
+      }
       shell?.write(data);
     });
 
@@ -815,7 +907,7 @@ async function startServer() {
         shell = null;
       }
       
-      await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', `Terminal session disconnected & process killed (Socket: ${socket.id})`, clientIp);
+      audit({ category: 'terminal', action: 'disconnect', event: 'Terminal session disconnected and process killed', ip: clientIp, sessionId: socket.id });
     });
   });
 

@@ -50,8 +50,15 @@ import {
 import '@xterm/xterm/css/xterm.css';
 
 interface LogEntry {
+  id: number;
+  category: string;
+  action: string;
   event: string;
+  level: 'info' | 'warning' | 'critical';
+  result: 'success' | 'failure';
   ip: string;
+  sessionId?: string;
+  metadata?: Record<string, unknown>;
   timestamp: string;
 }
 
@@ -186,6 +193,13 @@ export default function Home() {
 
   // Logs & Settings Management UI State
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [logTotal, setLogTotal] = useState(0);
+  const [logOffset, setLogOffset] = useState(0);
+  const [logQuery, setLogQuery] = useState('');
+  const [logCategory, setLogCategory] = useState('');
+  const [logLevel, setLogLevel] = useState('');
+  const [logResult, setLogResult] = useState('');
+  const [logIntegrity, setLogIntegrity] = useState<{ valid: boolean; checked: number; brokenAt?: number } | null>(null);
   const [activeTab, setActiveTab] = useState<ActiveTab>(getSavedActiveTab);
   const [isSidebarOpen, setIsSidebarOpen] = useState(getSavedSidebarState);
 
@@ -679,20 +693,45 @@ export default function Home() {
   };
 
   // Fetch log history and current preferences
-  const loadLogs = useCallback(async () => {
+  const loadLogs = useCallback(async (offset = logOffset) => {
     if (!sessionReady) return;
     try {
-      const res = await fetch(`${API_URL}/api/logs`, {
+      const params = new URLSearchParams({ offset: String(offset), limit: '50' });
+      if (logQuery.trim()) params.set('q', logQuery.trim());
+      if (logCategory) params.set('category', logCategory);
+      if (logLevel) params.set('level', logLevel);
+      if (logResult) params.set('result', logResult);
+      const res = await fetch(`${API_URL}/api/logs?${params}`, {
         credentials: 'include'
       });
       const data = await res.json();
       if (data.success) {
         setLogs(data.logs);
+        setLogTotal(data.total || 0);
+        setLogOffset(offset);
       }
     } catch (err) {
       console.error('Failed to load logs:', err);
     }
-  }, [sessionReady]);
+  }, [sessionReady, logOffset, logQuery, logCategory, logLevel, logResult]);
+
+  const exportAuditLogs = async (format: 'json' | 'csv') => {
+    const params = new URLSearchParams({ format });
+    if (logQuery.trim()) params.set('q', logQuery.trim());
+    if (logCategory) params.set('category', logCategory);
+    if (logLevel) params.set('level', logLevel);
+    if (logResult) params.set('result', logResult);
+    const res = await fetch(`${API_URL}/api/logs/export?${params}`, { credentials: 'include' });
+    if (!res.ok) return;
+    const url = URL.createObjectURL(await res.blob()); const link = document.createElement('a');
+    link.href = url; link.download = `audit-log.${format}`; link.click(); URL.revokeObjectURL(url);
+  };
+
+  const checkLogIntegrity = async () => {
+    const res = await fetch(`${API_URL}/api/logs/integrity`, { credentials: 'include' });
+    const data = await res.json();
+    if (data.success) setLogIntegrity(data);
+  };
 
   const loadMetrics = useCallback(async () => {
     if (!sessionReady) return;
@@ -805,11 +844,16 @@ export default function Home() {
     if (!sessionReady) return;
     const timer = setTimeout(() => {
       loadSettings();
-      loadLogs();
       loadFiles(getSavedFilePath(), null, 'push', true);
     }, 0);
     return () => clearTimeout(timer);
-  }, [sessionReady, loadSettings, loadLogs, loadFiles]);
+  }, [sessionReady, loadSettings, loadFiles]);
+
+  useEffect(() => {
+    if (!sessionReady || activeTab !== 'logs') return;
+    const timer = setTimeout(() => loadLogs(0), 0);
+    return () => clearTimeout(timer);
+  }, [sessionReady, activeTab, loadLogs]);
 
   // Handle master password validation
   const handleLogin = async (e: React.FormEvent) => {
@@ -1724,27 +1768,29 @@ export default function Home() {
                         exit={{ opacity: 0, y: -10 }}
                         className="w-full h-full p-8 overflow-y-auto bg-[#0a0a0c]"
                       >
-                        <div className="max-w-4xl mx-auto space-y-6">
-                          <div className="flex items-center justify-between border-b border-white/10 pb-4">
+                        <div className="max-w-6xl mx-auto space-y-6">
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-white/10 pb-4">
                             <div>
-                              <h3 className="text-lg font-bold text-white uppercase tracking-wider mb-1">Nhật Ký Truy Cập & Kết Nối</h3>
-                              <p className="text-xs text-slate-500 font-mono">Các sự kiện xác thực được giám sát trong SQLite</p>
+                              <h3 className="text-lg font-bold text-white uppercase tracking-wider mb-1">Nhật Ký Kiểm Toán</h3>
+                              <p className="text-xs text-slate-500 font-mono">{logTotal} sự kiện xác thực, terminal và filesystem</p>
                             </div>
-                            <button
-                              onClick={() => loadLogs()}
-                              className="flex items-center gap-1.5 px-3 py-1.5 bg-[#111116] hover:bg-[#1a1a24] text-xs font-semibold text-slate-300 border border-white/10 rounded transition cursor-pointer"
-                            >
-                              <RefreshCw className="w-3.5 h-3.5" />
-                              <span>TẢI LẠI DB</span>
-                            </button>
+                            <div className="flex flex-wrap gap-2"><button onClick={checkLogIntegrity} className={`px-3 py-1.5 text-xs border rounded ${logIntegrity?.valid === false ? 'text-red-400 border-red-500/30' : logIntegrity?.valid ? 'text-emerald-400 border-emerald-500/30' : 'border-white/10'}`}>{logIntegrity ? logIntegrity.valid ? `Chuỗi hợp lệ (${logIntegrity.checked})` : `Chuỗi lỗi tại #${logIntegrity.brokenAt}` : 'Kiểm tra toàn vẹn'}</button><button onClick={() => exportAuditLogs('json')} className="px-3 py-1.5 text-xs bg-white/5 border border-white/10 rounded">JSON</button><button onClick={() => exportAuditLogs('csv')} className="px-3 py-1.5 text-xs bg-white/5 border border-white/10 rounded">CSV</button><button onClick={() => loadLogs(logOffset)} className="flex items-center gap-1.5 px-3 py-1.5 bg-[#111116] text-xs border border-white/10 rounded"><RefreshCw className="w-3.5 h-3.5" />Tải lại</button></div>
                           </div>
+
+                          <form onSubmit={(e) => { e.preventDefault(); loadLogs(0); }} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
+                            <input value={logQuery} onChange={(e) => setLogQuery(e.target.value)} placeholder="Tìm sự kiện, IP, lệnh..." className="lg:col-span-2 bg-black border border-white/10 rounded px-3 py-2 text-xs" />
+                            <select value={logCategory} onChange={(e) => setLogCategory(e.target.value)} className="bg-black border border-white/10 rounded px-3 py-2 text-xs"><option value="">Mọi nhóm</option><option value="auth">Xác thực</option><option value="security">Bảo mật</option><option value="terminal">Terminal</option><option value="file">Tệp tin</option><option value="legacy">Cũ</option></select>
+                            <select value={logLevel} onChange={(e) => setLogLevel(e.target.value)} className="bg-black border border-white/10 rounded px-3 py-2 text-xs"><option value="">Mọi mức</option><option value="info">Info</option><option value="warning">Warning</option><option value="critical">Critical</option></select>
+                            <div className="flex gap-2"><select value={logResult} onChange={(e) => setLogResult(e.target.value)} className="min-w-0 flex-1 bg-black border border-white/10 rounded px-2 py-2 text-xs"><option value="">Mọi kết quả</option><option value="success">Thành công</option><option value="failure">Thất bại</option></select><button type="submit" className="px-3 bg-blue-600 rounded text-xs">Lọc</button></div>
+                          </form>
 
                           <div className="rounded-xl border border-white/10 bg-[#0d0d12]/60 overflow-hidden shadow-2xl">
                             <div className="overflow-x-auto">
                               <table className="w-full text-left border-collapse text-sm">
                                 <thead>
                                   <tr className="bg-[#111116]/80 border-b border-white/10 text-[10px] text-slate-500 font-mono uppercase tracking-widest">
-                                    <th className="py-3.5 px-5 font-semibold">Mô tả sự kiện</th>
+                                    <th className="py-3.5 px-4 font-semibold">Mức / Nhóm</th>
+                                    <th className="py-3.5 px-4 font-semibold">Mô tả sự kiện</th>
                                     <th className="py-3.5 px-5 font-semibold">Địa chỉ IP</th>
                                     <th className="py-3.5 px-5 font-semibold">Thời gian</th>
                                   </tr>
@@ -1752,14 +1798,15 @@ export default function Home() {
                                 <tbody className="divide-y divide-white/5 font-mono text-xs">
                                   {logs.length === 0 ? (
                                     <tr>
-                                      <td colSpan={3} className="py-12 text-center text-slate-600 font-mono italic">
-                                        Hiện tại chưa có nhật ký nào trong cơ sở dữ liệu SQLite.
+                                      <td colSpan={4} className="py-12 text-center text-slate-600 font-mono italic">
+                                        Không có sự kiện phù hợp.
                                       </td>
                                     </tr>
                                   ) : (
-                                    logs.map((log, index) => (
-                                      <tr key={index} className="hover:bg-white/[0.02] transition">
-                                        <td className="py-3.5 px-5 text-slate-300">{log.event}</td>
+                                    logs.map((log) => (
+                                      <tr key={log.id} className="hover:bg-white/[0.02] transition align-top">
+                                        <td className="py-3.5 px-4"><span className={`block w-fit rounded px-1.5 py-0.5 text-[9px] uppercase ${log.level === 'critical' ? 'bg-red-500/15 text-red-400' : log.level === 'warning' ? 'bg-amber-500/15 text-amber-400' : 'bg-blue-500/10 text-blue-400'}`}>{log.level}</span><span className="block mt-1 text-[10px] text-slate-500">{log.category}/{log.action}</span></td>
+                                        <td className="py-3.5 px-4 text-slate-300"><div>{log.event}</div>{log.metadata && <code className="block mt-1 max-w-xl whitespace-pre-wrap break-all text-[10px] text-slate-500">{JSON.stringify(log.metadata)}</code>}<span className={`mt-1 inline-block text-[9px] ${log.result === 'failure' ? 'text-red-400' : 'text-emerald-500'}`}>{log.result}</span></td>
                                         <td className="py-3.5 px-5 text-blue-400 font-semibold">{log.ip}</td>
                                         <td className="py-3.5 px-5 text-slate-500">
                                           {new Date(log.timestamp).toLocaleString()}
@@ -1771,6 +1818,7 @@ export default function Home() {
                               </table>
                             </div>
                           </div>
+                          <div className="flex items-center justify-between text-xs text-slate-500"><span>{logTotal ? `${logOffset + 1}-${Math.min(logOffset + logs.length, logTotal)} / ${logTotal}` : '0 kết quả'}</span><div className="flex gap-2"><button disabled={logOffset === 0} onClick={() => loadLogs(Math.max(0, logOffset - 50))} className="px-3 py-1.5 border border-white/10 rounded disabled:opacity-30">Trước</button><button disabled={logOffset + logs.length >= logTotal} onClick={() => loadLogs(logOffset + 50)} className="px-3 py-1.5 border border-white/10 rounded disabled:opacity-30">Sau</button></div></div>
                         </div>
                       </motion.div>
                     )}
