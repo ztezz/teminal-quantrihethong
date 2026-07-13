@@ -41,7 +41,11 @@ import {
   Move,
   Search,
   Bookmark,
-  BookmarkCheck
+  BookmarkCheck,
+  ShieldCheck,
+  Smartphone,
+  Monitor,
+  Copy
 } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
 
@@ -54,6 +58,15 @@ interface LogEntry {
 interface FileBookmark {
   path: string;
   label: string;
+}
+
+interface SecuritySession {
+  id: string;
+  createdAt: number;
+  expiresAt: number;
+  ip: string;
+  userAgent: string;
+  current: boolean;
 }
 
 interface FileMetadata {
@@ -157,6 +170,8 @@ export default function Home() {
   const [previewTicket, setPreviewTicket] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [twoFactorChallenge, setTwoFactorChallenge] = useState<string | null>(null);
+  const [twoFactorCode, setTwoFactorCode] = useState('');
 
   // Terminal customization preferences
   const [fontSize, setFontSize] = useState<number>(14);
@@ -595,6 +610,11 @@ export default function Home() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [pwdError, setPwdError] = useState<string | null>(null);
   const [pwdSuccess, setPwdSuccess] = useState<string | null>(null);
+  const [securityStatus, setSecurityStatus] = useState<{ twoFactorEnabled: boolean; twoFactorAvailable: boolean; recoveryCodesRemaining: number; sessions: SecuritySession[] } | null>(null);
+  const [twoFactorPassword, setTwoFactorPassword] = useState('');
+  const [twoFactorSetup, setTwoFactorSetup] = useState<{ secret: string; qrCode: string } | null>(null);
+  const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
+  const [securityMessage, setSecurityMessage] = useState<string | null>(null);
 
   // Terminal and socket refs
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -808,6 +828,11 @@ export default function Home() {
       const data = await res.json();
 
       if (data.success) {
+        if (data.requiresTwoFactor) {
+          setTwoFactorChallenge(data.challenge);
+          setPassword('');
+          return;
+        }
         setSessionReady(true);
         setIsAuthenticated(true);
       } else {
@@ -819,6 +844,77 @@ export default function Home() {
       setLoading(false);
     }
   };
+
+  const handleTwoFactorLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!twoFactorChallenge || !twoFactorCode.trim()) return;
+    setLoading(true); setError(null);
+    try {
+      const res = await fetch(`${API_URL}/api/auth/2fa`, {
+        method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ challenge: twoFactorChallenge, code: twoFactorCode.trim() })
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Mã xác thực không hợp lệ');
+      setTwoFactorChallenge(null); setTwoFactorCode(''); setSessionReady(true); setIsAuthenticated(true);
+    } catch (err: any) { setError(err.message); }
+    finally { setLoading(false); }
+  };
+
+  const loadSecurity = useCallback(async () => {
+    if (!sessionReady) return;
+    try {
+      const res = await fetch(`${API_URL}/api/security`, { credentials: 'include' });
+      const data = await res.json();
+      if (data.success) setSecurityStatus(data);
+    } catch (err) { console.error('Failed to load security status:', err); }
+  }, [sessionReady]);
+
+  const securityRequest = async (endpoint: string, options: RequestInit = {}) => {
+    setSecurityMessage(null);
+    const res = await fetch(`${API_URL}${endpoint}`, {
+      ...options, credentials: 'include',
+      headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers }
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error || 'Thao tác bảo mật thất bại');
+    return data;
+  };
+
+  const startTwoFactorSetup = async () => {
+    try {
+      const data = await securityRequest('/api/security/2fa/setup', { method: 'POST', body: JSON.stringify({ password: twoFactorPassword }) });
+      setTwoFactorSetup({ secret: data.secret, qrCode: data.qrCode }); setTwoFactorCode('');
+    } catch (err: any) { setSecurityMessage(err.message); }
+  };
+
+  const confirmTwoFactorSetup = async () => {
+    try {
+      const data = await securityRequest('/api/security/2fa/confirm', { method: 'POST', body: JSON.stringify({ code: twoFactorCode }) });
+      setRecoveryCodes(data.recoveryCodes); setTwoFactorSetup(null); setTwoFactorPassword(''); setTwoFactorCode(''); setSecurityMessage('Đã bật xác thực hai lớp. Hãy lưu các mã khôi phục.'); await loadSecurity();
+    } catch (err: any) { setSecurityMessage(err.message); }
+  };
+
+  const disableTwoFactor = async () => {
+    if (!confirm('Tắt xác thực hai lớp?')) return;
+    try {
+      await securityRequest('/api/security/2fa/disable', { method: 'POST', body: JSON.stringify({ password: twoFactorPassword, code: twoFactorCode }) });
+      setTwoFactorPassword(''); setTwoFactorCode(''); setRecoveryCodes([]); setSecurityMessage('Đã tắt xác thực hai lớp.'); await loadSecurity();
+    } catch (err: any) { setSecurityMessage(err.message); }
+  };
+
+  const revokeSession = async (id?: string) => {
+    try {
+      await securityRequest(id ? `/api/security/sessions/${id}` : '/api/security/sessions', { method: 'DELETE' });
+      setSecurityMessage(id ? 'Đã thu hồi phiên.' : 'Đã thu hồi tất cả phiên khác.'); await loadSecurity();
+    } catch (err: any) { setSecurityMessage(err.message); }
+  };
+
+  useEffect(() => {
+    if (!sessionReady || activeTab !== 'settings') return;
+    const timer = setTimeout(() => loadSecurity(), 0);
+    return () => clearTimeout(timer);
+  }, [sessionReady, activeTab, loadSecurity]);
 
   // Handle password modification
   const handlePasswordChange = async (e: React.FormEvent) => {
@@ -1262,21 +1358,22 @@ export default function Home() {
               
               <div className="text-center mb-8">
                 <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-blue-500/10 mb-4 border border-blue-500/20">
-                  <Lock className="w-6 h-6 text-blue-500" />
+                  {twoFactorChallenge ? <ShieldCheck className="w-6 h-6 text-blue-500" /> : <Lock className="w-6 h-6 text-blue-500" />}
                 </div>
-                <h2 className="text-lg font-semibold text-white tracking-tight">Yêu Cầu Xác Thực</h2>
-                <p className="text-sm text-slate-500 mt-1">Nhập khóa truy cập VPS để khởi tạo Node-PTY</p>
+                <h2 className="text-lg font-semibold text-white tracking-tight">{twoFactorChallenge ? 'Xác Thực Hai Lớp' : 'Yêu Cầu Xác Thực'}</h2>
+                <p className="text-sm text-slate-500 mt-1">{twoFactorChallenge ? 'Nhập mã 6 số hoặc mã khôi phục' : 'Nhập khóa truy cập VPS để khởi tạo Node-PTY'}</p>
               </div>
 
-              <form onSubmit={handleLogin} className="space-y-5">
+              <form onSubmit={twoFactorChallenge ? handleTwoFactorLogin : handleLogin} className="space-y-5">
                 <div>
                   <input
-                    type="password"
+                    type={twoFactorChallenge ? 'text' : 'password'}
                     required
-                    placeholder="••••••••••••"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder={twoFactorChallenge ? '123456' : '••••••••••••'}
+                    value={twoFactorChallenge ? twoFactorCode : password}
+                    onChange={(e) => twoFactorChallenge ? setTwoFactorCode(e.target.value) : setPassword(e.target.value)}
                     className="w-full bg-black border border-white/10 rounded-lg py-3 px-4 text-center text-white focus:outline-none focus:border-blue-500 transition-colors tracking-widest text-lg"
+                    autoComplete={twoFactorChallenge ? 'one-time-code' : 'current-password'}
                     autoFocus
                   />
                 </div>
@@ -1302,10 +1399,11 @@ export default function Home() {
                   ) : (
                     <>
                       <Key className="w-4 h-4" />
-                      <span>KẾT NỐI SHELL</span>
+                      <span>{twoFactorChallenge ? 'XÁC NHẬN MÃ' : 'KẾT NỐI SHELL'}</span>
                     </>
                   )}
                 </button>
+                {twoFactorChallenge && <button type="button" onClick={() => { setTwoFactorChallenge(null); setTwoFactorCode(''); setError(null); }} className="w-full text-xs text-slate-500 hover:text-white">Quay lại nhập mật khẩu</button>}
               </form>
 
               <p className="mt-6 text-[10px] text-center text-slate-600 uppercase tracking-wider font-mono">
@@ -1922,6 +2020,58 @@ export default function Home() {
                                 </button>
                               </div>
                             </form>
+                          </div>
+
+                          <div className="p-6 rounded-xl border border-white/10 bg-[#111116]/40 space-y-6">
+                            <div className="flex items-start justify-between gap-4">
+                              <div>
+                                <h3 className="text-base font-bold text-white uppercase tracking-wider mb-1">Xác Thực Hai Lớp</h3>
+                                <p className="text-xs text-slate-500 font-mono">TOTP tương thích Google Authenticator, Authy và 1Password</p>
+                              </div>
+                              <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase border ${securityStatus?.twoFactorEnabled ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' : 'text-slate-400 bg-white/5 border-white/10'}`}>{securityStatus?.twoFactorEnabled ? 'Đã bật' : 'Đang tắt'}</span>
+                            </div>
+
+                            {securityMessage && <div className="p-3 rounded bg-blue-950/30 border border-blue-900/40 text-blue-300 text-xs font-mono">{securityMessage}</div>}
+                            {securityStatus && !securityStatus.twoFactorAvailable && <div className="p-3 rounded bg-amber-950/30 border border-amber-900/40 text-amber-300 text-xs font-mono">Backend cần biến AUTH_ENCRYPTION_KEY dài ít nhất 32 ký tự để bật 2FA.</div>}
+
+                            {!securityStatus?.twoFactorEnabled ? (
+                              <div className="space-y-4">
+                                {!twoFactorSetup ? <div className="flex flex-col sm:flex-row gap-3">
+                                  <input type="password" value={twoFactorPassword} onChange={(e) => setTwoFactorPassword(e.target.value)} placeholder="Mật khẩu hiện tại" className="flex-1 px-3 py-2 bg-black border border-white/10 rounded text-sm text-white" />
+                                  <button type="button" disabled={!securityStatus?.twoFactorAvailable || !twoFactorPassword} onClick={startTwoFactorSetup} className="px-4 py-2 rounded bg-blue-600 text-white text-xs font-semibold disabled:opacity-40"><Smartphone className="w-4 h-4 inline mr-2" />Thiết lập ứng dụng</button>
+                                </div> : <div className="grid md:grid-cols-[180px_1fr] gap-5 items-center">
+                                  {/* QR code is generated locally by the authenticated backend. */}
+                                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                                  <img src={twoFactorSetup.qrCode} alt="QR thiết lập TOTP" className="w-44 h-44 rounded bg-white p-2" />
+                                  <div className="space-y-3 min-w-0">
+                                    <p className="text-xs text-slate-400">Quét QR rồi nhập mã 6 số để xác nhận. Có thể nhập secret thủ công:</p>
+                                    <code className="block p-2 bg-black rounded text-xs text-blue-300 break-all select-all">{twoFactorSetup.secret}</code>
+                                    <div className="flex gap-2"><input value={twoFactorCode} onChange={(e) => setTwoFactorCode(e.target.value)} inputMode="numeric" autoComplete="one-time-code" placeholder="123456" className="flex-1 px-3 py-2 bg-black border border-white/10 rounded text-center tracking-widest" /><button type="button" onClick={confirmTwoFactorSetup} className="px-4 bg-emerald-600 rounded text-xs font-semibold text-white">Xác nhận bật</button></div>
+                                  </div>
+                                </div>}
+                              </div>
+                            ) : <div className="space-y-3">
+                              <p className="text-xs text-slate-400">Còn {securityStatus.recoveryCodesRemaining} mã khôi phục. Để tắt 2FA, nhập mật khẩu và mã TOTP hoặc recovery code.</p>
+                              <div className="grid sm:grid-cols-2 gap-3"><input type="password" value={twoFactorPassword} onChange={(e) => setTwoFactorPassword(e.target.value)} placeholder="Mật khẩu hiện tại" className="px-3 py-2 bg-black border border-white/10 rounded text-sm" /><input value={twoFactorCode} onChange={(e) => setTwoFactorCode(e.target.value)} placeholder="Mã xác thực" className="px-3 py-2 bg-black border border-white/10 rounded text-sm" /></div>
+                              <button type="button" onClick={disableTwoFactor} className="px-4 py-2 rounded bg-red-600/80 text-white text-xs font-semibold">Tắt xác thực hai lớp</button>
+                            </div>}
+
+                            {recoveryCodes.length > 0 && <div className="p-4 rounded border border-amber-500/30 bg-amber-500/5 space-y-3">
+                              <p className="text-xs font-semibold text-amber-300">Các mã này chỉ hiển thị một lần. Lưu ở nơi an toàn.</p>
+                              <div className="grid grid-cols-2 gap-2 font-mono text-xs">{recoveryCodes.map(code => <code key={code} className="bg-black p-2 rounded text-center select-all">{code}</code>)}</div>
+                              <button type="button" onClick={() => navigator.clipboard.writeText(recoveryCodes.join('\n'))} className="text-xs text-amber-300"><Copy className="inline w-3.5 h-3.5 mr-1" />Sao chép tất cả</button>
+                            </div>}
+                          </div>
+
+                          <div className="p-6 rounded-xl border border-white/10 bg-[#111116]/40 space-y-5">
+                            <div className="flex items-start justify-between gap-4"><div><h3 className="text-base font-bold text-white uppercase tracking-wider mb-1">Phiên Đăng Nhập</h3><p className="text-xs text-slate-500 font-mono">Phiên tự hết hạn sau 12 giờ</p></div><button type="button" onClick={() => revokeSession()} className="px-3 py-2 text-xs rounded bg-red-600/15 text-red-300 border border-red-500/20">Thu hồi phiên khác</button></div>
+                            <div className="space-y-2">
+                              {securityStatus?.sessions.map(session => <div key={session.id} className="flex flex-col sm:flex-row sm:items-center gap-3 p-3 bg-black/50 rounded border border-white/5">
+                                <Monitor className="w-4 h-4 text-blue-400 shrink-0" />
+                                <div className="flex-1 min-w-0"><div className="text-xs text-white truncate">{session.userAgent}</div><div className="text-[10px] text-slate-500 font-mono">{session.ip} · tạo {new Date(session.createdAt).toLocaleString()} · hết hạn {new Date(session.expiresAt).toLocaleString()}</div></div>
+                                {session.current ? <span className="text-[10px] text-emerald-400">Phiên hiện tại</span> : <button type="button" onClick={() => revokeSession(session.id)} className="text-xs text-red-400">Thu hồi</button>}
+                              </div>)}
+                            </div>
                           </div>
 
                           {/* Floating Toast Notification */}

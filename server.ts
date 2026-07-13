@@ -4,6 +4,8 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import crypto from 'crypto';
 import argon2 from 'argon2';
+import { authenticator } from 'otplib';
+import QRCode from 'qrcode';
 import * as pty from 'node-pty';
 import { createFileManagerRouter } from './lib/file-manager-router';
 import os from 'os';
@@ -18,6 +20,7 @@ const FILE_MANAGER_ROOT = path.resolve(process.env.FILE_MANAGER_ROOT || process.
 const FILE_MANAGER_TRASH_DIR = path.resolve(process.env.FILE_MANAGER_TRASH_DIR || path.join(process.cwd(), '.terminal-trash'));
 const SESSION_COOKIE = 'terminal_session';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+type StoredSession = { tokenHash: string; createdAt: number; expiresAt: number; ip: string; userAgent: string };
 
 // Pure JavaScript File-Based Database to bypass binary sqlite3 GLIBC errors
 const DB_FILE = path.join(process.cwd(), 'terminal_database.json');
@@ -27,7 +30,7 @@ class JsonDatabase {
     settings: Record<string, string>;
     terminal_settings: Record<string, string>;
     logs: Array<{ id: number; event: string; ip: string; timestamp: string }>;
-    sessions: Array<{ tokenHash: string; expiresAt: number }>;
+    sessions: StoredSession[];
   };
 
   constructor() {
@@ -46,6 +49,7 @@ class JsonDatabase {
         const fileContent = fs.readFileSync(DB_FILE, 'utf8');
         this.data = JSON.parse(fileContent);
         if (!Array.isArray(this.data.sessions) || this.data.sessions.some(session => typeof session === 'string')) this.data.sessions = [];
+        else this.data.sessions = this.data.sessions.map(session => ({ ...session, createdAt: session.createdAt || Date.now(), ip: session.ip || 'unknown', userAgent: session.userAgent || 'unknown' }));
       } else {
         this.save();
       }
@@ -90,8 +94,8 @@ class JsonDatabase {
     this.load();
     const normalized = sql.toLowerCase().trim();
 
-    if (normalized.includes('insert into settings') || normalized.includes('update settings set value')) {
-      if (normalized.includes('insert into settings')) {
+    if (normalized.includes('insert into settings') || normalized.includes('insert or replace into settings') || normalized.includes('update settings set value')) {
+      if (normalized.includes('insert into settings') || normalized.includes('insert or replace into settings')) {
         const key = params[0];
         const val = params[1];
         this.data.settings[key] = val;
@@ -138,10 +142,10 @@ class JsonDatabase {
     return [];
   }
 
-  addSession(token: string) {
+  addSession(token: string, ip = 'unknown', userAgent = 'unknown') {
     if (!this.data.sessions) this.data.sessions = [];
     this.data.sessions = this.data.sessions.filter(session => session.expiresAt > Date.now());
-    this.data.sessions.push({ tokenHash: crypto.createHash('sha256').update(token).digest('hex'), expiresAt: Date.now() + SESSION_TTL_MS });
+    this.data.sessions.push({ tokenHash: crypto.createHash('sha256').update(token).digest('hex'), createdAt: Date.now(), expiresAt: Date.now() + SESSION_TTL_MS, ip, userAgent: userAgent.slice(0, 300) });
     this.save();
   }
 
@@ -163,8 +167,18 @@ class JsonDatabase {
     this.save();
   }
 
-  getSessions(): Array<{ tokenHash: string; expiresAt: number }> {
-    return this.data.sessions || [];
+  deleteSetting(key: string) {
+    delete this.data.settings[key];
+    this.save();
+  }
+
+  removeSessionById(id: string) {
+    this.data.sessions = (this.data.sessions || []).filter(session => !session.tokenHash.startsWith(id));
+    this.save();
+  }
+
+  getSessions(): StoredSession[] {
+    return (this.data.sessions || []).filter(session => session.expiresAt > Date.now());
   }
 }
 
@@ -210,6 +224,7 @@ function clearSessionCookie(res: express.Response) {
 
 const previewTickets = new Map<string, { path: string; expiresAt: number }>();
 const socketTickets = new Map<string, number>();
+const loginChallenges = new Map<string, { expiresAt: number; ip: string; userAgent: string }>();
 function createTicket<T>(store: Map<string, T>, value: T): string {
   const ticket = crypto.randomBytes(32).toString('base64url');
   store.set(ticket, value);
@@ -236,6 +251,60 @@ async function verifyPassword(password: string): Promise<boolean> {
   const valid = legacyHash.length === hashRow.value.length && crypto.timingSafeEqual(Buffer.from(legacyHash), Buffer.from(hashRow.value));
   if (valid) await db.run('UPDATE settings SET value = ? WHERE key = ?', await argon2.hash(password, { type: argon2.argon2id }), 'password_hash');
   return valid;
+}
+
+function encryptionKey(): Buffer | null {
+  const value = process.env.AUTH_ENCRYPTION_KEY;
+  return value && value.length >= 32 ? crypto.createHash('sha256').update(value).digest() : null;
+}
+
+function encryptSecret(secret: string): string {
+  const key = encryptionKey();
+  if (!key) throw Object.assign(new Error('AUTH_ENCRYPTION_KEY must contain at least 32 characters'), { status: 503 });
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final()]);
+  return [iv, cipher.getAuthTag(), encrypted].map(value => value.toString('base64url')).join('.');
+}
+
+function decryptSecret(payload: string): string {
+  const key = encryptionKey();
+  if (!key) throw Object.assign(new Error('AUTH_ENCRYPTION_KEY is missing'), { status: 503 });
+  const [iv, tag, encrypted] = payload.split('.').map(value => Buffer.from(value, 'base64url'));
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
+}
+
+function requestInfo(req: express.Request) {
+  return {
+    ip: String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim(),
+    userAgent: String(req.headers['user-agent'] || 'unknown')
+  };
+}
+
+function createSession(req: express.Request, res: express.Response) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const { ip, userAgent } = requestInfo(req);
+  db.addSession(token, ip, userAgent);
+  setSessionCookie(res, token);
+}
+
+function recoveryHash(code: string): string {
+  return crypto.createHash('sha256').update(code.replace(/\s|-/g, '').toUpperCase()).digest('hex');
+}
+
+async function verifySecondFactor(code: string): Promise<boolean> {
+  const secretRow = await db.get('SELECT value FROM settings WHERE key = ?', 'totp_secret');
+  if (!secretRow || typeof code !== 'string') return false;
+  const normalized = code.replace(/\s/g, '');
+  if (/^\d{6}$/.test(normalized) && authenticator.check(normalized, decryptSecret(secretRow.value))) return true;
+  const recoveryRow = await db.get('SELECT value FROM settings WHERE key = ?', 'recovery_codes');
+  const hashes: string[] = recoveryRow ? JSON.parse(recoveryRow.value) : [];
+  const hash = recoveryHash(normalized);
+  if (!hashes.includes(hash)) return false;
+  await db.run('UPDATE settings SET value = ? WHERE key = ?', JSON.stringify(hashes.filter(item => item !== hash)), 'recovery_codes');
+  return true;
 }
 
 // Simple rate limiter for auth endpoint: max 10 attempts per IP per 15 minutes
@@ -365,12 +434,13 @@ async function startServer() {
       }
 
       if (await verifyPassword(password)) {
-        // Correct password, generate token & reset rate limit
         resetRateLimit(clientIp);
-        const token = crypto.randomBytes(32).toString('hex');
-        db.addSession(token);
-        setSessionCookie(res, token);
-        
+        const totpRow = await db.get('SELECT value FROM settings WHERE key = ?', 'totp_secret');
+        if (totpRow) {
+          const challenge = createTicket(loginChallenges, { expiresAt: Date.now() + 5 * 60_000, ...requestInfo(req) });
+          return res.json({ success: true, requiresTwoFactor: true, challenge });
+        }
+        createSession(req, res);
         await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', 'Login successful - Session started', clientIp);
         return res.json({ success: true });
       } else {
@@ -380,6 +450,23 @@ async function startServer() {
     } catch (error: any) {
       console.error('[API AUTH ERROR]', error);
       return res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  expressApp.post('/api/auth/2fa', async (req, res) => {
+    const { challenge, code } = req.body || {};
+    const entry = typeof challenge === 'string' ? loginChallenges.get(challenge) : undefined;
+    if (!entry || entry.expiresAt <= Date.now() || entry.ip !== requestInfo(req).ip) return res.status(401).json({ success: false, error: 'Yêu cầu xác thực đã hết hạn' });
+    if (!checkRateLimit(`2fa:${entry.ip}`)) return res.status(429).json({ success: false, error: 'Quá nhiều lần thử. Vui lòng đợi 15 phút.' });
+    try {
+      if (!await verifySecondFactor(code)) return res.status(401).json({ success: false, error: 'Mã xác thực không hợp lệ' });
+      loginChallenges.delete(challenge);
+      resetRateLimit(`2fa:${entry.ip}`);
+      createSession(req, res);
+      await db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', 'Two-factor login successful', entry.ip);
+      return res.json({ success: true });
+    } catch (error: any) {
+      return res.status(error.status || 500).json({ success: false, error: error.message });
     }
   });
 
@@ -557,6 +644,75 @@ async function startServer() {
   expressApp.post('/api/auth/preview-ticket', (req, res) => {
     if (!authenticated(req) || typeof req.body.path !== 'string') return res.status(401).json({ success: false, error: 'Unauthorized' });
     return res.json({ success: true, ticket: createTicket(previewTickets, { path: req.body.path, expiresAt: Date.now() + 60_000 }) });
+  });
+
+  expressApp.get('/api/security', async (req, res) => {
+    if (!authenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const totpRow = await db.get('SELECT value FROM settings WHERE key = ?', 'totp_secret');
+    const recoveryRow = await db.get('SELECT value FROM settings WHERE key = ?', 'recovery_codes');
+    const currentHash = crypto.createHash('sha256').update(sessionToken(req)).digest('hex');
+    return res.json({
+      success: true,
+      twoFactorEnabled: Boolean(totpRow),
+      twoFactorAvailable: Boolean(encryptionKey()),
+      recoveryCodesRemaining: recoveryRow ? JSON.parse(recoveryRow.value).length : 0,
+      sessions: db.getSessions().map((session: StoredSession) => ({ id: session.tokenHash.slice(0, 16), createdAt: session.createdAt, expiresAt: session.expiresAt, ip: session.ip, userAgent: session.userAgent, current: session.tokenHash === currentHash }))
+    });
+  });
+
+  expressApp.post('/api/security/2fa/setup', async (req, res) => {
+    if (!authenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    try {
+      if (!await verifyPassword(req.body?.password)) return res.status(400).json({ success: false, error: 'Mật khẩu hiện tại không đúng' });
+      const secret = authenticator.generateSecret();
+      const issuer = process.env.TOTP_ISSUER || 'Terminal Admin';
+      const uri = authenticator.keyuri('root', issuer, secret);
+      await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'totp_pending_secret', encryptSecret(secret));
+      return res.json({ success: true, secret, qrCode: await QRCode.toDataURL(uri) });
+    } catch (error: any) {
+      return res.status(error.status || 500).json({ success: false, error: error.message });
+    }
+  });
+
+  expressApp.post('/api/security/2fa/confirm', async (req, res) => {
+    if (!authenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    try {
+      const pending = await db.get('SELECT value FROM settings WHERE key = ?', 'totp_pending_secret');
+      if (!pending || !authenticator.check(String(req.body?.code || ''), decryptSecret(pending.value))) return res.status(400).json({ success: false, error: 'Mã xác thực không hợp lệ' });
+      const recoveryCodes = Array.from({ length: 10 }, () => `${crypto.randomBytes(3).toString('hex').toUpperCase()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`);
+      await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'totp_secret', pending.value);
+      await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'recovery_codes', JSON.stringify(recoveryCodes.map(recoveryHash)));
+      db.deleteSetting('totp_pending_secret');
+      return res.json({ success: true, recoveryCodes });
+    } catch (error: any) {
+      return res.status(error.status || 500).json({ success: false, error: error.message });
+    }
+  });
+
+  expressApp.post('/api/security/2fa/disable', async (req, res) => {
+    if (!authenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    try {
+      if (!await verifyPassword(req.body?.password) || !await verifySecondFactor(req.body?.code)) return res.status(400).json({ success: false, error: 'Mật khẩu hoặc mã xác thực không đúng' });
+      db.deleteSetting('totp_secret'); db.deleteSetting('totp_pending_secret'); db.deleteSetting('recovery_codes');
+      return res.json({ success: true });
+    } catch (error: any) {
+      return res.status(error.status || 500).json({ success: false, error: error.message });
+    }
+  });
+
+  expressApp.delete('/api/security/sessions/:id', (req, res) => {
+    if (!authenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const currentHash = crypto.createHash('sha256').update(sessionToken(req)).digest('hex');
+    if (currentHash.startsWith(req.params.id)) return res.status(400).json({ success: false, error: 'Hãy dùng đăng xuất để kết thúc phiên hiện tại' });
+    db.removeSessionById(req.params.id);
+    return res.json({ success: true });
+  });
+
+  expressApp.delete('/api/security/sessions', (req, res) => {
+    if (!authenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const currentToken = sessionToken(req); const info = requestInfo(req);
+    db.clearSessions(); db.addSession(currentToken, info.ip, info.userAgent);
+    return res.json({ success: true });
   });
 
   expressApp.use('/api/files', createFileManagerRouter({
