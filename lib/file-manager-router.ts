@@ -16,6 +16,7 @@ type Options = {
   hasSession: (token: string) => boolean;
   log: (event: string, ip: string) => Promise<unknown>;
   rootDir?: string;
+  trashDir?: string;
 };
 
 type TrashMetadata = { originalPath: string; deletedAt: string };
@@ -40,10 +41,10 @@ function modeInfo(mode: number) {
   };
 }
 
-export function createFileManagerRouter({ hasSession, log, rootDir }: Options) {
+export function createFileManagerRouter({ hasSession, log, rootDir, trashDir }: Options) {
   const router = Router();
-  const root = path.resolve(rootDir || path.parse(process.cwd()).root);
-  const trashRoot = path.join(root, '.terminal-trash');
+  const root = path.resolve(rootDir || process.cwd());
+  const trashRoot = path.resolve(trashDir || path.join(process.cwd(), '.terminal-trash'));
 
   const authenticate = (req: Request) => {
     const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');

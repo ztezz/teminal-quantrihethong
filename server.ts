@@ -13,7 +13,8 @@ const dev = process.env.NODE_ENV !== 'production';
 const backendOnly = process.argv.includes('--backend');
 const nextApp = backendOnly ? null : next({ dev });
 const handle = nextApp?.getRequestHandler();
-const FILE_MANAGER_ROOT = path.resolve(process.env.FILE_MANAGER_ROOT || path.parse(process.cwd()).root);
+const FILE_MANAGER_ROOT = path.resolve(process.env.FILE_MANAGER_ROOT || process.cwd());
+const FILE_MANAGER_TRASH_DIR = path.resolve(process.env.FILE_MANAGER_TRASH_DIR || path.join(process.cwd(), '.terminal-trash'));
 
 // Pure JavaScript File-Based Database to bypass binary sqlite3 GLIBC errors
 const DB_FILE = path.join(process.cwd(), 'terminal_database.json');
@@ -512,7 +513,8 @@ async function startServer() {
   expressApp.use('/api/files', createFileManagerRouter({
     hasSession,
     log: (event, ip) => db.run('INSERT INTO logs (event, ip) VALUES (?, ?)', event, ip),
-    rootDir: FILE_MANAGER_ROOT
+    rootDir: FILE_MANAGER_ROOT,
+    trashDir: FILE_MANAGER_TRASH_DIR
   }));
 
   // --- Socket.io Terminal Implementation ---
