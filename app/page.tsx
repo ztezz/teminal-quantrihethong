@@ -222,7 +222,7 @@ export default function Home() {
     file.name.toLowerCase().includes(fileSearchQuery.toLowerCase())
   );
 
-  const loadFiles = useCallback(async (dirPath?: string, authToken = token, historyMode: 'push' | 'replace' | 'none' = 'push') => {
+  const loadFiles = useCallback(async (dirPath?: string, authToken = token, historyMode: 'push' | 'replace' | 'none' = 'push', fallbackToRoot = false) => {
     const auth = authToken || token;
     if (!auth) return;
     setFileLoading(true);
@@ -233,7 +233,15 @@ export default function Home() {
       const res = await fetch(url, {
         headers: { 'Authorization': `Bearer ${auth}` }
       });
-      const data = await res.json();
+      let data = await res.json();
+      if (!data.success && data.code === 'ENOENT' && dirPath && fallbackToRoot) {
+        localStorage.removeItem(LAST_FILE_PATH_KEY);
+        const rootResponse = await fetch(`${API_URL}/api/files`, {
+          headers: { 'Authorization': `Bearer ${auth}` }
+        });
+        data = await rootResponse.json();
+        historyMode = 'replace';
+      }
       if (data.success) {
         setFilesList(data.files);
         setCurrentPath(data.currentPath);
@@ -743,7 +751,7 @@ export default function Home() {
           setToken(savedToken);
           setIsAuthenticated(true);
         loadSettings(savedToken);
-          loadFiles(getSavedFilePath(), savedToken);
+          loadFiles(getSavedFilePath(), savedToken, 'push', true);
         } else {
           localStorage.removeItem('vps_terminal_token');
           setIsAuthenticated(false);
@@ -781,7 +789,7 @@ export default function Home() {
         setIsAuthenticated(true);
         loadSettings(data.token);
         loadLogs(data.token);
-        loadFiles(getSavedFilePath(), data.token);
+        loadFiles(getSavedFilePath(), data.token, 'push', true);
       } else {
         setError(data.error || 'Authentication failed');
       }
