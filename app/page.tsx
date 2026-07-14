@@ -1,17 +1,16 @@
 'use client';
 
-// Backend API base URL
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'https://api-ssh.luugame.fun';
-
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { motion, AnimatePresence } from 'motion/react';
+import { publicApiUrl } from '@/lib/security-utils';
+
+const API_URL = publicApiUrl(process.env.NEXT_PUBLIC_API_URL);
 import { 
   Terminal as TerminalIcon, 
   Lock, 
   Settings, 
   History, 
-  LogOut, 
   Key, 
   RefreshCw, 
   Database, 
@@ -194,7 +193,7 @@ export default function Home() {
   const [previewTheme, setPreviewTheme] = useState<string | null>(null);
   const activePreviewTheme = previewTheme !== null ? previewTheme : theme;
 
-  // Save Status for Settings (SQLite Auto-save)
+  // Save status for persistent server settings.
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isSettingsLoadedRef = useRef<boolean>(false);
@@ -548,6 +547,7 @@ export default function Home() {
         } else {
           setViewingFile(filePath);
           setFileContent(data.content);
+          setEditorOriginal(data.content);
           setFileMtime(data.mtime);
           setIsEditingFile(false);
         }
@@ -577,6 +577,7 @@ export default function Home() {
       const data = await res.json();
       if (data.success) {
         setFileMtime(data.mtime);
+        setEditorOriginal(fileContent);
         setIsEditingFile(false);
       } else {
         setFileError(data.error || 'Lỗi khi lưu tệp tin');
@@ -853,7 +854,7 @@ export default function Home() {
         setDiskTotalGB(data.diskTotalGB);
         setDiskPercent(data.diskPercent);
       }
-    } catch (err) {
+    } catch {
       // Silently ignore metrics errors
     }
   }, [sessionReady]);
@@ -993,7 +994,7 @@ export default function Home() {
       } else {
         setError(data.error || 'Authentication failed');
       }
-    } catch (err) {
+    } catch {
       setError('Connection to server authentication API failed');
     } finally {
       setLoading(false);
@@ -1135,7 +1136,7 @@ export default function Home() {
       } else {
         setPwdError(data.error || 'Failed to change password');
       }
-    } catch (err) {
+    } catch {
       setPwdError('Server connection error during password update');
     } finally {
       setLoading(false);
@@ -1449,7 +1450,7 @@ export default function Home() {
               if (socket?.connected) {
                 socket.emit('resize', { cols: term.cols, rows: term.rows });
               }
-            } catch (e) {
+            } catch {
               // Ignore occasional race dimension fitting errors on fast toggling
             }
           }
@@ -1625,7 +1626,7 @@ export default function Home() {
                 <div className="hidden md:flex items-center gap-6">
                   <div className="text-right">
                     <p className="text-[9px] uppercase text-slate-500 leading-none mb-1">Cơ sở dữ liệu</p>
-                    <p className="text-xs font-mono text-blue-400 font-semibold uppercase">SQLite Đang Chạy</p>
+                    <p className="text-xs font-mono text-blue-400 font-semibold uppercase">SQLite Đang Hoạt Động</p>
                   </div>
                   <div className="h-8 w-[1px] bg-white/10"></div>
                   <div className="text-right">
@@ -2013,7 +2014,7 @@ export default function Home() {
                                     {saveStatus === 'saved' && (
                                       <span className="flex items-center gap-1.5 text-emerald-400">
                                         <Database className="w-3.5 h-3.5 animate-pulse" />
-                                        <span>Đã lưu vào SQLite</span>
+                                        <span>Đã lưu vào máy chủ</span>
                                       </span>
                                     )}
                                     {saveStatus === 'error' && (
@@ -2298,7 +2299,7 @@ export default function Home() {
                                 </div>
                                 <div className="flex-1 min-w-0">
                                   <h4 className="text-xs font-bold uppercase tracking-wider text-slate-200">Đã lưu tự động</h4>
-                                  <p className="text-[11px] text-slate-500 font-mono mt-0.5">Cấu hình giao diện đã đồng bộ thành công vào SQLite.</p>
+                                  <p className="text-[11px] text-slate-500 font-mono mt-0.5">Cấu hình giao diện đã đồng bộ thành công vào máy chủ.</p>
                                 </div>
                                 <button
                                   type="button"

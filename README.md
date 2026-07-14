@@ -54,7 +54,7 @@ Frontend là static export trong thư mục `out/`. Express, Socket.IO, terminal
 
 ## Yêu Cầu
 
-- Node.js 20.9 trở lên
+- Node.js 24 LTS trở lên, bắt buộc vì backend sử dụng `node:sqlite`
 - npm
 - Linux cho backend production
 - Công cụ build native cần thiết cho `node-pty` và `argon2`
@@ -105,6 +105,8 @@ Mở `http://localhost:3000`.
 | `BACKEND_PORT` | Backend | Port backend-only, mặc định `3001`. |
 | `FRONTEND_ORIGIN` | Backend | Origin frontend chính xác, ví dụ `https://terminal.example.com`; không có dấu `/` cuối. |
 | `TRUST_PROXY` | Backend | Proxy tin cậy của Express. Đặt `1` khi backend chỉ nằm sau đúng một reverse proxy; để trống nếu truy cập trực tiếp. |
+| `DATABASE_PATH` | Backend | Đường dẫn database SQLite, mặc định `terminal_database.sqlite` trong working directory. |
+| `LEGACY_DATABASE_PATH` | Backend | File JSON cũ để import một lần, mặc định `terminal_database.json` cạnh database SQLite. |
 | `FILE_MANAGER_ROOT` | Backend | Thư mục gốc hiển thị trong File Manager. Dùng `/` để quản lý toàn máy chủ. |
 | `FILE_MANAGER_TRASH_DIR` | Backend | Nơi lưu thùng rác, phải có quyền ghi. |
 | `FILE_MANAGER_SNAPSHOT_DIR` | Backend | Kho snapshot nội bộ, không đặt trong thư mục được web server phục vụ. |
@@ -444,6 +446,8 @@ Không để Wrangler tự migrate dự án sang OpenNext. Repository phải có
 
 ```bash
 npm run lint
+npm test
+npm run typecheck
 npm run build
 npm run build:backend
 npx wrangler deploy --dry-run
@@ -451,7 +455,9 @@ npx wrangler deploy --dry-run
 
 ## Lưu Ý
 
-- `terminal_database.json` chứa hash mật khẩu, session hash và nhật ký. Không phục vụ file này qua web server và nên giới hạn quyền đọc.
+- `terminal_database.sqlite` chứa tài khoản, session, cấu hình và nhật ký; file được tạo lúc chạy, không được commit và có quyền `0600` trên Linux.
+- Khi nâng cấp từ bản JSON, backend import `terminal_database.json` trong một transaction rồi đổi tên file cũ thành `terminal_database.json.migrated-*.bak`. Chỉ xóa backup sau khi đã kiểm tra dữ liệu SQLite.
+- SQLite chạy ở WAL mode. Khi sao lưu thủ công, dừng service trước khi sao chép hoặc dùng công cụ backup SQLite; không chỉ sao chép file `.sqlite` trong lúc service đang ghi vì dữ liệu mới có thể còn trong file `-wal`.
 - `TERMINAL_PASSWORD` chỉ dùng lúc khởi tạo database; đổi biến này không đổi mật khẩu hiện tại.
 - Upload hiện giới hạn 25 MB trong backend. Nginx phải có `client_max_body_size` không thấp hơn giới hạn này.
 - Editor văn bản giới hạn 2 MB; media và tài liệu dùng endpoint streaming riêng.

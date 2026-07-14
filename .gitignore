@@ -8,6 +8,10 @@ coverage/
 .env*
 !.env.example
 terminal_database.json
+terminal_database.json.migrated-*.bak
+terminal_database.sqlite
+terminal_database.sqlite-shm
+terminal_database.sqlite-wal
 .terminal-trash/
 .terminal-snapshots/
 tsconfig.tsbuildinfo

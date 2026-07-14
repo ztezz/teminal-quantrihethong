@@ -8,6 +8,7 @@ import { Transform } from 'stream';
 import { pipeline } from 'stream/promises';
 import * as archiver from 'archiver';
 import unzipper from 'unzipper';
+import { ARCHIVE_LIMITS, validateArchivePlan } from './security-utils';
 
 const fsp = fs.promises;
 const MAX_EDITOR_SIZE = 2 * 1024 * 1024;
@@ -15,10 +16,6 @@ const MAX_UPLOAD_SIZE = 25 * 1024 * 1024;
 const MAX_BULK_ITEMS = 100;
 const MAX_SEARCH_RESULTS = 500;
 const MAX_SEARCH_ENTRIES = 20_000;
-const MAX_ARCHIVE_ENTRIES = 1_000;
-const MAX_ARCHIVE_FILE_SIZE = 100 * 1024 * 1024;
-const MAX_ARCHIVE_TOTAL_SIZE = 512 * 1024 * 1024;
-const MAX_COMPRESSION_RATIO = 100;
 const PREVIEW_TYPES: Record<string, string> = {
   '.aac': 'audio/aac',
   '.avif': 'image/avif',
@@ -520,22 +517,14 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
     try {
       const source = resolveInsideRoot(req.body.path ?? req.body.archivePath); const destination = resolveInsideRoot(req.body.destinationDir); await mustBeDirectory(destination);
       if (path.extname(source).toLowerCase() !== '.zip') throw httpError(400, 'Chỉ hỗ trợ giải nén ZIP');
-      const directory = await unzipper.Open.file(source); const planned = directory.files.map(entry => {
-        const normalized = entry.path.replace(/\\/g, '/');
-        if (!normalized || normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized) || normalized.split('/').includes('..')) throw httpError(400, `ZIP chứa đường dẫn không an toàn: ${entry.path}`);
+      const directory = await unzipper.Open.file(source);
+      const normalizedPaths = validateArchivePlan(directory.files);
+      const planned = directory.files.map((entry, index) => {
+        const normalized = normalizedPaths[index];
         const target = path.resolve(destination, normalized); if (target !== destination && !target.startsWith(destination + path.sep)) throw httpError(400, `ZIP chứa đường dẫn không an toàn: ${entry.path}`);
         assertCanonicalInsideRoot(target);
         return { entry, target };
       });
-      if (planned.length > MAX_ARCHIVE_ENTRIES) throw httpError(413, `ZIP vượt quá ${MAX_ARCHIVE_ENTRIES} mục`);
-      let declaredTotal = 0;
-      for (const { entry } of planned) {
-        if (!Number.isSafeInteger(entry.uncompressedSize) || entry.uncompressedSize < 0 || !Number.isSafeInteger(entry.compressedSize) || entry.compressedSize < 0) throw httpError(400, 'ZIP có metadata dung lượng không hợp lệ');
-        if (entry.uncompressedSize > MAX_ARCHIVE_FILE_SIZE) throw httpError(413, `Tệp trong ZIP vượt quá ${MAX_ARCHIVE_FILE_SIZE / 1024 / 1024}MB: ${entry.path}`);
-        declaredTotal += entry.uncompressedSize;
-        if (declaredTotal > MAX_ARCHIVE_TOTAL_SIZE) throw httpError(413, `ZIP vượt quá ${MAX_ARCHIVE_TOTAL_SIZE / 1024 / 1024}MB sau giải nén`);
-        if (entry.compressedSize === 0 ? entry.uncompressedSize > 0 : entry.uncompressedSize / entry.compressedSize > MAX_COMPRESSION_RATIO) throw httpError(413, `Tỷ lệ nén không an toàn: ${entry.path}`);
-      }
       const ensureDirectory = async (directoryPath: string) => {
         const missing: string[] = [];
         let current = directoryPath;
@@ -551,7 +540,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
           let fileSize = 0;
           const quota = new Transform({ transform(chunk, _encoding, callback) {
             fileSize += chunk.length; actualTotal += chunk.length;
-            if (fileSize > MAX_ARCHIVE_FILE_SIZE || actualTotal > MAX_ARCHIVE_TOTAL_SIZE) return callback(httpError(413, 'ZIP vượt quá giới hạn dung lượng khi giải nén'));
+            if (fileSize > ARCHIVE_LIMITS.maxFileSize || actualTotal > ARCHIVE_LIMITS.maxTotalSize) return callback(httpError(413, 'ZIP vượt quá giới hạn dung lượng khi giải nén'));
             callback(null, chunk);
           } });
           await pipeline(entry.stream(), quota, fs.createWriteStream(target, { flags: 'wx' }));

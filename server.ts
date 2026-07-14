@@ -9,6 +9,8 @@ import QRCode from 'qrcode';
 import dotenv from 'dotenv';
 import * as pty from 'node-pty';
 import { createFileManagerRouter } from './lib/file-manager-router';
+import { escapeCsvCell } from './lib/security-utils';
+import { SqliteDatabase, type AuditEntry, type AuditLevel, type AuditResult, type Role, type StoredSession, type StoredUser } from './lib/sqlite-database';
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
@@ -31,240 +33,9 @@ const STEP_UP_TTL_MS = 5 * 60 * 1000;
 const COMPROMISED_PASSWORD_SALT = 'ed74ba34ba1f20c6b1412f49bc818008';
 const COMPROMISED_PASSWORD_HASH = 'b2a92f363ad27b41f5a5080674cd20c400940abbe6cfe2ab17eb6175375f735f';
 const execFileAsync = promisify(execFile);
-type Role = 'viewer' | 'operator' | 'admin' | 'root';
-type StoredUser = { id: string; username: string; passwordHash: string; legacySalt?: string; role: Role; enabled: boolean; createdAt: number; totpSecret?: string; recoveryCodes?: string[]; pendingTotpSecret?: string };
-type StoredSession = { tokenHash: string; userId: string; createdAt: number; expiresAt: number; ip: string; userAgent: string };
-type AuditLevel = 'info' | 'warning' | 'critical';
-type AuditResult = 'success' | 'failure';
-type AuditEntry = { id: number; category: string; action: string; event: string; level: AuditLevel; result: AuditResult; ip: string; sessionId?: string; metadata?: Record<string, unknown>; timestamp: string; previousHash: string; hash: string };
-
-// Pure JavaScript File-Based Database to bypass binary sqlite3 GLIBC errors
-const DB_FILE = path.join(process.cwd(), 'terminal_database.json');
-
-class JsonDatabase {
-  private data: {
-    settings: Record<string, string>;
-    terminal_settings: Record<string, string>;
-    logs: AuditEntry[];
-    sessions: StoredSession[];
-    users: StoredUser[];
-  };
-
-  constructor() {
-    this.data = {
-      settings: {},
-      terminal_settings: {},
-      logs: [],
-      sessions: [],
-      users: []
-    };
-    this.load();
-  }
-
-  private load() {
-    if (fs.existsSync(DB_FILE)) {
-      try {
-        const fileContent = fs.readFileSync(DB_FILE, 'utf8');
-        this.data = JSON.parse(fileContent);
-        if (!this.data.settings || typeof this.data.settings !== 'object') this.data.settings = {};
-        if (!this.data.terminal_settings || typeof this.data.terminal_settings !== 'object') this.data.terminal_settings = {};
-        if (!Array.isArray(this.data.sessions) || this.data.sessions.some(session => typeof session === 'string')) this.data.sessions = [];
-        else this.data.sessions = this.data.sessions.map(session => ({ ...session, userId: session.userId || 'root', createdAt: session.createdAt || Date.now(), ip: session.ip || 'unknown', userAgent: session.userAgent || 'unknown' }));
-        if (!Array.isArray(this.data.users)) this.data.users = [];
-        if (!Array.isArray(this.data.logs)) this.data.logs = [];
-        this.data.logs = this.data.logs.map((entry: any, index) => this.normalizeAuditEntry(entry, index));
-      } catch (err) {
-        throw new Error(`Cannot load database ${DB_FILE}; refusing to start with empty data`, { cause: err });
-      }
-    } else {
-      this.save();
-    }
-  }
-
-  private save() {
-    const tempFile = `${DB_FILE}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-    try {
-      fs.writeFileSync(tempFile, JSON.stringify(this.data, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-      fs.renameSync(tempFile, DB_FILE);
-      if (process.platform !== 'win32') fs.chmodSync(DB_FILE, 0o600);
-    } catch (err) {
-      try { fs.rmSync(tempFile, { force: true }); } catch { /* Preserve the original persistence error. */ }
-      throw new Error(`Cannot save database ${DB_FILE}`, { cause: err });
-    }
-  }
-
-  private normalizeAuditEntry(entry: any, index: number): AuditEntry {
-    return {
-      id: Number(entry.id) || index + 1,
-      category: entry.category || 'legacy', action: entry.action || 'event', event: String(entry.event || 'Unknown event'),
-      level: entry.level || 'info', result: entry.result || 'success', ip: String(entry.ip || 'unknown'),
-      sessionId: entry.sessionId, metadata: entry.metadata, timestamp: entry.timestamp || new Date().toISOString(),
-      previousHash: entry.previousHash || '', hash: entry.hash || ''
-    };
-  }
-
-  addAudit(entry: Omit<AuditEntry, 'id' | 'timestamp' | 'previousHash' | 'hash'>) {
-    this.load();
-    const previousHash = this.data.logs.at(-1)?.hash || '';
-    const base = { id: (this.data.logs.at(-1)?.id || 0) + 1, ...entry, timestamp: new Date().toISOString(), previousHash };
-    const hash = crypto.createHash('sha256').update(JSON.stringify(base)).digest('hex');
-    this.data.logs.push({ ...base, hash });
-    this.save();
-  }
-
-  queryAudit(filters: { query?: string; category?: string; level?: string; result?: string; offset: number; limit: number }) {
-    this.load();
-    const query = filters.query?.toLocaleLowerCase();
-    const items = [...this.data.logs].reverse().filter(entry =>
-      (!query || `${entry.event} ${entry.action} ${entry.ip} ${JSON.stringify(entry.metadata || {})}`.toLocaleLowerCase().includes(query)) &&
-      (!filters.category || entry.category === filters.category) && (!filters.level || entry.level === filters.level) && (!filters.result || entry.result === filters.result)
-    );
-    return { total: items.length, items: items.slice(filters.offset, filters.offset + filters.limit) };
-  }
-
-  verifyAuditIntegrity() {
-    let checked = 0;
-    let previousHash = '';
-    for (const entry of this.data.logs) {
-      if (!entry.hash) continue;
-      const { hash, ...base } = entry;
-      if (entry.previousHash !== previousHash || crypto.createHash('sha256').update(JSON.stringify(base)).digest('hex') !== hash) return { valid: false, checked, brokenAt: entry.id };
-      previousHash = hash;
-      checked++;
-    }
-    return { valid: true, checked };
-  }
-
-  async exec(sql: string) {
-    // No-op for CREATE TABLE as structure is handled in memory
-    return this;
-  }
-
-  async get(sql: string, ...params: any[]) {
-    this.load();
-    const normalized = sql.toLowerCase().trim();
-    
-    if (normalized.includes('select value from settings where key =')) {
-      const key = params[0];
-      const val = this.data.settings[key];
-      return val !== undefined ? { value: val } : undefined;
-    }
-    
-    if (normalized.includes('select value from terminal_settings where key =')) {
-      const key = params[0];
-      const val = this.data.terminal_settings[key];
-      return val !== undefined ? { value: val } : undefined;
-    }
-    
-    return undefined;
-  }
-
-  async run(sql: string, ...params: any[]) {
-    this.load();
-    const normalized = sql.toLowerCase().trim();
-
-    if (normalized.includes('insert into settings') || normalized.includes('insert or replace into settings') || normalized.includes('update settings set value')) {
-      if (normalized.includes('insert into settings') || normalized.includes('insert or replace into settings')) {
-        const key = params[0];
-        const val = params[1];
-        this.data.settings[key] = val;
-      } else {
-        const val = params[0];
-        const key = params[1];
-        this.data.settings[key] = val;
-      }
-      this.save();
-      return { lastID: 1, changes: 1 };
-    }
-
-    if (normalized.includes('insert or replace into terminal_settings') || normalized.includes('insert into terminal_settings')) {
-      const key = params[0];
-      const val = params[1];
-      this.data.terminal_settings[key] = val;
-      this.save();
-      return { lastID: 1, changes: 1 };
-    }
-
-    if (normalized.includes('insert into logs')) {
-      const event = params[0];
-      const ip = params[1];
-      this.addAudit({ category: 'legacy', action: 'event', event, level: 'info', result: 'success', ip });
-      return { lastID: this.data.logs.at(-1)?.id || 0, changes: 1 };
-    }
-
-    return { lastID: 0, changes: 0 };
-  }
-
-  async all(sql: string, ...params: any[]) {
-    this.load();
-    const normalized = sql.toLowerCase().trim();
-
-    if (normalized.includes('select event, ip, timestamp from logs')) {
-      return this.queryAudit({ offset: 0, limit: 50 }).items;
-    }
-
-    return [];
-  }
-
-  addSession(token: string, userId: string, ip = 'unknown', userAgent = 'unknown') {
-    if (!this.data.sessions) this.data.sessions = [];
-    this.data.sessions = this.data.sessions.filter(session => session.expiresAt > Date.now());
-    this.data.sessions.push({ tokenHash: crypto.createHash('sha256').update(token).digest('hex'), userId, createdAt: Date.now(), expiresAt: Date.now() + SESSION_TTL_MS, ip, userAgent: userAgent.slice(0, 300) });
-    this.save();
-  }
-
-  removeSession(token: string) {
-    if (!this.data.sessions) return;
-    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-    this.data.sessions = this.data.sessions.filter(session => session.tokenHash !== tokenHash);
-    this.save();
-  }
-
-  hasSession(token: string): boolean {
-    if (!this.data.sessions) return false;
-    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-    const session = this.data.sessions.find(session => session.tokenHash === tokenHash && session.expiresAt > Date.now());
-    return Boolean(session && this.data.users.find(user => user.id === session.userId && user.enabled));
-  }
-
-  clearSessions() {
-    this.data.sessions = [];
-    this.save();
-  }
-
-  deleteSetting(key: string) {
-    delete this.data.settings[key];
-    this.save();
-  }
-
-  removeSessionById(id: string) {
-    this.data.sessions = (this.data.sessions || []).filter(session => !session.tokenHash.startsWith(id));
-    this.save();
-  }
-
-  getSessions(): StoredSession[] {
-    return (this.data.sessions || []).filter(session => session.expiresAt > Date.now());
-  }
-
-  getSession(token: string): StoredSession | undefined {
-    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-    return this.getSessions().find(session => session.tokenHash === tokenHash);
-  }
-
-  getUsers(): StoredUser[] { return this.data.users || []; }
-  getUserById(id: string): StoredUser | undefined { return this.data.users.find(user => user.id === id); }
-  getUserByName(username: string): StoredUser | undefined { return this.data.users.find(user => user.username.toLowerCase() === username.toLowerCase()); }
-  saveUser(user: StoredUser) { const index = this.data.users.findIndex(item => item.id === user.id); if (index >= 0) this.data.users[index] = user; else this.data.users.push(user); this.save(); }
-  deleteUser(id: string) { this.data.users = this.data.users.filter(user => user.id !== id); this.data.sessions = this.data.sessions.filter(session => session.userId !== id); this.save(); }
-  clearUserSessions(userId: string) { this.data.sessions = this.data.sessions.filter(session => session.userId !== userId); this.save(); }
-}
-
-// Mimic sqlite pack API
-async function open(config: any) {
-  return new JsonDatabase();
-}
-
-let db: any = null;
+const DB_FILE = path.resolve(process.env.DATABASE_PATH || path.join(process.cwd(), 'terminal_database.sqlite'));
+const LEGACY_DB_FILE = path.resolve(process.env.LEGACY_DATABASE_PATH || path.join(path.dirname(DB_FILE), 'terminal_database.json'));
+let db: SqliteDatabase;
 
 // Helper: check session via persistent database
 function hasSession(token: string): boolean {
@@ -473,33 +244,7 @@ function hashPassword(password: string, salt: string): string {
 }
 
 async function initializeDatabase() {
-  db = await open({
-    filename: DB_FILE
-  });
-
-  // Create tables if they don't exist
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS settings (
-      key TEXT PRIMARY KEY,
-      value TEXT
-    )
-  `);
-
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      event TEXT,
-      ip TEXT,
-      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS terminal_settings (
-      key TEXT PRIMARY KEY,
-      value TEXT
-    )
-  `);
+  db = new SqliteDatabase(DB_FILE, LEGACY_DB_FILE, SESSION_TTL_MS);
 
   // New installations must receive an explicit password; there is no shared fallback credential.
   const dbPasswordHash = await db.get('SELECT value FROM settings WHERE key = ?', 'password_hash');
@@ -537,6 +282,7 @@ async function initializeDatabase() {
     const passwordRow = await db.get('SELECT value FROM settings WHERE key = ?', 'password_hash');
     const legacySalt = await db.get('SELECT value FROM settings WHERE key = ?', 'password_salt');
     const passwordHash = passwordRow?.value;
+    if (!passwordHash) throw new Error('Cannot create root user without a password hash');
     const totpRow = await db.get('SELECT value FROM settings WHERE key = ?', 'totp_secret');
     const recoveryRow = await db.get('SELECT value FROM settings WHERE key = ?', 'recovery_codes');
     db.saveUser({ id: 'root', username: 'root', passwordHash, legacySalt: passwordHash?.startsWith('$argon2') ? undefined : legacySalt?.value, role: 'root', enabled: true, createdAt: Date.now(), totpSecret: totpRow?.value, recoveryCodes: recoveryRow ? JSON.parse(recoveryRow.value) : undefined });
@@ -678,12 +424,7 @@ async function startServer() {
     if (!requireRole(req, res, 'admin')) return;
     const items = db.queryAudit({ query: typeof req.query.q === 'string' ? req.query.q : undefined, category: typeof req.query.category === 'string' ? req.query.category : undefined, level: typeof req.query.level === 'string' ? req.query.level : undefined, result: typeof req.query.result === 'string' ? req.query.result : undefined, offset: 0, limit: 20_000 }).items;
     if (req.query.format === 'csv') {
-      const escape = (value: unknown) => {
-        const text = String(value ?? '');
-        const safe = /^[\t\r\n ]*[=+\-@]/.test(text) ? `'${text}` : text;
-        return `"${safe.replace(/"/g, '""')}"`;
-      };
-      const csv = ['timestamp,category,action,level,result,ip,sessionId,event,metadata', ...items.map((entry: AuditEntry) => [entry.timestamp, entry.category, entry.action, entry.level, entry.result, entry.ip, entry.sessionId, entry.event, JSON.stringify(entry.metadata || {})].map(escape).join(','))].join('\n');
+      const csv = ['timestamp,category,action,level,result,ip,sessionId,event,metadata', ...items.map((entry: AuditEntry) => [entry.timestamp, entry.category, entry.action, entry.level, entry.result, entry.ip, entry.sessionId, entry.event, JSON.stringify(entry.metadata || {})].map(escapeCsvCell).join(','))].join('\n');
       res.setHeader('Content-Type', 'text/csv; charset=utf-8'); res.setHeader('Content-Disposition', 'attachment; filename="audit-log.csv"'); return res.send('\uFEFF' + csv);
     }
     res.setHeader('Content-Type', 'application/json'); res.setHeader('Content-Disposition', 'attachment; filename="audit-log.json"'); return res.send(JSON.stringify(items, null, 2));

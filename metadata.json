@@ -1,6 +1,6 @@
 {
   "name": "Web Terminal",
-  "description": "A highly secure, beautiful self-hosted web console and interactive bash terminal for VPS management, persistent SQLite tracking, and dynamic configuration.",
+  "description": "A secure self-hosted web console and interactive bash terminal for VPS management with persistent SQLite audit tracking and dynamic configuration.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
