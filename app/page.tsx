@@ -5,7 +5,7 @@ import { io, Socket } from 'socket.io-client';
 import { motion, AnimatePresence } from 'motion/react';
 import { publicApiUrl } from '@/lib/security-utils';
 
-const API_URL = publicApiUrl(process.env.NEXT_PUBLIC_API_URL);
+const API_URL = publicApiUrl(process.env.NEXT_PUBLIC_API_URL || 'https://api-ssh.luugame.fun');
 import { 
   Terminal as TerminalIcon, 
   Lock, 

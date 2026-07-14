@@ -79,10 +79,10 @@ npm install
 Tạo `.env`:
 
 ```env
-NEXT_PUBLIC_API_URL=
+NEXT_PUBLIC_API_URL=https://api-ssh.luugame.fun
 TERMINAL_PASSWORD=thay-bang-mat-khau-rat-manh
 BACKEND_PORT=3001
-FRONTEND_ORIGIN=http://localhost:3000
+FRONTEND_ORIGIN=https://ssh.luugame.fun
 FILE_MANAGER_ROOT=.
 FILE_MANAGER_TRASH_DIR=.terminal-trash
 LIBREOFFICE_PATH=libreoffice
@@ -100,7 +100,7 @@ Mở `http://localhost:3000`.
 
 | Biến | Phạm vi | Mô tả |
 | --- | --- | --- |
-| `NEXT_PUBLIC_API_URL` | Frontend | URL HTTPS của backend. Để trống khi chạy full-stack cùng origin. |
+| `NEXT_PUBLIC_API_URL` | Frontend | URL HTTPS của backend, production hiện dùng `https://api-ssh.luugame.fun`. Giá trị được đóng vào static bundle lúc `next build`. |
 | `TERMINAL_PASSWORD` | Backend | Mật khẩu khởi tạo khi database chưa có password. Không thay đổi password đã lưu. |
 | `BACKEND_PORT` | Backend | Port backend-only, mặc định `3001`. |
 | `FRONTEND_ORIGIN` | Backend | Origin frontend chính xác, ví dụ `https://terminal.example.com`; không có dấu `/` cuối. |
