@@ -9,7 +9,7 @@ import QRCode from 'qrcode';
 import dotenv from 'dotenv';
 import * as pty from 'node-pty';
 import { createFileManagerRouter } from './lib/file-manager-router';
-import { escapeCsvCell } from './lib/security-utils';
+import { escapeCsvCell, validateRuntimeConfig } from './lib/security-utils';
 import { SqliteDatabase, type AuditEntry, type AuditLevel, type AuditResult, type Role, type StoredSession, type StoredUser } from './lib/sqlite-database';
 import os from 'os';
 import path from 'path';
@@ -302,6 +302,7 @@ async function initializeDatabase() {
 async function startServer() {
   await nextApp?.prepare();
   const expressApp = express();
+  const runtimeConfig = validateRuntimeConfig({ frontendOrigin: process.env.FRONTEND_ORIGIN, encryptionKey: process.env.AUTH_ENCRYPTION_KEY, terminalPassword: process.env.TERMINAL_PASSWORD, production: !dev, backendOnly });
   const trustProxy = process.env.TRUST_PROXY?.trim();
   if (trustProxy) expressApp.set('trust proxy', /^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy);
   const httpServer = createServer(expressApp);
@@ -311,18 +312,27 @@ async function startServer() {
   // Set up socket.io server
   const io = new Server(httpServer, {
     cors: {
-      origin: process.env.FRONTEND_ORIGIN || false,
+      origin: runtimeConfig.frontendOrigin || false,
       credentials: true,
       methods: ['GET', 'POST', 'PATCH', 'DELETE']
     }
   });
 
   expressApp.use(express.json({ limit: '2mb' }));
+  expressApp.disable('x-powered-by');
+  expressApp.use((_req, res, nextMiddleware) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-site');
+    nextMiddleware();
+  });
 
   if (backendOnly) {
-    const allowedOrigin = process.env.FRONTEND_ORIGIN;
-    if (!allowedOrigin) throw new Error('FRONTEND_ORIGIN is required in backend-only mode');
+    const allowedOrigin = runtimeConfig.frontendOrigin!;
     expressApp.use((req, res, nextMiddleware) => {
+      res.setHeader('Vary', 'Origin');
       res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
@@ -333,6 +343,9 @@ async function startServer() {
     });
   }
 
+  expressApp.use('/api', (_req, res, nextMiddleware) => { res.setHeader('Cache-Control', 'no-store'); nextMiddleware(); });
+  expressApp.get('/healthz', (_req, res) => res.json({ status: 'ok' }));
+
   // Wait for database initialization
   try {
     await initializeDatabase();
@@ -340,6 +353,8 @@ async function startServer() {
     console.error('[DB ERROR] Failed to initialize database:', err);
     throw err;
   }
+
+  expressApp.get('/readyz', (_req, res) => db?.ping() ? res.json({ status: 'ready' }) : res.status(503).json({ status: 'unavailable' }));
 
   // --- API Routes ---
 

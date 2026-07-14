@@ -19,6 +19,7 @@ test('SQLite persists users, settings, sessions, and audit records', async () =>
   const filename = path.join(directory, 'database.sqlite');
   try {
     let database = new SqliteDatabase(filename, undefined, 60_000);
+    assert.equal(database.ping(), true);
     database.saveUser(rootUser);
     await database.run('INSERT INTO settings (key, value) VALUES (?, ?)', 'key', 'value');
     database.addSession('raw-token', rootUser.id, '127.0.0.1', 'test-agent');

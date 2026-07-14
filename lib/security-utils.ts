@@ -37,3 +37,22 @@ export function publicApiUrl(value: string | undefined): string {
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('NEXT_PUBLIC_API_URL không hợp lệ');
   return url.toString().replace(/\/$/, '');
 }
+
+export type RuntimeConfig = { frontendOrigin?: string; encryptionKey?: string; terminalPassword?: string; production: boolean; backendOnly: boolean };
+
+export function validateRuntimeConfig(config: RuntimeConfig): { frontendOrigin?: string } {
+  let frontendOrigin: string | undefined;
+  if (config.frontendOrigin?.trim()) {
+    let url: URL;
+    try { url = new URL(config.frontendOrigin.trim()); }
+    catch { throw new Error('FRONTEND_ORIGIN phải là HTTP(S) origin hợp lệ'); }
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('FRONTEND_ORIGIN chỉ được chứa scheme, host và port');
+    if (config.production && url.protocol !== 'https:') throw new Error('FRONTEND_ORIGIN phải dùng HTTPS trong production');
+    frontendOrigin = url.origin;
+  } else if (config.backendOnly) {
+    throw new Error('FRONTEND_ORIGIN is required in backend-only mode');
+  }
+  if (config.production && (!config.encryptionKey || config.encryptionKey.length < 32)) throw new Error('AUTH_ENCRYPTION_KEY must contain at least 32 characters in production');
+  if (config.terminalPassword && (config.terminalPassword.length < 12 || config.terminalPassword.toLowerCase() === 'admin')) throw new Error('TERMINAL_PASSWORD must be at least 12 characters and cannot be admin');
+  return { frontendOrigin };
+}

@@ -43,6 +43,7 @@ export class SqliteDatabase {
   }
 
   close() { this.database.close(); }
+  ping() { return Number((this.database.prepare('SELECT 1 AS ok').get() as { ok: number }).ok) === 1; }
 
   private createSchema() {
     this.database.exec(`

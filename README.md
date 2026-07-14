@@ -453,6 +453,11 @@ npm run build:backend
 npx wrangler deploy --dry-run
 ```
 
+Backend cung cấp hai endpoint không yêu cầu đăng nhập cho hệ thống giám sát:
+
+- `GET /healthz`: tiến trình Express đang phản hồi.
+- `GET /readyz`: SQLite đã khởi tạo và thực hiện được truy vấn.
+
 ## Lưu Ý
 
 - `terminal_database.sqlite` chứa tài khoản, session, cấu hình và nhật ký; file được tạo lúc chạy, không được commit và có quyền `0600` trên Linux.

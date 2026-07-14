@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ARCHIVE_LIMITS, escapeCsvCell, publicApiUrl, validateArchivePlan } from './security-utils';
+import { ARCHIVE_LIMITS, escapeCsvCell, publicApiUrl, validateArchivePlan, validateRuntimeConfig } from './security-utils';
 
 test('publicApiUrl defaults to same-origin and normalizes an absolute URL', () => {
   assert.equal(publicApiUrl(undefined), '');
@@ -43,4 +43,15 @@ test('validateArchivePlan enforces entry and total-size limits', () => {
     { path: 'e.bin', compressedSize: ARCHIVE_LIMITS.maxFileSize, uncompressedSize: ARCHIVE_LIMITS.maxFileSize },
     { path: 'f.bin', compressedSize: ARCHIVE_LIMITS.maxFileSize, uncompressedSize: ARCHIVE_LIMITS.maxFileSize }
   ]), /sau giải nén/);
+});
+
+test('validateRuntimeConfig normalizes a secure production origin', () => {
+  assert.deepEqual(validateRuntimeConfig({ frontendOrigin: 'https://ssh.luugame.fun/', encryptionKey: 'x'.repeat(32), terminalPassword: 'strong-password-value', production: true, backendOnly: true }), { frontendOrigin: 'https://ssh.luugame.fun' });
+});
+
+test('validateRuntimeConfig rejects unsafe production configuration', () => {
+  assert.throws(() => validateRuntimeConfig({ frontendOrigin: 'http://ssh.luugame.fun', encryptionKey: 'x'.repeat(32), production: true, backendOnly: true }), /HTTPS/);
+  assert.throws(() => validateRuntimeConfig({ frontendOrigin: 'https://ssh.luugame.fun/path', encryptionKey: 'x'.repeat(32), production: true, backendOnly: true }), /scheme, host và port/);
+  assert.throws(() => validateRuntimeConfig({ frontendOrigin: 'https://ssh.luugame.fun', encryptionKey: 'short', production: true, backendOnly: true }), /AUTH_ENCRYPTION_KEY/);
+  assert.throws(() => validateRuntimeConfig({ frontendOrigin: 'https://ssh.luugame.fun', encryptionKey: 'x'.repeat(32), terminalPassword: 'admin', production: true, backendOnly: true }), /TERMINAL_PASSWORD/);
 });
