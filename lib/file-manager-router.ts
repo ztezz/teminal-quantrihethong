@@ -4,6 +4,8 @@ import path from 'path';
 import crypto from 'crypto';
 import os from 'os';
 import { execFile } from 'child_process';
+import { Transform } from 'stream';
+import { pipeline } from 'stream/promises';
 import * as archiver from 'archiver';
 import unzipper from 'unzipper';
 
@@ -13,6 +15,10 @@ const MAX_UPLOAD_SIZE = 25 * 1024 * 1024;
 const MAX_BULK_ITEMS = 100;
 const MAX_SEARCH_RESULTS = 500;
 const MAX_SEARCH_ENTRIES = 20_000;
+const MAX_ARCHIVE_ENTRIES = 1_000;
+const MAX_ARCHIVE_FILE_SIZE = 100 * 1024 * 1024;
+const MAX_ARCHIVE_TOTAL_SIZE = 512 * 1024 * 1024;
+const MAX_COMPRESSION_RATIO = 100;
 const PREVIEW_TYPES: Record<string, string> = {
   '.aac': 'audio/aac',
   '.avif': 'image/avif',
@@ -55,7 +61,7 @@ type TrashMetadata = { originalPath: string; deletedAt: string };
 type SnapshotMetadata = { id: string; originalPath: string; createdAt: string; reason: string; size: number; mode: number; mtime: string; checksum: string };
 
 function clientIp(req: Request) {
-  return (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() || req.socket.remoteAddress || '127.0.0.1';
+  return req.ip || req.socket.remoteAddress || '127.0.0.1';
 }
 
 function validName(name: unknown): name is string {
@@ -79,8 +85,12 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
   const root = path.resolve(rootDir || process.cwd());
   const trashRoot = path.resolve(trashDir || path.join(process.cwd(), '.terminal-trash'));
   const snapshotRoot = path.resolve(snapshotDir || path.join(process.cwd(), '.terminal-snapshots'));
+  const canonicalRoot = fs.realpathSync(root);
   const maxSnapshotFileSize = Number(process.env.SNAPSHOT_MAX_FILE_MB || 100) * 1024 * 1024;
   const maxSnapshotTotalSize = Number(process.env.SNAPSHOT_MAX_TOTAL_MB || 2048) * 1024 * 1024;
+  const configuredOfficeConcurrency = Number(process.env.OFFICE_MAX_CONCURRENCY || 1);
+  const maxOfficeConversions = Number.isSafeInteger(configuredOfficeConcurrency) && configuredOfficeConcurrency > 0 ? configuredOfficeConcurrency : 1;
+  let activeOfficeConversions = 0;
 
   const cookieToken = (req: Request) => {
     const encodedToken = String(req.headers.cookie || '').split(';').map(cookie => cookie.trim().split('=')).find(([name]) => name === 'terminal_session')?.slice(1).join('=') || '';
@@ -102,12 +112,24 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
     const values = [req.query.path, req.body?.path, req.body?.filePath, req.body?.dirPath, req.body?.sourcePath, req.body?.destinationDir, req.body?.destinationPath, req.body?.archivePath, req.body?.targetPath, req.body?.paths, req.body?.ids, req.headers['x-directory']];
     return values.flatMap(value => Array.isArray(value) ? value : [value]).some(sensitivePath);
   };
+  const assertCanonicalInsideRoot = (target: string) => {
+    let existingPath = target;
+    while (!fs.existsSync(existingPath)) {
+      const parent = path.dirname(existingPath);
+      if (parent === existingPath) throw httpError(403, 'Không thể xác minh đường dẫn');
+      existingPath = parent;
+    }
+    const canonicalExistingPath = fs.realpathSync(existingPath);
+    const canonicalRelative = path.relative(canonicalRoot, canonicalExistingPath);
+    if (canonicalRelative.startsWith('..' + path.sep) || canonicalRelative === '..' || path.isAbsolute(canonicalRelative)) throw httpError(403, 'Symbolic link trỏ ra ngoài thư mục quản lý');
+  };
   const resolveInsideRoot = (userPath: unknown, allowTrash = false) => {
     if (typeof userPath !== 'string' && userPath !== undefined) throw httpError(400, 'Đường dẫn không hợp lệ');
     const normalized = typeof userPath === 'string' ? userPath.replace(/^[/\\]+/, '') : '';
     const target = path.resolve(root, normalized);
     const relativeTarget = path.relative(root, target);
     if (relativeTarget.startsWith('..' + path.sep) || relativeTarget === '..' || path.isAbsolute(relativeTarget)) throw httpError(403, 'Đường dẫn nằm ngoài thư mục quản lý');
+    assertCanonicalInsideRoot(target);
     const relativeTrash = path.relative(trashRoot, target);
     if (!allowTrash && (relativeTrash === '' || (!relativeTrash.startsWith('..' + path.sep) && relativeTrash !== '..' && !path.isAbsolute(relativeTrash)))) throw httpError(403, 'Không thể truy cập trực tiếp thùng rác');
     const relativeSnapshots = path.relative(snapshotRoot, target);
@@ -298,9 +320,12 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
 
   router.get('/office-preview', async (req, res) => {
     let tempDir: string | undefined;
+    let conversionStarted = false;
     try {
       const target = resolveInsideRoot(req.query.path); const stat = await fsp.stat(target);
       if (!stat.isFile() || !OFFICE_EXTENSIONS.has(path.extname(target).toLowerCase())) throw httpError(415, 'Định dạng Office không được hỗ trợ');
+      if (activeOfficeConversions >= maxOfficeConversions) throw httpError(429, 'Máy chủ đang xử lý tài liệu khác. Vui lòng thử lại sau.');
+      activeOfficeConversions++; conversionStarted = true;
       tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'terminal-office-'));
       await new Promise<void>((resolve, reject) => {
         execFile(process.env.LIBREOFFICE_PATH || 'libreoffice', ['--headless', '--convert-to', 'pdf', '--outdir', tempDir!, target], { timeout: 120_000, maxBuffer: 1024 * 1024 }, (error) => error ? reject(error) : resolve());
@@ -308,6 +333,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
         if (error.code === 'ENOENT') throw httpError(501, 'Chưa cài LibreOffice trên backend. Hãy cài gói libreoffice để xem tài liệu Office.');
         throw httpError(422, `Không thể chuyển tài liệu Office sang PDF: ${error.message}`);
       });
+      activeOfficeConversions--; conversionStarted = false;
       const pdfPath = path.join(tempDir, `${path.parse(target).name}.pdf`);
       const pdfStat = await fsp.stat(pdfPath);
       res.setHeader('Cache-Control', 'private, no-store');
@@ -318,6 +344,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
       res.once('finish', cleanup); res.once('close', cleanup);
       return fs.createReadStream(pdfPath).on('error', error => res.destroy(error)).pipe(res);
     } catch (error) {
+      if (conversionStarted) activeOfficeConversions--;
       if (tempDir) await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
       return fail(res, error);
     }
@@ -488,6 +515,8 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
   });
 
   router.post('/archive/extract', async (req, res) => {
+    const createdFiles: string[] = [];
+    const createdDirectories: string[] = [];
     try {
       const source = resolveInsideRoot(req.body.path ?? req.body.archivePath); const destination = resolveInsideRoot(req.body.destinationDir); await mustBeDirectory(destination);
       if (path.extname(source).toLowerCase() !== '.zip') throw httpError(400, 'Chỉ hỗ trợ giải nén ZIP');
@@ -495,14 +524,45 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
         const normalized = entry.path.replace(/\\/g, '/');
         if (!normalized || normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized) || normalized.split('/').includes('..')) throw httpError(400, `ZIP chứa đường dẫn không an toàn: ${entry.path}`);
         const target = path.resolve(destination, normalized); if (target !== destination && !target.startsWith(destination + path.sep)) throw httpError(400, `ZIP chứa đường dẫn không an toàn: ${entry.path}`);
+        assertCanonicalInsideRoot(target);
         return { entry, target };
       });
+      if (planned.length > MAX_ARCHIVE_ENTRIES) throw httpError(413, `ZIP vượt quá ${MAX_ARCHIVE_ENTRIES} mục`);
+      let declaredTotal = 0;
+      for (const { entry } of planned) {
+        if (!Number.isSafeInteger(entry.uncompressedSize) || entry.uncompressedSize < 0 || !Number.isSafeInteger(entry.compressedSize) || entry.compressedSize < 0) throw httpError(400, 'ZIP có metadata dung lượng không hợp lệ');
+        if (entry.uncompressedSize > MAX_ARCHIVE_FILE_SIZE) throw httpError(413, `Tệp trong ZIP vượt quá ${MAX_ARCHIVE_FILE_SIZE / 1024 / 1024}MB: ${entry.path}`);
+        declaredTotal += entry.uncompressedSize;
+        if (declaredTotal > MAX_ARCHIVE_TOTAL_SIZE) throw httpError(413, `ZIP vượt quá ${MAX_ARCHIVE_TOTAL_SIZE / 1024 / 1024}MB sau giải nén`);
+        if (entry.compressedSize === 0 ? entry.uncompressedSize > 0 : entry.uncompressedSize / entry.compressedSize > MAX_COMPRESSION_RATIO) throw httpError(413, `Tỷ lệ nén không an toàn: ${entry.path}`);
+      }
+      const ensureDirectory = async (directoryPath: string) => {
+        const missing: string[] = [];
+        let current = directoryPath;
+        while (current !== destination && !fs.existsSync(current)) { missing.push(current); current = path.dirname(current); }
+        await fsp.mkdir(directoryPath, { recursive: true });
+        createdDirectories.push(...missing);
+      };
+      let actualTotal = 0;
       for (const { entry, target } of planned) {
-        if (entry.type === 'Directory') await fsp.mkdir(target, { recursive: true });
-        else { await fsp.mkdir(path.dirname(target), { recursive: true }); await ensureMissing(target); await new Promise<void>((resolve, reject) => entry.stream().pipe(fs.createWriteStream(target, { flags: 'wx' })).on('finish', resolve).on('error', reject)); }
+        if (entry.type === 'Directory') await ensureDirectory(target);
+        else {
+          await ensureDirectory(path.dirname(target)); await ensureMissing(target); createdFiles.push(target);
+          let fileSize = 0;
+          const quota = new Transform({ transform(chunk, _encoding, callback) {
+            fileSize += chunk.length; actualTotal += chunk.length;
+            if (fileSize > MAX_ARCHIVE_FILE_SIZE || actualTotal > MAX_ARCHIVE_TOTAL_SIZE) return callback(httpError(413, 'ZIP vượt quá giới hạn dung lượng khi giải nén'));
+            callback(null, chunk);
+          } });
+          await pipeline(entry.stream(), quota, fs.createWriteStream(target, { flags: 'wx' }));
+        }
       }
       await log(`Đã giải nén: ${relative(source)} -> ${relative(destination)}`, clientIp(req)); return res.json({ success: true, destinationPath: relative(destination), entries: planned.length });
-    } catch (error) { return fail(res, error); }
+    } catch (error) {
+      await Promise.all(createdFiles.map(file => fsp.rm(file, { force: true }).catch(() => undefined)));
+      for (const directory of [...new Set(createdDirectories)].sort((a, b) => b.length - a.length)) await fsp.rmdir(directory).catch(() => undefined);
+      return fail(res, error);
+    }
   });
 
   router.post('/symlink', async (req, res) => {

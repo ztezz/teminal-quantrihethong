@@ -7,3 +7,7 @@ coverage/
 *.log
 .env*
 !.env.example
+terminal_database.json
+.terminal-trash/
+.terminal-snapshots/
+tsconfig.tsbuildinfo

@@ -1489,13 +1489,13 @@ export default function Home() {
       xtermInstance.current.options.fontSize = fontSize;
       xtermInstance.current.options.theme = getTerminalColors(theme);
       // Wait for font styling to re-render in container, then fit
-      setTimeout(() => {
+      setTimeout(async () => {
         try {
-          const { FitAddon } = require('@xterm/addon-fit');
+          const { FitAddon } = await import('@xterm/addon-fit');
           const fitAddon = new FitAddon();
           xtermInstance.current.loadAddon(fitAddon);
           fitAddon.fit();
-        } catch (e) {}
+        } catch {}
       }, 50);
     }
     setTimeout(() => {

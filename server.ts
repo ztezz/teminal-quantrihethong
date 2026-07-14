@@ -28,6 +28,8 @@ const SESSION_COOKIE = 'terminal_session';
 const STEP_UP_COOKIE = 'terminal_step_up';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const STEP_UP_TTL_MS = 5 * 60 * 1000;
+const COMPROMISED_PASSWORD_SALT = 'ed74ba34ba1f20c6b1412f49bc818008';
+const COMPROMISED_PASSWORD_HASH = 'b2a92f363ad27b41f5a5080674cd20c400940abbe6cfe2ab17eb6175375f735f';
 const execFileAsync = promisify(execFile);
 type Role = 'viewer' | 'operator' | 'admin' | 'root';
 type StoredUser = { id: string; username: string; passwordHash: string; legacySalt?: string; role: Role; enabled: boolean; createdAt: number; totpSecret?: string; recoveryCodes?: string[]; pendingTotpSecret?: string };
@@ -60,28 +62,34 @@ class JsonDatabase {
   }
 
   private load() {
-    try {
-      if (fs.existsSync(DB_FILE)) {
+    if (fs.existsSync(DB_FILE)) {
+      try {
         const fileContent = fs.readFileSync(DB_FILE, 'utf8');
         this.data = JSON.parse(fileContent);
+        if (!this.data.settings || typeof this.data.settings !== 'object') this.data.settings = {};
+        if (!this.data.terminal_settings || typeof this.data.terminal_settings !== 'object') this.data.terminal_settings = {};
         if (!Array.isArray(this.data.sessions) || this.data.sessions.some(session => typeof session === 'string')) this.data.sessions = [];
         else this.data.sessions = this.data.sessions.map(session => ({ ...session, userId: session.userId || 'root', createdAt: session.createdAt || Date.now(), ip: session.ip || 'unknown', userAgent: session.userAgent || 'unknown' }));
         if (!Array.isArray(this.data.users)) this.data.users = [];
         if (!Array.isArray(this.data.logs)) this.data.logs = [];
         this.data.logs = this.data.logs.map((entry: any, index) => this.normalizeAuditEntry(entry, index));
-      } else {
-        this.save();
+      } catch (err) {
+        throw new Error(`Cannot load database ${DB_FILE}; refusing to start with empty data`, { cause: err });
       }
-    } catch (err) {
-      console.error('[DB] Error loading database file, initializing empty:', err);
+    } else {
+      this.save();
     }
   }
 
   private save() {
+    const tempFile = `${DB_FILE}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
     try {
-      fs.writeFileSync(DB_FILE, JSON.stringify(this.data, null, 2), 'utf8');
+      fs.writeFileSync(tempFile, JSON.stringify(this.data, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      fs.renameSync(tempFile, DB_FILE);
+      if (process.platform !== 'win32') fs.chmodSync(DB_FILE, 0o600);
     } catch (err) {
-      console.error('[DB] Error saving database file:', err);
+      try { fs.rmSync(tempFile, { force: true }); } catch { /* Preserve the original persistence error. */ }
+      throw new Error(`Cannot save database ${DB_FILE}`, { cause: err });
     }
   }
 
@@ -308,6 +316,9 @@ function clearSessionCookie(res: express.Response) {
 const stepUpGrants = new Map<string, { sessionHash: string; expiresAt: number }>();
 function setStepUpCookie(req: express.Request, res: express.Response) {
   const grant = crypto.randomBytes(32).toString('base64url'); const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  const now = Date.now();
+  for (const [key, entry] of stepUpGrants) if (entry.expiresAt <= now) stepUpGrants.delete(key);
+  while (stepUpGrants.size >= 10_000) stepUpGrants.delete(stepUpGrants.keys().next().value!);
   stepUpGrants.set(grant, { sessionHash: crypto.createHash('sha256').update(sessionToken(req)).digest('hex'), expiresAt: Date.now() + STEP_UP_TTL_MS });
   res.setHeader('Set-Cookie', `${STEP_UP_COOKIE}=${encodeURIComponent(grant)}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=${STEP_UP_TTL_MS / 1000}${secure}`);
 }
@@ -317,10 +328,13 @@ function hasStepUp(req: express.Request): boolean {
   return Boolean(entry && token && entry.expiresAt > Date.now() && entry.sessionHash === crypto.createHash('sha256').update(token).digest('hex'));
 }
 
-const previewTickets = new Map<string, { path: string; expiresAt: number }>();
+const previewTickets = new Map<string, { path: string; expiresAt: number; remainingUses: number }>();
 const socketTickets = new Map<string, { expiresAt: number; userId: string }>();
 const loginChallenges = new Map<string, { expiresAt: number; ip: string; userAgent: string; userId: string }>();
-function createTicket<T>(store: Map<string, T>, value: T): string {
+function createTicket<T extends { expiresAt: number }>(store: Map<string, T>, value: T): string {
+  const now = Date.now();
+  for (const [key, entry] of store) if (entry.expiresAt <= now) store.delete(key);
+  while (store.size >= 10_000) store.delete(store.keys().next().value!);
   const ticket = crypto.randomBytes(32).toString('base64url');
   store.set(ticket, value);
   return ticket;
@@ -328,6 +342,8 @@ function createTicket<T>(store: Map<string, T>, value: T): string {
 function consumePreviewTicket(ticket: string, filePath: string): boolean {
   const entry = previewTickets.get(ticket);
   if (!entry || entry.expiresAt <= Date.now() || entry.path !== filePath) return false;
+  entry.remainingUses--;
+  if (entry.remainingUses <= 0) previewTickets.delete(ticket);
   return true;
 }
 function consumeSocketTicket(ticket: string): string | null {
@@ -380,7 +396,7 @@ function decryptSecret(payload: string): string {
 
 function requestInfo(req: express.Request) {
   return {
-    ip: String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim(),
+    ip: req.ip || req.socket.remoteAddress || 'unknown',
     userAgent: String(req.headers['user-agent'] || 'unknown')
   };
 }
@@ -437,6 +453,8 @@ function checkRateLimit(ip: string): boolean {
   const now = Date.now();
   const WINDOW_MS = 15 * 60 * 1000; // 15 minutes
   const MAX_ATTEMPTS = 10;
+  if (authAttempts.size >= 10_000) for (const [key, value] of authAttempts) if (value.resetAt <= now) authAttempts.delete(key);
+  while (authAttempts.size >= 20_000) authAttempts.delete(authAttempts.keys().next().value!);
   const entry = authAttempts.get(ip);
   if (!entry || now > entry.resetAt) {
     authAttempts.set(ip, { count: 1, resetAt: now + WINDOW_MS });
@@ -483,13 +501,36 @@ async function initializeDatabase() {
     )
   `);
 
-  // Check if password setting exists, otherwise set a default
+  // New installations must receive an explicit password; there is no shared fallback credential.
   const dbPasswordHash = await db.get('SELECT value FROM settings WHERE key = ?', 'password_hash');
-  if (!dbPasswordHash) {
-    const defaultPassword = process.env.TERMINAL_PASSWORD || 'admin';
-    const hash = await argon2.hash(defaultPassword, { type: argon2.argon2id });
-    await db.run('INSERT INTO settings (key, value) VALUES (?, ?)', 'password_hash', hash);
-    console.log(`[DB] Initialized default terminal password. Defaults to: "${defaultPassword}"`);
+  const dbPasswordSalt = await db.get('SELECT value FROM settings WHERE key = ?', 'password_salt');
+  const compromisedCredential = dbPasswordHash?.value === COMPROMISED_PASSWORD_HASH && dbPasswordSalt?.value === COMPROMISED_PASSWORD_SALT;
+  const compromisedUsers = db.getUsers().filter((user: StoredUser) => user.passwordHash === COMPROMISED_PASSWORD_HASH && user.legacySalt === COMPROMISED_PASSWORD_SALT);
+  let replacementHash: string | undefined;
+  if (!dbPasswordHash || compromisedCredential) {
+    const initialPassword = process.env.TERMINAL_PASSWORD;
+    if (!initialPassword || initialPassword.length < 12 || initialPassword.toLowerCase() === 'admin') {
+      throw new Error(`${compromisedCredential ? 'The committed admin credential is compromised' : 'No password is configured'}. Set TERMINAL_PASSWORD to a new password of at least 12 characters.`);
+    }
+    replacementHash = await argon2.hash(initialPassword, { type: argon2.argon2id });
+    await db.run('INSERT INTO settings (key, value) VALUES (?, ?)', 'password_hash', replacementHash);
+    db.deleteSetting('password_salt');
+    console.log(`[DB] ${compromisedCredential ? 'Replaced compromised credentials' : 'Initialized credentials'} from TERMINAL_PASSWORD.`);
+  }
+
+  if (compromisedUsers.length) {
+    const initialPassword = process.env.TERMINAL_PASSWORD;
+    if (!initialPassword || initialPassword.length < 12 || initialPassword.toLowerCase() === 'admin') {
+      throw new Error('A user still has the committed admin credential. Set TERMINAL_PASSWORD to a new password of at least 12 characters.');
+    }
+    replacementHash ||= await argon2.hash(initialPassword, { type: argon2.argon2id });
+    for (const user of compromisedUsers) {
+      user.passwordHash = replacementHash;
+      delete user.legacySalt;
+      db.saveUser(user);
+      db.clearUserSessions(user.id);
+    }
+    console.log(`[DB] Replaced compromised credentials for ${compromisedUsers.length} user(s) and revoked their sessions.`);
   }
 
   if (!db.getUsers().length) {
@@ -515,6 +556,8 @@ async function initializeDatabase() {
 async function startServer() {
   await nextApp?.prepare();
   const expressApp = express();
+  const trustProxy = process.env.TRUST_PROXY?.trim();
+  if (trustProxy) expressApp.set('trust proxy', /^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy);
   const httpServer = createServer(expressApp);
   const authKeyLength = process.env.AUTH_ENCRYPTION_KEY?.length || 0;
   console.log(`[SECURITY] AUTH_ENCRYPTION_KEY: ${authKeyLength >= 32 ? 'configured' : authKeyLength ? `invalid (${authKeyLength} characters)` : 'missing'}`);
@@ -549,6 +592,7 @@ async function startServer() {
     await initializeDatabase();
   } catch (err) {
     console.error('[DB ERROR] Failed to initialize database:', err);
+    throw err;
   }
 
   // --- API Routes ---
@@ -557,7 +601,7 @@ async function startServer() {
   expressApp.post('/api/auth', async (req, res) => {
     try {
       const { username, password } = req.body;
-      const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
+      const clientIp = requestInfo(req).ip;
 
       if (!checkRateLimit(clientIp)) {
         audit({ category: 'auth', action: 'rate_limit', event: 'Auth blocked: Rate limit exceeded', level: 'critical', result: 'failure', ip: clientIp });
@@ -634,7 +678,11 @@ async function startServer() {
     if (!requireRole(req, res, 'admin')) return;
     const items = db.queryAudit({ query: typeof req.query.q === 'string' ? req.query.q : undefined, category: typeof req.query.category === 'string' ? req.query.category : undefined, level: typeof req.query.level === 'string' ? req.query.level : undefined, result: typeof req.query.result === 'string' ? req.query.result : undefined, offset: 0, limit: 20_000 }).items;
     if (req.query.format === 'csv') {
-      const escape = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+      const escape = (value: unknown) => {
+        const text = String(value ?? '');
+        const safe = /^[\t\r\n ]*[=+\-@]/.test(text) ? `'${text}` : text;
+        return `"${safe.replace(/"/g, '""')}"`;
+      };
       const csv = ['timestamp,category,action,level,result,ip,sessionId,event,metadata', ...items.map((entry: AuditEntry) => [entry.timestamp, entry.category, entry.action, entry.level, entry.result, entry.ip, entry.sessionId, entry.event, JSON.stringify(entry.metadata || {})].map(escape).join(','))].join('\n');
       res.setHeader('Content-Type', 'text/csv; charset=utf-8'); res.setHeader('Content-Disposition', 'attachment; filename="audit-log.csv"'); return res.send('\uFEFF' + csv);
     }
@@ -795,7 +843,7 @@ async function startServer() {
 
   expressApp.post('/api/auth/preview-ticket', (req, res) => {
     if (!authenticated(req) || typeof req.body.path !== 'string') return res.status(401).json({ success: false, error: 'Unauthorized' });
-    return res.json({ success: true, ticket: createTicket(previewTickets, { path: req.body.path, expiresAt: Date.now() + 60_000 }) });
+    return res.json({ success: true, ticket: createTicket(previewTickets, { path: req.body.path, expiresAt: Date.now() + 60_000, remainingUses: 16 }) });
   });
 
   expressApp.post('/api/auth/step-up', async (req, res) => {

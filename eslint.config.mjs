@@ -1,11 +1,15 @@
-import { defineConfig } from "eslint/config";
-import next from "eslint-config-next";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { defineConfig, globalIgnores } from "eslint/config";
+import nextVitals from "eslint-config-next/core-web-vitals";
+import nextTypeScript from "eslint-config-next/typescript";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-export default defineConfig([{
-    extends: [...next],
-}]);
+export default defineConfig([
+    globalIgnores([".next/**", "out/**", "dist/**", "coverage/**", "next-env.d.ts"]),
+    ...nextVitals,
+    ...nextTypeScript,
+    {
+        rules: {
+            "@typescript-eslint/no-explicit-any": "off",
+            "@typescript-eslint/no-unused-vars": "warn",
+        },
+    },
+]);

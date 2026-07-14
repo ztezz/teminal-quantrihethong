@@ -43,7 +43,7 @@ Frontend là static export trong thư mục `out/`. Express, Socket.IO, terminal
 
 ## Công Nghệ
 
-- Next.js 15, React 19 và TypeScript
+- Next.js 16, React 19 và TypeScript
 - Tailwind CSS
 - Express 5 và Socket.IO
 - Xterm.js và `node-pty`
@@ -54,7 +54,7 @@ Frontend là static export trong thư mục `out/`. Express, Socket.IO, terminal
 
 ## Yêu Cầu
 
-- Node.js 20 trở lên
+- Node.js 20.9 trở lên
 - npm
 - Linux cho backend production
 - Công cụ build native cần thiết cho `node-pty` và `argon2`
@@ -104,12 +104,14 @@ Mở `http://localhost:3000`.
 | `TERMINAL_PASSWORD` | Backend | Mật khẩu khởi tạo khi database chưa có password. Không thay đổi password đã lưu. |
 | `BACKEND_PORT` | Backend | Port backend-only, mặc định `3001`. |
 | `FRONTEND_ORIGIN` | Backend | Origin frontend chính xác, ví dụ `https://terminal.example.com`; không có dấu `/` cuối. |
+| `TRUST_PROXY` | Backend | Proxy tin cậy của Express. Đặt `1` khi backend chỉ nằm sau đúng một reverse proxy; để trống nếu truy cập trực tiếp. |
 | `FILE_MANAGER_ROOT` | Backend | Thư mục gốc hiển thị trong File Manager. Dùng `/` để quản lý toàn máy chủ. |
 | `FILE_MANAGER_TRASH_DIR` | Backend | Nơi lưu thùng rác, phải có quyền ghi. |
 | `FILE_MANAGER_SNAPSHOT_DIR` | Backend | Kho snapshot nội bộ, không đặt trong thư mục được web server phục vụ. |
 | `SNAPSHOT_MAX_FILE_MB` | Backend | Dung lượng tối đa mỗi file được snapshot, mặc định `100`. |
 | `SNAPSHOT_MAX_TOTAL_MB` | Backend | Tổng quota snapshot, mặc định `2048`; tự xóa bản cũ nhất khi vượt quota. |
 | `LIBREOFFICE_PATH` | Backend | Binary LibreOffice, thường là `/usr/bin/libreoffice`. |
+| `OFFICE_MAX_CONCURRENCY` | Backend | Số tác vụ chuyển đổi LibreOffice tối đa chạy đồng thời, mặc định `1`. |
 | `AUTH_ENCRYPTION_KEY` | Backend | Khóa tối thiểu 32 ký tự dùng mã hóa AES-256-GCM cho TOTP secret. Không được thay đổi sau khi bật 2FA. |
 | `TOTP_ISSUER` | Backend | Tên hiển thị trong ứng dụng Authenticator, mặc định `Terminal Admin`. |
 | `NODE_ENV` | Backend | Đặt `production` để bật cookie `Secure`. |
