@@ -80,6 +80,7 @@ export function createSqliteManagerRouter({ authorize, hasStepUp, log, rootDir, 
   const browserRoot = path.resolve(browserRootOption || path.parse(process.cwd()).root);
   const canonicalBrowserRoot = fs.realpathSync(browserRoot);
   const backupRoot = path.resolve(backupDir || path.join(root, '.terminal-sqlite-backups'));
+  const registryFile = path.join(backupRoot, 'opened-databases.json');
   const backupRelative = path.relative(root, backupRoot);
   if (backupRelative === '..' || backupRelative.startsWith(`..${path.sep}`) || path.isAbsolute(backupRelative)) throw new Error('SQLite backup directory must be inside the manager root');
   const protectedPaths = new Set(protectedFiles.map(file => path.resolve(file)));
@@ -132,6 +133,34 @@ export function createSqliteManagerRouter({ authorize, hasStepUp, log, rootDir, 
       await handle.read(buffer, 0, buffer.length, 0);
       return buffer.toString('utf8');
     } finally { await handle.close(); }
+  };
+  const databaseDetails = async (filename: string) => {
+    const resolved = resolveDatabase(filename);
+    const stat = await fsp.stat(resolved);
+    if (!stat.isFile() || stat.size < 16 || await sqliteHeader(resolved) !== 'SQLite format 3\0') throw httpError(400, 'Tệp không phải SQLite hợp lệ');
+    return { path: displayPath(resolved), name: path.basename(resolved), size: stat.size, mtime: stat.mtime.toISOString(), protected: protectedPaths.has(path.resolve(resolved)) };
+  };
+  const readRegistry = async () => {
+    try {
+      const parsed = JSON.parse(await fsp.readFile(registryFile, 'utf8'));
+      return Array.isArray(parsed) ? parsed.filter(value => typeof value === 'string').slice(0, 500) as string[] : [];
+    } catch (error: any) {
+      if (error.code === 'ENOENT' || error instanceof SyntaxError) return [];
+      throw error;
+    }
+  };
+  const writeRegistry = async (paths: string[]) => {
+    await ensureBackupRoot();
+    const temporary = `${registryFile}.${process.pid}.${Date.now()}.tmp`;
+    await fsp.writeFile(temporary, JSON.stringify(paths.slice(0, 500)), { flag: 'wx', mode: 0o600 });
+    try {
+      try { await fsp.rename(temporary, registryFile); }
+      catch (error: any) {
+        if (!['EEXIST', 'EPERM'].includes(error.code)) throw error;
+        await fsp.rm(registryFile, { force: true });
+        await fsp.rename(temporary, registryFile);
+      }
+    } finally { await fsp.rm(temporary, { force: true }); }
   };
   const requireStepUp = (req: Request, res: Response, message: string) => hasStepUp(req) || (res.status(428).json({ success: false, code: 'STEP_UP_REQUIRED', error: message }), false);
   const requireRootStepUp = (req: Request, res: Response, message: string) => authorize(req, res, 'root') && requireStepUp(req, res, message);
@@ -288,8 +317,25 @@ export function createSqliteManagerRouter({ authorize, hasStepUp, log, rootDir, 
           if (scanned >= MAX_SCAN_ENTRIES) break;
         }
       }
+      const registeredPaths = await readRegistry();
+      const registered = (await Promise.all(registeredPaths.map(filename => databaseDetails(filename).catch(() => null)))).filter(Boolean) as typeof databases;
+      const validRegisteredPaths = registered.map(item => item.path);
+      if (validRegisteredPaths.length !== registeredPaths.length) await writeRegistry(validRegisteredPaths);
+      for (const item of registered) if (!databases.some(database => resolveDatabase(database.path) === resolveDatabase(item.path))) databases.push(item);
       databases.sort((a, b) => a.path.localeCompare(b.path));
       return res.json({ success: true, root: canonicalRoot, databases, scanned, truncated: Boolean(queue.length) });
+    } catch (error) { return fail(res, error); }
+  });
+
+  router.post('/opened', async (req, res) => {
+    try {
+      const details = await databaseDetails(req.body?.path);
+      const registered = await readRegistry();
+      const filename = resolveDatabase(req.body?.path);
+      const next = [filename, ...registered.filter(item => path.resolve(item) !== path.resolve(filename))];
+      await writeRegistry(next);
+      log(req, 'sqlite_register', 'SQLite database added to opened list', { path: details.path });
+      return res.status(201).json({ success: true, database: details });
     } catch (error) { return fail(res, error); }
   });
 

@@ -553,8 +553,14 @@ export default function Home() {
   };
 
   const selectExistingSqlite = async (databasePath: string) => {
-    setShowSqliteBrowser(false);
-    await openSqlite(databasePath);
+    setSqliteLoading(true); setSqliteMessage(null);
+    try {
+      await sqliteRequest('/opened', { method: 'POST', body: JSON.stringify({ path: databasePath }) });
+      setShowSqliteBrowser(false);
+      await openSqlite(databasePath);
+      await loadSqliteFiles();
+    } catch (error: any) { setSqliteMessage(error.message); }
+    finally { setSqliteLoading(false); }
   };
 
   const runSqliteQuery = async () => {

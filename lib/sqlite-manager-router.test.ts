@@ -122,3 +122,23 @@ test('schema endpoint opens an existing database by absolute browser path', asyn
     assert.equal(opened.body.objects.some((item: { name: string }) => item.name === 'people'), true);
   } finally { await context.close(); }
 });
+
+test('opened database registry persists absolute paths in the database list', async () => {
+  const context = await fixture();
+  try {
+    const nestedDirectory = path.join(context.root, 'external');
+    fs.mkdirSync(nestedDirectory);
+    const external = path.join(nestedDirectory, 'external.sqlite');
+    const database = new DatabaseSync(external);
+    database.exec('CREATE TABLE saved (id INTEGER PRIMARY KEY)');
+    database.close();
+    const registered = await context.request('/opened', { method: 'POST', body: JSON.stringify({ path: external }) });
+    assert.equal(registered.status, 201);
+    const registeredAgain = await context.request('/opened', { method: 'POST', body: JSON.stringify({ path: external }) });
+    assert.equal(registeredAgain.status, 201);
+    const listed = await context.request('/');
+    assert.equal(listed.body.databases.some((item: { path: string }) => path.resolve(context.root, item.path) === external), true);
+    assert.equal(listed.body.databases.filter((item: { path: string }) => path.resolve(context.root, item.path) === external).length, 1);
+    assert.equal(fs.existsSync(path.join(context.root, '.terminal-sqlite-backups', 'opened-databases.json')), true);
+  } finally { await context.close(); }
+});
