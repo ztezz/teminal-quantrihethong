@@ -64,12 +64,48 @@ export interface TrashItem {
 }
 
 export type ActiveTab =
+  | "overview"
   | "terminal"
   | "logs"
+  | "jobs"
   | "settings"
   | "files"
   | "system"
   | "sqlite";
+
+export interface OverviewData {
+  success: true;
+  generatedAt: string;
+  application: { uptimeSeconds: number; startedAt: string };
+  host: {
+    cpu: number;
+    memory: { usedMB: number; totalMB: number; percent: number };
+    disk: { usedGB: number; totalGB: number; percent: number };
+    loadAverage: number[];
+  };
+  system: {
+    services: { supported: boolean; total: number | null; active: number | null; failed: number | null };
+    processes: { supported: boolean; total: number | null };
+  };
+  audit: {
+    critical: number;
+    warning: number;
+    recent: Array<Pick<LogEntry, "id" | "category" | "action" | "event" | "level" | "result" | "timestamp">>;
+  };
+  sessions: { active: number };
+  databases: { managed: number; healthy: number; unhealthy: number; scanned: number; truncated: boolean };
+  api: {
+    startedAt: string;
+    requests: number;
+    inFlight: number;
+    errors: number;
+    errorRate: number;
+    latencyMs: { average: number; p95: number; maximum: number };
+    statusCodes: Record<string, number>;
+    methods: Record<string, number>;
+  };
+  terminalConnections: number;
+}
 
 export interface SystemService {
   unit: string;
@@ -96,6 +132,45 @@ export interface SqliteFile {
   size: number;
   mtime: string;
   protected: boolean;
+}
+
+export type JobType = "sqlite_backup" | "sqlite_integrity" | "sqlite_vacuum";
+export type JobState = "pending" | "running" | "success" | "failure" | "cancelled";
+
+export interface JobLog {
+  timestamp: string;
+  message: string;
+}
+
+export interface Job {
+  id: string;
+  type: JobType;
+  state: JobState;
+  path: string;
+  source: "api" | "schedule";
+  createdBy: string;
+  requiredRole: "admin" | "root";
+  progress: number;
+  message: string;
+  logs: JobLog[];
+  createdAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  result?: Record<string, unknown>;
+  error?: string;
+}
+
+export interface JobsResponse {
+  success: true;
+  jobs: Job[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export interface JobResponse {
+  success: true;
+  job: Job;
 }
 
 export interface SqliteObject {

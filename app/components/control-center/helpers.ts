@@ -7,7 +7,7 @@ import type {
 } from "./types";
 
 export const API_URL = publicApiUrl(
-  process.env.NEXT_PUBLIC_API_URL || "https://api-ssh.luugame.fun",
+  process.env.NEXT_PUBLIC_API_URL || "",
 );
 
 export const LAST_FILE_PATH_KEY = "vps_terminal_last_file_path";
@@ -17,15 +17,17 @@ export const MAIN_SIDEBAR_WIDTH_KEY = "vps_terminal_sidebar_width";
 export const SQLITE_SIDEBAR_WIDTH_KEY = "vps_terminal_sqlite_sidebar_width";
 
 export function getSavedActiveTab(): ActiveTab {
-  if (typeof window === "undefined") return "terminal";
+  if (typeof window === "undefined") return "overview";
   const saved = localStorage.getItem("vps_terminal_active_tab");
-  return saved === "logs" ||
+  return saved === "overview" ||
+    saved === "logs" ||
+    saved === "jobs" ||
     saved === "settings" ||
     saved === "files" ||
     saved === "system" ||
     saved === "sqlite"
     ? saved
-    : "terminal";
+    : "overview";
 }
 
 export function getSavedSidebarState(): boolean {

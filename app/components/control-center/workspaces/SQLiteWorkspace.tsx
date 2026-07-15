@@ -26,6 +26,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { SqliteResultTable, sqliteCellValue } from "../SqliteResultTable";
+import { SqlConsoleTabs } from "../SqlConsoleTabs";
 import { API_URL } from "../helpers";
 import type {
   SqliteBackup,
@@ -754,13 +755,7 @@ export function SQLiteWorkspace({ data, actions }: SQLiteWorkspaceProps) {
                             Chạy SQL
                           </button>
                         </div>
-                        <textarea
-                          value={sqliteSql}
-                          onChange={(event) => setSqliteSql(event.target.value)}
-                          spellCheck={false}
-                          aria-keyshortcuts="Control+Enter Meta+Enter"
-                          className="w-full min-h-52 p-4 resize-y bg-[#070908] text-emerald-200 font-mono text-xs outline-none"
-                        />
+                        <SqlConsoleTabs key={selectedSqlite} database={selectedSqlite} sql={sqliteSql} setSql={setSqliteSql} objects={sqliteObjects} loading={sqliteLoading} onRun={runSqliteQuery} />
                         <div className="border-t border-white/10">
                           {sqliteLoading ? (
                             <div className="p-4 space-y-2">

@@ -1,7 +1,8 @@
-import type { Dispatch, FormEvent, SetStateAction } from "react";
+import { useEffect, useState, type Dispatch, type FormEvent, type SetStateAction } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   AlertCircle,
+  Bell,
   Check,
   Copy,
   Database,
@@ -10,6 +11,8 @@ import {
   Smartphone,
   X,
 } from "lucide-react";
+import { applyUiPreferences, getUiPreferences, saveUiPreferences, type UiPreferences } from "@/lib/client/preferences";
+import { notificationPermission, requestNotificationPermission, type NotificationPermissionResult } from "@/lib/client/notifications";
 import type { ManagedUser, SecuritySession, UserRole } from "../types";
 
 type SaveStatus = "idle" | "saving" | "saved" | "error";
@@ -86,6 +89,14 @@ export interface SettingsWorkspaceProps {
   actions: SettingsWorkspaceActions;
 }
 export function SettingsWorkspace({ data, actions }: SettingsWorkspaceProps) {
+  const [uiPreferences, setUiPreferences] = useState<UiPreferences>(getUiPreferences);
+  const [notifications, setNotifications] = useState<NotificationPermissionResult>(notificationPermission);
+  useEffect(() => applyUiPreferences(uiPreferences), [uiPreferences]);
+  const updateUiPreferences = (changes: Partial<UiPreferences>) => {
+    const next = { ...uiPreferences, ...changes };
+    setUiPreferences(next);
+    saveUiPreferences(next);
+  };
   const {
     fontSize,
     theme,
@@ -141,6 +152,30 @@ export function SettingsWorkspace({ data, actions }: SettingsWorkspaceProps) {
       className="workspace-screen w-full h-full p-4 sm:p-8 overflow-y-auto"
     >
       <div className="max-w-3xl mx-auto space-y-8">
+        <div className="app-panel p-4 sm:p-6 space-y-5">
+          <div>
+            <h3 className="text-base font-bold text-white uppercase tracking-wider mb-1">Trải Nghiệm Giao Diện</h3>
+            <p className="text-xs text-slate-500 font-mono">Áp dụng ngay trên trình duyệt này và lưu cục bộ</p>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            <label className="text-xs text-slate-400">
+              Mật độ hiển thị
+              <select value={uiPreferences.density} onChange={(event) => updateUiPreferences({ density: event.target.value as UiPreferences["density"] })} className="mt-2 w-full rounded border border-white/10 bg-black px-3 py-2.5 text-sm text-slate-200">
+                <option value="comfortable">Thoải mái</option>
+                <option value="compact">Gọn</option>
+              </select>
+            </label>
+            <label className="flex items-center justify-between gap-4 rounded border border-white/10 bg-black/40 px-4 py-3 text-xs text-slate-300">
+              <span><span className="block font-semibold text-white">Giảm chuyển động</span><span className="mt-1 block text-[10px] text-slate-500">Tắt animation và transition không thiết yếu</span></span>
+              <input type="checkbox" checked={uiPreferences.reduceAnimation} onChange={(event) => updateUiPreferences({ reduceAnimation: event.target.checked })} className="accent-blue-500" />
+            </label>
+          </div>
+          <div className="flex flex-col gap-3 rounded border border-white/10 bg-black/40 p-4 sm:flex-row sm:items-center">
+            <Bell className="h-4 w-4 text-blue-400" />
+            <div className="mr-auto"><p className="text-xs font-semibold text-white">Thông báo trình duyệt</p><p className="mt-1 text-[10px] text-slate-500">Trạng thái: {notifications === "granted" ? "đã cho phép" : notifications === "denied" ? "đã chặn" : notifications === "unsupported" ? "không hỗ trợ" : "chưa chọn"}</p></div>
+            <button type="button" disabled={notifications !== "default"} onClick={async () => setNotifications(await requestNotificationPermission())} className="rounded bg-blue-600 px-4 py-2 text-xs font-semibold text-white disabled:opacity-40">Bật thông báo</button>
+          </div>
+        </div>
         {/* Section 1: Terminal UI Styles */}
         <div className="app-panel p-4 sm:p-6 space-y-6">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-white/5 pb-4">

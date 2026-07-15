@@ -27,6 +27,13 @@ import { TerminalWorkspace } from "./components/control-center/workspaces/Termin
 import { SQLiteWorkspace } from "./components/control-center/workspaces/SQLiteWorkspace";
 import { SettingsWorkspace } from "./components/control-center/workspaces/SettingsWorkspace";
 import { FileWorkspace } from "./components/control-center/workspaces/FileWorkspace";
+import { OverviewWorkspace } from "./components/control-center/workspaces/OverviewWorkspace";
+import { JobsWorkspace } from "./components/control-center/workspaces/JobsWorkspace";
+import { apiClient } from "@/lib/client/api";
+import { applyUiPreferences } from "@/lib/client/preferences";
+import { useMetricsPolling } from "@/hooks/use-operations-data";
+import { useAuditLog } from "@/hooks/use-audit-log";
+import { useSystemManagement } from "@/hooks/use-system-management";
 import {
   API_URL,
   FILE_BOOKMARKS_KEY,
@@ -49,7 +56,6 @@ import type {
   FileBookmark,
   FileMetadata,
   FileSnapshot,
-  LogEntry,
   ManagedUser,
   SecuritySession,
   SqliteBackup,
@@ -60,8 +66,6 @@ import type {
   SqliteObject,
   SqliteRecordModal,
   SqliteWorkspace,
-  SystemProcess,
-  SystemService,
   ToastItem,
   ToastKind,
   TrashItem,
@@ -70,6 +74,7 @@ import type {
 import "@xterm/xterm/css/xterm.css";
 
 export default function Home() {
+  useEffect(() => applyUiPreferences(), []);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [password, setPassword] = useState("");
   const [username, setUsername] = useState("root");
@@ -100,32 +105,10 @@ export default function Home() {
   const isSettingsLoadedRef = useRef<boolean>(false);
 
   // Logs & Settings Management UI State
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [logTotal, setLogTotal] = useState(0);
-  const [logOffset, setLogOffset] = useState(0);
-  const [logQuery, setLogQuery] = useState("");
-  const [logCategory, setLogCategory] = useState("");
-  const [logLevel, setLogLevel] = useState("");
-  const [logResult, setLogResult] = useState("");
-  const [logIntegrity, setLogIntegrity] = useState<{
-    valid: boolean;
-    checked: number;
-    brokenAt?: number;
-  } | null>(null);
+  const auditLog = useAuditLog(sessionReady);
+  const { logs, total: logTotal, offset: logOffset, query: logQuery, setQuery: setLogQuery, category: logCategory, setCategory: setLogCategory, level: logLevel, setLevel: setLogLevel, result: logResult, setResult: setLogResult, integrity: logIntegrity, load: loadLogs, checkIntegrity: checkLogIntegrity, exportLogs: exportAuditLogs } = auditLog;
   const [activeTab, setActiveTab] = useState<ActiveTab>(getSavedActiveTab);
   const [isSidebarOpen, setIsSidebarOpen] = useState(getSavedSidebarState);
-  const [systemView, setSystemView] = useState<"services" | "processes">(
-    "services",
-  );
-  const [services, setServices] = useState<SystemService[]>([]);
-  const [processes, setProcesses] = useState<SystemProcess[]>([]);
-  const [systemQuery, setSystemQuery] = useState("");
-  const [systemLoading, setSystemLoading] = useState(false);
-  const [systemError, setSystemError] = useState<string | null>(null);
-  const [serviceLogs, setServiceLogs] = useState<{
-    unit: string;
-    logs: string;
-  } | null>(null);
   const [sqliteFiles, setSqliteFiles] = useState<SqliteFile[]>([]);
   const [selectedSqlite, setSelectedSqlite] = useState("");
   const [sqliteObjects, setSqliteObjects] = useState<SqliteObject[]>([]);
@@ -344,19 +327,13 @@ export default function Home() {
     if (
       currentUser &&
       !["admin", "root"].includes(currentUser.role) &&
-      ["terminal", "logs", "system", "sqlite"].includes(activeTab)
+      ["overview", "terminal", "logs", "jobs", "system", "sqlite"].includes(activeTab)
     )
       setTimeout(() => setActiveTab("files"), 0);
   }, [currentUser, activeTab]);
 
   // System metrics
-  const [cpuPercent, setCpuPercent] = useState<number>(0);
-  const [memUsedMB, setMemUsedMB] = useState<number>(0);
-  const [memTotalMB, setMemTotalMB] = useState<number>(0);
-  const [memPercent, setMemPercent] = useState<number>(0);
-  const [diskUsedGB, setDiskUsedGB] = useState<number>(0);
-  const [diskTotalGB, setDiskTotalGB] = useState<number>(0);
-  const [diskPercent, setDiskPercent] = useState<number>(0);
+  const { cpu: cpuPercent, memUsedMB, memTotalMB, memPercent, diskUsedGB, diskTotalGB, diskPercent } = useMetricsPolling(Boolean(isAuthenticated && sessionReady));
 
   // File Manager States
   const [filesList, setFilesList] = useState<any[]>([]);
@@ -521,124 +498,39 @@ export default function Home() {
 
   const requestStepUp = () =>
     new Promise<boolean>((resolve) => setStepUpPrompt({ resolve }));
+  const system = useSystemManagement(sessionReady && activeTab === "system", currentUser?.role, requestStepUp);
+  const { view: systemView, setView: setSystemView, services, processes, query: systemQuery, setQuery: setSystemQuery, loading: systemLoading, error: systemError, setError: setSystemError, serviceLogs, setServiceLogs, load: loadSystemData, openServiceLogs } = system;
+  const serviceAction = async (unit: string, action: string) => {
+    const toast = notify("loading", `${action} ${unit}...`);
+    try {
+      await system.serviceAction(unit, action);
+      replaceToast(toast, "success", `${unit}: ${action} hoàn tất.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Thao tác thất bại";
+      setSystemError(message);
+      replaceToast(toast, "error", message);
+    }
+  };
+  const signalProcess = async (pid: number, signal: "SIGTERM" | "SIGKILL") => {
+    if (!(await askConfirm({ title: `${signal} tiến trình`, message: `${signal} tiến trình PID ${pid}?`, danger: true, requiredText: signal === "SIGKILL" ? String(pid) : undefined, confirmLabel: signal }))) return;
+    const toast = notify("loading", `Đang gửi ${signal} tới PID ${pid}...`);
+    try {
+      await system.signalProcess(pid, signal);
+      replaceToast(toast, "success", `Đã gửi ${signal} tới PID ${pid}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Thao tác thất bại";
+      setSystemError(message);
+      replaceToast(toast, "error", message);
+    }
+  };
+  const stopService = async (unit: string) => {
+    if (await askConfirm({ message: `Dừng ${unit}?`, danger: true, confirmLabel: "Dừng service" })) await serviceAction(unit, "stop");
+  };
   const fetchWithStepUp = async (url: string, options: RequestInit) => {
     let response = await fetch(url, { ...options, credentials: "include" });
     if (response.status === 428 && (await requestStepUp()))
       response = await fetch(url, { ...options, credentials: "include" });
     return response;
-  };
-
-  const loadSystemData = useCallback(
-    async (view: "services" | "processes" = systemView) => {
-      if (
-        !sessionReady ||
-        !currentUser ||
-        !["admin", "root"].includes(currentUser.role)
-      )
-        return;
-      setSystemLoading(true);
-      setSystemError(null);
-      try {
-        const res = await fetch(`${API_URL}/api/system/${view}`, {
-          credentials: "include",
-        });
-        const data = await res.json();
-        if (!data.success)
-          throw new Error(data.error || "Không thể tải dữ liệu hệ thống");
-        if (view === "services") setServices(data.services || []);
-        else setProcesses(data.processes || []);
-      } catch (error: any) {
-        setSystemError(error.message);
-      } finally {
-        setSystemLoading(false);
-      }
-    },
-    [
-      systemView,
-      sessionReady,
-      currentUser,
-      setSystemLoading,
-      setSystemError,
-      setServices,
-      setProcesses,
-    ],
-  );
-
-  const serviceAction = async (unit: string, action: string) => {
-    const toast = notify("loading", `${action} ${unit}...`);
-    try {
-      const res = await fetchWithStepUp(
-        `${API_URL}/api/system/services/${encodeURIComponent(unit)}/action`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action }),
-        },
-      );
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error);
-      await loadSystemData("services");
-      replaceToast(toast, "success", `${unit}: ${action} hoàn tất.`);
-    } catch (error: any) {
-      setSystemError(error.message);
-      replaceToast(toast, "error", error.message);
-    }
-  };
-
-  const openServiceLogs = async (unit: string) => {
-    try {
-      const res = await fetch(
-        `${API_URL}/api/system/services/${encodeURIComponent(unit)}/logs?lines=200`,
-        { credentials: "include" },
-      );
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error);
-      setServiceLogs({ unit, logs: data.logs });
-    } catch (error: any) {
-      setSystemError(error.message);
-    }
-  };
-
-  const signalProcess = async (pid: number, signal: "SIGTERM" | "SIGKILL") => {
-    if (
-      !(await askConfirm({
-        title: `${signal} tiến trình`,
-        message: `${signal} tiến trình PID ${pid}?`,
-        danger: true,
-        requiredText: signal === "SIGKILL" ? String(pid) : undefined,
-        confirmLabel: signal,
-      }))
-    )
-      return;
-    const toast = notify("loading", `Đang gửi ${signal} tới PID ${pid}...`);
-    try {
-      const res = await fetchWithStepUp(
-        `${API_URL}/api/system/processes/${pid}/signal`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ signal }),
-        },
-      );
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error);
-      await loadSystemData("processes");
-      replaceToast(toast, "success", `Đã gửi ${signal} tới PID ${pid}.`);
-    } catch (error: any) {
-      setSystemError(error.message);
-      replaceToast(toast, "error", error.message);
-    }
-  };
-
-  const stopService = async (unit: string) => {
-    if (
-      await askConfirm({
-        message: `Dừng ${unit}?`,
-        danger: true,
-        confirmLabel: "Dừng service",
-      })
-    )
-      await serviceAction(unit, "stop");
   };
 
   const sqliteRequest = async (endpoint: string, options: RequestInit = {}) => {
@@ -1890,91 +1782,12 @@ export default function Home() {
     }
   };
 
-  // Fetch log history and current preferences
-  const loadLogs = useCallback(
-    async (offset = logOffset) => {
-      if (!sessionReady) return;
-      try {
-        const params = new URLSearchParams({
-          offset: String(offset),
-          limit: "50",
-        });
-        if (logQuery.trim()) params.set("q", logQuery.trim());
-        if (logCategory) params.set("category", logCategory);
-        if (logLevel) params.set("level", logLevel);
-        if (logResult) params.set("result", logResult);
-        const res = await fetch(`${API_URL}/api/logs?${params}`, {
-          credentials: "include",
-        });
-        const data = await res.json();
-        if (data.success) {
-          setLogs(data.logs);
-          setLogTotal(data.total || 0);
-          setLogOffset(offset);
-        }
-      } catch (err) {
-        console.error("Failed to load logs:", err);
-      }
-    },
-    [sessionReady, logOffset, logQuery, logCategory, logLevel, logResult],
-  );
-
-  const exportAuditLogs = async (format: "json" | "csv") => {
-    const params = new URLSearchParams({ format });
-    if (logQuery.trim()) params.set("q", logQuery.trim());
-    if (logCategory) params.set("category", logCategory);
-    if (logLevel) params.set("level", logLevel);
-    if (logResult) params.set("result", logResult);
-    const res = await fetch(`${API_URL}/api/logs/export?${params}`, {
-      credentials: "include",
-    });
-    if (!res.ok) return;
-    const url = URL.createObjectURL(await res.blob());
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `audit-log.${format}`;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const checkLogIntegrity = async () => {
-    const res = await fetch(`${API_URL}/api/logs/integrity`, {
-      credentials: "include",
-    });
-    const data = await res.json();
-    if (data.success) setLogIntegrity(data);
-  };
-
-  const loadMetrics = useCallback(async () => {
-    if (!sessionReady) return;
-    try {
-      const res = await fetch(`${API_URL}/api/metrics`, {
-        credentials: "include",
-      });
-      const data = await res.json();
-      if (data.success) {
-        setCpuPercent(data.cpu);
-        setMemUsedMB(data.memUsedMB);
-        setMemTotalMB(data.memTotalMB);
-        setMemPercent(data.memPercent);
-        setDiskUsedGB(data.diskUsedGB);
-        setDiskTotalGB(data.diskTotalGB);
-        setDiskPercent(data.diskPercent);
-      }
-    } catch {
-      // Silently ignore metrics errors
-    }
-  }, [sessionReady]);
-
   const loadSettings = useCallback(async () => {
     if (!sessionReady) return;
     try {
-      const res = await fetch(`${API_URL}/api/settings`, {
-        credentials: "include",
-      });
-      const data = await res.json();
+      const data = await apiClient.request<{ success: boolean; settings?: { fontSize?: string; theme?: string } }>("/api/settings");
       if (data.success && data.settings) {
-        setFontSize(parseInt(data.settings.fontSize) || 14);
+        setFontSize(parseInt(data.settings.fontSize || "", 10) || 14);
         setTheme(data.settings.theme || "dark-classic");
       }
     } catch (err) {
@@ -1997,13 +1810,10 @@ export default function Home() {
         });
       }
       try {
-        const res = await fetch(`${API_URL}/api/settings`, {
+        const data = await apiClient.request<{ success: boolean }, { fontSize: number; theme: string }>("/api/settings", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify({ fontSize: newSize, theme: newTheme }),
+          body: { fontSize: newSize, theme: newTheme },
         });
-        const data = await res.json();
         if (data.success) {
           if (shouldShowStatus) {
             setSaveStatus("saved");
@@ -2078,7 +1888,7 @@ export default function Home() {
   }, [sessionReady, activeTab, systemView, loadSystemData]);
 
   useEffect(() => {
-    if (!sessionReady || activeTab !== "sqlite") return;
+    if (!sessionReady || !["sqlite", "jobs"].includes(activeTab)) return;
     const timer = setTimeout(() => loadSqliteFiles(), 0);
     return () => clearTimeout(timer);
   }, [sessionReady, activeTab, loadSqliteFiles]);
@@ -2839,18 +2649,6 @@ export default function Home() {
     }, 0);
   }, [fontSize, theme, saveSettings]);
 
-  // Poll system metrics every 5 seconds when authenticated
-  useEffect(() => {
-    if (!isAuthenticated || !sessionReady) return;
-    // Use setTimeout(0) to avoid setState-in-effect lint error
-    const initialTimer = setTimeout(() => loadMetrics(), 0);
-    const interval = setInterval(() => loadMetrics(), 5000);
-    return () => {
-      clearTimeout(initialTimer);
-      clearInterval(interval);
-    };
-  }, [isAuthenticated, sessionReady, loadMetrics]);
-
   useEffect(() => {
     if (!isAuthenticated) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -2873,11 +2671,13 @@ export default function Home() {
           setIsSidebarOpen(false);
         return;
       }
-      if (!editing && event.altKey && /^[1-6]$/.test(event.key)) {
+      if (!editing && event.altKey && /^[1-8]$/.test(event.key)) {
         const tabs: ActiveTab[] = [
+          "overview",
           "terminal",
           "system",
           "sqlite",
+          "jobs",
           "logs",
           "files",
           "settings",
@@ -2891,15 +2691,6 @@ export default function Home() {
           event.preventDefault();
           setActiveTab(tab);
         }
-      }
-      if (
-        (event.ctrlKey || event.metaKey) &&
-        event.key === "Enter" &&
-        activeTab === "sqlite" &&
-        sqliteWorkspace === "sql"
-      ) {
-        event.preventDefault();
-        runSqliteQuery();
       }
     };
     document.addEventListener("keydown", onKeyDown);
@@ -2915,8 +2706,6 @@ export default function Home() {
     confirmPrompt,
     isSidebarOpen,
     currentUser,
-    sqliteSql,
-    selectedSqlite,
   ]);
 
   useEffect(() => {
@@ -2942,22 +2731,29 @@ export default function Home() {
     activeTab === "terminal" ? socketStatus : "idle";
   const paletteActions = [
     {
-      label: "Terminal",
+      label: "Tổng quan",
       hint: "Alt+1",
+      keywords: "overview dashboard metrics observability",
+      allowed: ["admin", "root"].includes(currentUser?.role || ""),
+      run: () => navigateWorkspace("overview"),
+    },
+    {
+      label: "Terminal",
+      hint: "Alt+2",
       keywords: "shell command",
       allowed: ["admin", "root"].includes(currentUser?.role || ""),
       run: () => navigateWorkspace("terminal"),
     },
     {
       label: "Quản trị hệ thống",
-      hint: "Alt+2",
+      hint: "Alt+3",
       keywords: "services processes",
       allowed: ["admin", "root"].includes(currentUser?.role || ""),
       run: () => navigateWorkspace("system"),
     },
     {
       label: "SQLite Studio",
-      hint: "Alt+3",
+      hint: "Alt+4",
       keywords: "database data",
       allowed: ["admin", "root"].includes(currentUser?.role || ""),
       run: () => navigateWorkspace("sqlite"),
@@ -2970,22 +2766,29 @@ export default function Home() {
       run: () => navigateWorkspace("sqlite", "sql"),
     },
     {
+      label: "Tác vụ SQLite",
+      hint: "Alt+5",
+      keywords: "jobs operations backup integrity vacuum queue",
+      allowed: ["admin", "root"].includes(currentUser?.role || ""),
+      run: () => navigateWorkspace("jobs"),
+    },
+    {
       label: "Nhật ký bảo mật",
-      hint: "Alt+4",
+      hint: "Alt+6",
       keywords: "audit logs",
       allowed: ["admin", "root"].includes(currentUser?.role || ""),
       run: () => navigateWorkspace("logs"),
     },
     {
       label: "Quản lý tệp tin",
-      hint: "Alt+5",
+      hint: "Alt+7",
       keywords: "files folders",
       allowed: true,
       run: () => navigateWorkspace("files"),
     },
     {
       label: "Cấu hình",
-      hint: "Alt+6",
+      hint: "Alt+8",
       keywords: "settings security",
       allowed: true,
       run: () => navigateWorkspace("settings"),
@@ -3000,6 +2803,7 @@ export default function Home() {
         if (activeTab === "files") loadFiles(currentPath, null, "none");
         else if (activeTab === "system") loadSystemData();
         else if (activeTab === "sqlite") loadSqliteFiles();
+        else if (activeTab === "jobs") window.dispatchEvent(new Event("jobs:refresh"));
         else if (activeTab === "logs") loadLogs();
       },
     },
@@ -3098,6 +2902,12 @@ export default function Home() {
                 {/* Dynamic Workspace Rendering */}
                 <div className="flex-1 overflow-hidden relative">
                   <AnimatePresence mode="wait">
+                    {activeTab === "overview" &&
+                      currentUser &&
+                      ["admin", "root"].includes(currentUser.role) && (
+                        <OverviewWorkspace onOpenJobs={() => setActiveTab("jobs")} />
+                      )}
+
                     {activeTab === "terminal" &&
                       currentUser &&
                       ["admin", "root"].includes(currentUser.role) && (
@@ -3233,6 +3043,18 @@ export default function Home() {
                             importTable: importSqliteTable,
                             backupAction: sqliteBackupAction,
                           }}
+                        />
+                      )}
+
+                    {activeTab === "jobs" &&
+                      currentUser &&
+                      ["admin", "root"].includes(currentUser.role) && (
+                        <JobsWorkspace
+                          active={activeTab === "jobs"}
+                          role={currentUser.role}
+                          databases={sqliteFiles}
+                          askConfirm={askConfirm}
+                          notify={notify}
                         />
                       )}
 

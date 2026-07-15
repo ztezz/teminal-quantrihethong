@@ -50,6 +50,7 @@ Frontend là static export trong thư mục `out/`. Express, Socket.IO, terminal
 - Argon2id
 - Archiver và Unzipper
 - Wrangler cho Cloudflare static assets
+- Web App Manifest, service worker giới hạn static assets và Playwright
 - LibreOffice cho xem trước tài liệu Office
 
 ## Yêu Cầu
@@ -102,6 +103,9 @@ Mở `http://localhost:3000`.
 | --- | --- | --- |
 | `NEXT_PUBLIC_API_URL` | Frontend | URL HTTPS của backend, production hiện dùng `https://api-ssh.luugame.fun`. Giá trị được đóng vào static bundle lúc `next build`. |
 | `TERMINAL_PASSWORD` | Backend | Mật khẩu khởi tạo khi database chưa có password. Không thay đổi password đã lưu. |
+| `TERMINAL_MAX_SESSIONS_PER_USER` | Backend | Số terminal đồng thời tối đa cho mỗi user, mặc định `3`. |
+| `TERMINAL_IDLE_TIMEOUT_MINUTES` | Backend | Đóng terminal không có input sau số phút này, mặc định `30`; đặt `0` để tắt idle timeout. |
+| `TERMINAL_MAX_LIFETIME_MINUTES` | Backend | Tuổi thọ tối đa bắt buộc của mỗi terminal, mặc định `480` phút. |
 | `BACKEND_PORT` | Backend | Port backend-only, mặc định `3001`. |
 | `FRONTEND_ORIGIN` | Backend | Origin frontend chính xác, ví dụ `https://terminal.example.com`; không có dấu `/` cuối. |
 | `TRUST_PROXY` | Backend | Proxy tin cậy của Express. Đặt `1` khi backend chỉ nằm sau đúng một reverse proxy; để trống nếu truy cập trực tiếp. |
@@ -118,6 +122,9 @@ Mở `http://localhost:3000`.
 | `LIBREOFFICE_PATH` | Backend | Binary LibreOffice, thường là `/usr/bin/libreoffice`. |
 | `OFFICE_MAX_CONCURRENCY` | Backend | Số tác vụ chuyển đổi LibreOffice tối đa chạy đồng thời, mặc định `1`. |
 | `AUTH_ENCRYPTION_KEY` | Backend | Khóa tối thiểu 32 ký tự dùng mã hóa AES-256-GCM cho TOTP secret. Không được thay đổi sau khi bật 2FA. |
+| `AUDIT_RETENTION_DAYS` | Backend | Giữ audit log trong số ngày này, mặc định `90`; `0` tắt giới hạn theo tuổi. Prune chạy khi khởi động và mỗi 6 giờ. |
+| `AUDIT_MAX_ENTRIES` | Backend | Số audit entry tối đa, mặc định `100000`; `0` tắt giới hạn số lượng. Khi prune, chuỗi hash được dựng lại trong một transaction. |
+| `AUDIT_HMAC_KEY` | Backend | Khóa HMAC tùy chọn tối thiểu 32 ký tự cho audit hash. Phải giữ ổn định; khi cấu hình lần đầu, entry SHA-256 cũ được nhận diện và chuyển sang HMAC trong lần prune khởi động. |
 | `TOTP_ISSUER` | Backend | Tên hiển thị trong ứng dụng Authenticator, mặc định `Terminal Admin`. |
 | `NODE_ENV` | Backend | Đặt `production` để bật cookie `Secure`. |
 | `PORT` | Full-stack | Port cho chế độ full-stack, mặc định `3000`. |
@@ -282,6 +289,7 @@ Không dùng OpenNext cho cấu hình hiện tại. Dự án dùng `output: 'exp
 - Socket.IO sử dụng vé một lần hết hạn sau 30 giây.
 - Media và Office preview dùng vé theo từng file, hết hạn sau 60 giây.
 - Backend-only kiểm tra `Origin` đối với request thay đổi dữ liệu.
+- Express và Cloudflare static export gửi CSP, HSTS và các security header tương thích với Next.js, Xterm.js và Socket.IO. API, Socket.IO và service worker không được cache.
 
 Frontend và backend production nên nằm dưới cùng một site, ví dụ:
 
@@ -377,6 +385,47 @@ libreoffice --headless --version
 | `npm run start` | Chạy full-stack bằng TSX. |
 | `npm run deploy` | Build và deploy frontend lên Cloudflare. |
 | `npm run lint` | Chạy ESLint. |
+| `npm test` | Chạy unit test hiện có bằng Node test runner. |
+| `npm run typecheck` | Sinh Next.js route types và kiểm tra TypeScript. |
+| `npm run test:e2e` | Chạy smoke test Playwright với dev app local. |
+| `npm run test:e2e:static` | Build, phục vụ thư mục `out/` và chạy smoke test. |
+
+## Hạ Tầng Frontend
+
+- `lib/client/api.ts` cung cấp `apiClient.request<TResponse, TBody>()`, tự gửi cookie, mã hóa JSON, thêm query string và ném `ApiError` có `status`, `body`, `response`. Khi tích hợp dần vào trang, dùng đường dẫn bắt đầu bằng `/api/`; không đưa token vào URL hoặc JavaScript storage.
+- `lib/client/notifications.ts` kiểm tra/request quyền và hiển thị Web Notification qua service worker nếu có. Chỉ gọi `requestNotificationPermission()` từ thao tác rõ ràng của người dùng; không xin quyền tự động khi tải trang.
+- `lib/client/preferences.ts` đọc, lưu và áp dụng mật độ `comfortable`/`compact` cùng tùy chọn giảm animation lên `data-density` và `data-reduce-animation` của `<html>`. Root layout áp dụng giá trị đã lưu khi client khởi động; workspace có thể dùng các data attribute này trong CSS khi được tích hợp sau.
+- `app/manifest.ts` dùng Metadata API của Next.js và icon SVG `app/icon.svg`, tương thích static export mà không cần image optimization hay route động.
+- `public/sw.js` chỉ cache icon, manifest và `/_next/static/`. Navigation, `/api/`, request khác origin, request không phải GET và nội dung admin động luôn đi qua network, không có offline shell chứa dữ liệu nhạy cảm.
+
+Ví dụ typed API request cho tích hợp sau:
+
+```ts
+import { apiClient, ApiError } from "@/lib/client/api";
+
+type VerifyResponse = {
+  success: boolean;
+  user?: { username: string; role: "viewer" | "operator" | "admin" | "root" };
+};
+
+try {
+  const result = await apiClient.request<VerifyResponse>("/api/auth/verify", {
+    method: "POST",
+  });
+} catch (error) {
+  if (error instanceof ApiError && error.status === 401) {
+    // Hiển thị login screen.
+  }
+}
+```
+
+Smoke test không cần tài khoản: Playwright chặn riêng `/api/auth/verify` và trả về phiên chưa xác thực. Để chạy với app đã có sẵn thay vì tự khởi động dev server:
+
+```bash
+PLAYWRIGHT_BASE_URL=https://terminal.example.com npm run test:e2e
+```
+
+Cài Chromium một lần sau `npm install` bằng `npx playwright install chromium`. CI Linux có thể dùng `npx playwright install --with-deps chromium`.
 
 ## Cập Nhật Production
 
@@ -452,6 +501,7 @@ npm run lint
 npm test
 npm run typecheck
 npm run build
+npm run test:e2e:static
 npm run build:backend
 npx wrangler deploy --dry-run
 ```

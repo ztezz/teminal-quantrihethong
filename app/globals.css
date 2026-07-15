@@ -234,6 +234,28 @@ table {
   backdrop-filter: blur(14px);
 }
 
+html[data-density="compact"] .workspace-screen {
+  --spacing: 0.22rem;
+}
+html[data-density="compact"] .app-panel {
+  border-radius: 12px;
+}
+html[data-density="compact"] .workspace-heading {
+  padding-bottom: 0.65rem;
+}
+html[data-density="compact"] .app-workspace :is(input, select, button) {
+  line-height: 1.15;
+}
+
+html[data-reduce-animation="true"] *,
+html[data-reduce-animation="true"] *::before,
+html[data-reduce-animation="true"] *::after {
+  scroll-behavior: auto !important;
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+}
+
 .app-modal {
   background: linear-gradient(
     145deg,

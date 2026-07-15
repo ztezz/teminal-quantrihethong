@@ -1,0 +1,16 @@
+"use client";
+
+import { useEffect } from "react";
+import { applyUiPreferences } from "@/lib/client/preferences";
+
+export function ServiceWorkerRegistration() {
+  useEffect(() => {
+    applyUiPreferences();
+    if (process.env.NODE_ENV !== "production" || !("serviceWorker" in navigator)) return;
+    navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch((error: unknown) => {
+      console.error("Service worker registration failed", error);
+    });
+  }, []);
+
+  return null;
+}

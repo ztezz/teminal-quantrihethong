@@ -1,0 +1,58 @@
+import { useState } from "react";
+import { apiClient } from "@/lib/client/api";
+import type { OverviewData } from "@/app/components/control-center/types";
+import { useVisibilityPolling } from "./use-visibility-polling";
+
+export interface MetricsData {
+  cpu: number;
+  memUsedMB: number;
+  memTotalMB: number;
+  memPercent: number;
+  diskUsedGB: number;
+  diskTotalGB: number;
+  diskPercent: number;
+}
+
+interface MetricsResponse extends MetricsData {
+  success: true;
+}
+
+export function useMetricsPolling(enabled: boolean) {
+  const [metrics, setMetrics] = useState<MetricsData>({
+    cpu: 0,
+    memUsedMB: 0,
+    memTotalMB: 0,
+    memPercent: 0,
+    diskUsedGB: 0,
+    diskTotalGB: 0,
+    diskPercent: 0,
+  });
+  useVisibilityPolling({
+    enabled,
+    interval: 5_000,
+    request: (signal) => apiClient.request<MetricsResponse>("/api/metrics", { signal }),
+    onData: setMetrics,
+  });
+  return metrics;
+}
+
+export function useOverviewPolling(enabled: boolean) {
+  const [data, setData] = useState<OverviewData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const refresh = useVisibilityPolling({
+    enabled,
+    interval: 15_000,
+    request: (signal) => apiClient.request<OverviewData>("/api/overview", { signal }),
+    onData: (payload) => {
+      setData(payload);
+      setError(null);
+      setLoading(false);
+    },
+    onError: (caught) => {
+      setError(caught instanceof Error ? caught.message : "Không thể tải tổng quan");
+      setLoading(false);
+    },
+  });
+  return { data, loading, error, refresh };
+}

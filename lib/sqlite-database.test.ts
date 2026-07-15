@@ -78,3 +78,44 @@ test('SQLite refuses malformed legacy JSON without renaming it', () => {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('audit pruning rebuilds the retained chain transactionally and preserves increasing ids', async () => {
+  const database = new SqliteDatabase(':memory:');
+  for (let index = 0; index < 5; index++) database.addAudit({ category: 'test', action: String(index), event: `Event ${index}`, level: 'info', result: 'success', ip: '127.0.0.1' });
+  const result = database.pruneAudit({ retentionDays: 0, maxEntries: 3 });
+  assert.deepEqual(result, { pruned: 2, retained: 3 });
+  assert.deepEqual(database.verifyAuditIntegrity(), { valid: true, checked: 3 });
+  assert.deepEqual(database.queryAudit({ offset: 0, limit: 10 }).items.map(entry => entry.id), [5, 4, 3]);
+  database.addAudit({ category: 'test', action: 'next', event: 'Next', level: 'info', result: 'success', ip: '127.0.0.1' });
+  assert.equal(database.queryAudit({ offset: 0, limit: 1 }).items[0].id, 6);
+  database.close();
+});
+
+test('audit HMAC detects legacy hashes and rebuilds them during retention', () => {
+  const database = new SqliteDatabase(':memory:');
+  database.addAudit({ category: 'test', action: 'legacy', event: 'Legacy', level: 'info', result: 'success', ip: '127.0.0.1' });
+  const rows = database.queryAudit({ offset: 0, limit: 10 }).items;
+  database.close();
+
+  const keyed = new SqliteDatabase(':memory:', undefined, 60_000, 'k'.repeat(32));
+  const entry = rows[0];
+  keyed.run('INSERT INTO audit_logs (id, category, action, event, level, result, ip, session_id, metadata, timestamp, previous_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', entry.id, entry.category, entry.action, entry.event, entry.level, entry.result, entry.ip, null, null, entry.timestamp, entry.previousHash, entry.hash);
+  assert.deepEqual(keyed.verifyAuditIntegrity(), { valid: true, checked: 1, legacyUnkeyed: 1 });
+  keyed.pruneAudit({ retentionDays: 0, maxEntries: 0 });
+  assert.deepEqual(keyed.verifyAuditIntegrity(), { valid: true, checked: 1, legacyUnkeyed: 0 });
+  keyed.close();
+});
+
+test('audit retention applies age and count limits and refuses a broken chain', async () => {
+  const database = new SqliteDatabase(':memory:');
+  for (let index = 0; index < 4; index++) database.addAudit({ category: 'test', action: String(index), event: `Event ${index}`, level: 'info', result: 'success', ip: '127.0.0.1' });
+  await database.run('UPDATE audit_logs SET timestamp = ? WHERE id <= 2', '2020-01-01T00:00:00.000Z');
+  assert.throws(() => database.pruneAudit({ retentionDays: 30, maxEntries: 1, now: new Date('2026-07-15T00:00:00.000Z') }), /invalid audit chain/);
+
+  database.close();
+  const valid = new SqliteDatabase(':memory:');
+  for (let index = 0; index < 4; index++) valid.addAudit({ category: 'test', action: String(index), event: `Event ${index}`, level: 'info', result: 'success', ip: '127.0.0.1' });
+  assert.deepEqual(valid.pruneAudit({ retentionDays: 1, maxEntries: 0, now: new Date('2030-01-01T00:00:00.000Z') }), { pruned: 4, retained: 0 });
+  assert.deepEqual(valid.verifyAuditIntegrity(), { valid: true, checked: 0 });
+  valid.close();
+});

@@ -24,8 +24,11 @@ const parseJson = <T>(value: unknown, fallback: T): T => {
 
 export class SqliteDatabase {
   private readonly database: DatabaseSync;
+  private readonly auditHmacKey?: string;
 
-  constructor(private readonly filename: string, legacyJsonFile?: string, private readonly sessionTtlMs = 12 * 60 * 60 * 1000) {
+  constructor(private readonly filename: string, legacyJsonFile?: string, private readonly sessionTtlMs = 12 * 60 * 60 * 1000, auditHmacKey?: string) {
+    if (auditHmacKey && auditHmacKey.length < 32) throw new Error('AUDIT_HMAC_KEY must contain at least 32 characters');
+    this.auditHmacKey = auditHmacKey;
     const databaseExisted = filename !== ':memory:' && fs.existsSync(filename);
     this.database = new DatabaseSync(filename);
     try {
@@ -147,12 +150,18 @@ export class SqliteDatabase {
     return { id: Number(row.id), category: String(row.category), action: String(row.action), event: String(row.event), level: row.level as AuditLevel, result: row.result as AuditResult, ip: String(row.ip), sessionId: row.session_id ? String(row.session_id) : undefined, metadata: parseJson<Record<string, unknown> | undefined>(row.metadata, undefined), timestamp: String(row.timestamp), previousHash: String(row.previous_hash), hash: String(row.hash) };
   }
 
+  private auditHash(base: Omit<AuditEntry, 'hash'>, keyed = Boolean(this.auditHmacKey)) {
+    const hash = keyed ? crypto.createHmac('sha256', this.auditHmacKey!) : crypto.createHash('sha256');
+    return hash.update(JSON.stringify(base)).digest('hex');
+  }
+
   addAudit(entry: Omit<AuditEntry, 'id' | 'timestamp' | 'previousHash' | 'hash'>) {
     this.database.exec('BEGIN IMMEDIATE');
     try {
       const previous = this.database.prepare('SELECT id, hash FROM audit_logs ORDER BY id DESC LIMIT 1').get() as { id: number; hash: string } | undefined;
-      const base = { id: Number(previous?.id || 0) + 1, ...entry, timestamp: new Date().toISOString(), previousHash: previous?.hash || '' };
-      const hash = crypto.createHash('sha256').update(JSON.stringify(base)).digest('hex');
+      const sequence = this.database.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'audit_logs'").get() as { seq: number } | undefined;
+      const base = { id: Math.max(Number(previous?.id || 0), Number(sequence?.seq || 0)) + 1, ...entry, timestamp: new Date().toISOString(), previousHash: previous?.hash || '' };
+      const hash = this.auditHash(base);
       this.database.prepare('INSERT INTO audit_logs (id, category, action, event, level, result, ip, session_id, metadata, timestamp, previous_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(base.id, base.category, base.action, base.event, base.level, base.result, base.ip, base.sessionId ?? null, base.metadata ? JSON.stringify(base.metadata) : null, base.timestamp, base.previousHash, hash);
       this.database.exec('COMMIT');
     } catch (error) { this.database.exec('ROLLBACK'); throw error; }
@@ -169,15 +178,44 @@ export class SqliteDatabase {
   }
 
   verifyAuditIntegrity() {
-    let checked = 0; let previousHash = '';
+    let checked = 0; let previousHash = ''; let legacyUnkeyed = 0;
     const entries = (this.database.prepare('SELECT * FROM audit_logs ORDER BY id').all() as Record<string, unknown>[]).map(row => this.rowToAudit(row));
     for (const entry of entries) {
       if (!entry.hash) continue;
       const { hash, ...base } = entry;
-      if (entry.previousHash !== previousHash || crypto.createHash('sha256').update(JSON.stringify(base)).digest('hex') !== hash) return { valid: false, checked, brokenAt: entry.id };
+      const keyedValid = Boolean(this.auditHmacKey) && this.auditHash(base, true) === hash;
+      const unkeyedValid = this.auditHash(base, false) === hash;
+      if (entry.previousHash !== previousHash || !keyedValid && !unkeyedValid) return { valid: false, checked, brokenAt: entry.id, ...(this.auditHmacKey ? { legacyUnkeyed } : {}) };
+      if (this.auditHmacKey && unkeyedValid) legacyUnkeyed++;
       previousHash = hash; checked++;
     }
-    return { valid: true, checked };
+    return { valid: true, checked, ...(this.auditHmacKey ? { legacyUnkeyed } : {}) };
+  }
+
+  pruneAudit(options: { retentionDays: number; maxEntries: number; now?: Date }) {
+    const integrity = this.verifyAuditIntegrity();
+    if (!integrity.valid) throw new Error(`Cannot prune an invalid audit chain (broken at entry ${'brokenAt' in integrity ? integrity.brokenAt : 'unknown'})`);
+    const cutoff = options.retentionDays > 0 ? (options.now || new Date()).getTime() - options.retentionDays * 86_400_000 : -Infinity;
+    let retained = (this.database.prepare('SELECT * FROM audit_logs ORDER BY id').all() as Record<string, unknown>[]).map(row => this.rowToAudit(row));
+    if (options.retentionDays > 0) retained = retained.filter(entry => new Date(entry.timestamp).getTime() >= cutoff);
+    if (options.maxEntries > 0 && retained.length > options.maxEntries) retained = retained.slice(-options.maxEntries);
+    const total = Number((this.database.prepare('SELECT COUNT(*) AS count FROM audit_logs').get() as { count: number }).count);
+    if (retained.length === total && (!this.auditHmacKey || (integrity.legacyUnkeyed || 0) === 0)) return { pruned: 0, retained: total };
+
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      this.database.exec('DELETE FROM audit_logs');
+      const insert = this.database.prepare('INSERT INTO audit_logs (id, category, action, event, level, result, ip, session_id, metadata, timestamp, previous_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+      let previousHash = '';
+      for (const entry of retained) {
+        const base = { ...entry, previousHash }; delete (base as Partial<AuditEntry>).hash;
+        const hash = this.auditHash(base as Omit<AuditEntry, 'hash'>);
+        insert.run(base.id!, base.category!, base.action!, base.event!, base.level!, base.result!, base.ip!, base.sessionId ?? null, base.metadata ? JSON.stringify(base.metadata) : null, base.timestamp!, previousHash, hash);
+        previousHash = hash;
+      }
+      this.database.exec('COMMIT');
+      return { pruned: total - retained.length, retained: retained.length };
+    } catch (error) { this.database.exec('ROLLBACK'); throw error; }
   }
 
   addSession(token: string, userId: string, ip = 'unknown', userAgent = 'unknown') {
@@ -191,6 +229,7 @@ export class SqliteDatabase {
   removeSessionById(id: string) { this.database.prepare('DELETE FROM sessions WHERE token_hash LIKE ?').run(`${id}%`); }
   getSessions() { return (this.database.prepare('SELECT * FROM sessions WHERE expires_at > ? ORDER BY created_at DESC').all(Date.now()) as Record<string, unknown>[]).map(row => this.rowToSession(row)); }
   getSession(token: string) { const row = this.database.prepare('SELECT * FROM sessions WHERE token_hash = ? AND expires_at > ?').get(crypto.createHash('sha256').update(token).digest('hex'), Date.now()) as Record<string, unknown> | undefined; return row ? this.rowToSession(row) : undefined; }
+  getSessionByHash(tokenHash: string) { const row = this.database.prepare('SELECT * FROM sessions WHERE token_hash = ? AND expires_at > ?').get(tokenHash, Date.now()) as Record<string, unknown> | undefined; return row ? this.rowToSession(row) : undefined; }
   getUsers() { return (this.database.prepare('SELECT * FROM users ORDER BY created_at').all() as Record<string, unknown>[]).map(row => this.rowToUser(row)); }
   getUserById(id: string) { const row = this.database.prepare('SELECT * FROM users WHERE id = ?').get(id) as Record<string, unknown> | undefined; return row ? this.rowToUser(row) : undefined; }
   getUserByName(username: string) { const row = this.database.prepare('SELECT * FROM users WHERE username = ? COLLATE NOCASE').get(username) as Record<string, unknown> | undefined; return row ? this.rowToUser(row) : undefined; }

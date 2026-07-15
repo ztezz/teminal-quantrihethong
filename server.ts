@@ -10,8 +10,14 @@ import dotenv from 'dotenv';
 import * as pty from 'node-pty';
 import { createFileManagerRouter } from './lib/file-manager-router';
 import { createSqliteManagerRouter } from './lib/sqlite-manager-router';
+import { JobManager } from './lib/job-manager';
+import { createOperationsRouter } from './lib/operations-router';
 import { escapeCsvCell, validateRuntimeConfig } from './lib/security-utils';
 import { SqliteDatabase, type AuditEntry, type AuditLevel, type AuditResult, type Role, type StoredSession, type StoredUser } from './lib/sqlite-database';
+import { RequestMetricsCollector } from './lib/observability';
+import { collectHostMetrics, collectSqliteHealth, collectSystemSummary } from './lib/overview';
+import { TerminalSessionRegistry } from './lib/terminal-session-registry';
+import { hasCapability, type Capability } from './lib/capabilities';
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
@@ -30,6 +36,7 @@ const FILE_MANAGER_SNAPSHOT_DIR = path.resolve(process.env.FILE_MANAGER_SNAPSHOT
 const SQLITE_MANAGER_ROOT = path.resolve(process.env.SQLITE_MANAGER_ROOT || FILE_MANAGER_ROOT);
 const SQLITE_BROWSER_ROOT = path.resolve(process.env.SQLITE_BROWSER_ROOT || path.parse(process.cwd()).root);
 const SQLITE_BACKUP_DIR = path.resolve(process.env.SQLITE_BACKUP_DIR || path.join(SQLITE_MANAGER_ROOT, '.terminal-sqlite-backups'));
+const JOB_DATA_DIR = path.resolve(process.env.JOB_DATA_DIR || path.join(process.cwd(), '.terminal-jobs'));
 const SESSION_COOKIE = 'terminal_session';
 const STEP_UP_COOKIE = 'terminal_step_up';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -78,6 +85,13 @@ function requireRole(req: express.Request, res: express.Response, minimum: Role)
   return context;
 }
 
+function requireCapability(req: express.Request, res: express.Response, capability: Capability) {
+  const context = authContext(req);
+  if (!context) { res.status(401).json({ success: false, error: 'Unauthorized' }); return null; }
+  if (!hasCapability(context.user.role, capability)) { res.status(403).json({ success: false, error: 'Bạn không có quyền thực hiện thao tác này' }); return null; }
+  return context;
+}
+
 function setSessionCookie(res: express.Response, token: string) {
   const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
   res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL_MS / 1000}${secure}`);
@@ -104,7 +118,7 @@ function hasStepUp(req: express.Request): boolean {
 }
 
 const previewTickets = new Map<string, { path: string; expiresAt: number; remainingUses: number }>();
-const socketTickets = new Map<string, { expiresAt: number; userId: string }>();
+const socketTickets = new Map<string, { expiresAt: number; userId: string; sessionHash: string }>();
 const loginChallenges = new Map<string, { expiresAt: number; ip: string; userAgent: string; userId: string }>();
 function createTicket<T extends { expiresAt: number }>(store: Map<string, T>, value: T): string {
   const now = Date.now();
@@ -121,10 +135,10 @@ function consumePreviewTicket(ticket: string, filePath: string): boolean {
   if (entry.remainingUses <= 0) previewTickets.delete(ticket);
   return true;
 }
-function consumeSocketTicket(ticket: string): string | null {
+function consumeSocketTicket(ticket: string): { userId: string; sessionHash: string } | null {
   const entry = socketTickets.get(ticket);
   socketTickets.delete(ticket);
-  return entry && entry.expiresAt > Date.now() ? entry.userId : null;
+  return entry && entry.expiresAt > Date.now() ? { userId: entry.userId, sessionHash: entry.sessionHash } : null;
 }
 
 async function verifyPassword(password: string, user?: StoredUser): Promise<boolean> {
@@ -248,7 +262,7 @@ function hashPassword(password: string, salt: string): string {
 }
 
 async function initializeDatabase() {
-  db = new SqliteDatabase(DB_FILE, LEGACY_DB_FILE, SESSION_TTL_MS);
+  db = new SqliteDatabase(DB_FILE, LEGACY_DB_FILE, SESSION_TTL_MS, process.env.AUDIT_HMAC_KEY);
 
   // New installations must receive an explicit password; there is no shared fallback credential.
   const dbPasswordHash = await db.get('SELECT value FROM settings WHERE key = ?', 'password_hash');
@@ -310,6 +324,7 @@ async function startServer() {
   const trustProxy = process.env.TRUST_PROXY?.trim();
   if (trustProxy) expressApp.set('trust proxy', /^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy);
   const httpServer = createServer(expressApp);
+  const requestMetrics = new RequestMetricsCollector();
   const authKeyLength = process.env.AUTH_ENCRYPTION_KEY?.length || 0;
   console.log(`[SECURITY] AUTH_ENCRYPTION_KEY: ${authKeyLength >= 32 ? 'configured' : authKeyLength ? `invalid (${authKeyLength} characters)` : 'missing'}`);
   
@@ -322,16 +337,29 @@ async function startServer() {
     }
   });
 
-  expressApp.use(express.json({ limit: '2mb' }));
   expressApp.disable('x-powered-by');
-  expressApp.use((_req, res, nextMiddleware) => {
+  expressApp.use((req, res, nextMiddleware) => {
+    const requestId = crypto.randomUUID();
+    const startedAt = process.hrtime.bigint();
+    const completeRequest = req.path.startsWith('/api/') ? requestMetrics.start() : null;
+    res.setHeader('X-Request-ID', requestId);
+    res.locals.requestId = requestId;
+    res.once('finish', () => completeRequest?.({
+      method: req.method,
+      path: req.path,
+      statusCode: res.statusCode,
+      durationMs: Number(process.hrtime.bigint() - startedAt) / 1_000_000
+    }));
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
     res.setHeader('Cross-Origin-Resource-Policy', 'same-site');
+    res.setHeader('Content-Security-Policy', `default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'${dev ? " 'unsafe-eval'" : ''}; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: https:; font-src 'self' data:; connect-src 'self' https: wss:; worker-src 'self' blob:; manifest-src 'self'`);
+    if (!dev) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
     nextMiddleware();
   });
+  expressApp.use(express.json({ limit: '2mb' }));
 
   if (backendOnly) {
     const allowedOrigin = runtimeConfig.frontendOrigin!;
@@ -341,6 +369,7 @@ async function startServer() {
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-File-Name, X-Directory');
+      res.setHeader('Access-Control-Expose-Headers', 'X-Request-ID');
       if (req.method === 'OPTIONS') return res.sendStatus(204);
       if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && req.headers.origin !== allowedOrigin) return res.status(403).json({ success: false, error: 'Invalid request origin' });
       nextMiddleware();
@@ -358,9 +387,101 @@ async function startServer() {
     throw err;
   }
 
+  const numberConfig = (name: string, fallback: number) => {
+    const raw = process.env[name]?.trim();
+    if (!raw) return fallback;
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value < 0) throw new Error(`${name} must be a non-negative integer`);
+    return value;
+  };
+  const auditRetentionDays = numberConfig('AUDIT_RETENTION_DAYS', 90);
+  const auditMaxEntries = numberConfig('AUDIT_MAX_ENTRIES', 100_000);
+  const pruneAudit = () => {
+    try {
+      const result = db.pruneAudit({ retentionDays: auditRetentionDays, maxEntries: auditMaxEntries });
+      if (result.pruned) console.log(`[AUDIT] Pruned ${result.pruned} entries; ${result.retained} retained.`);
+    } catch (error) { console.error('[AUDIT] Retention prune skipped:', error); }
+  };
+  pruneAudit();
+  const auditPruneTimer = setInterval(pruneAudit, 6 * 60 * 60 * 1000);
+  auditPruneTimer.unref();
+  const scheduledDatabases = (process.env.SQLITE_SCHEDULED_DATABASES || '').split(',').map(value => value.trim()).filter(Boolean);
+  const jobManager = await JobManager.create({
+    dataDir: JOB_DATA_DIR,
+    sqliteRoot: SQLITE_MANAGER_ROOT,
+    sqliteBrowserRoot: SQLITE_BROWSER_ROOT,
+    sqliteBackupDir: SQLITE_BACKUP_DIR,
+    historyLimit: numberConfig('JOB_HISTORY_LIMIT', 200),
+    backupRetentionCount: numberConfig('SQLITE_BACKUP_RETENTION_COUNT', 10),
+    alertWebhookUrl: process.env.ALERT_WEBHOOK_URL,
+    alertWebhookHosts: (process.env.ALERT_WEBHOOK_HOSTS || '').split(',').map(value => value.trim()).filter(Boolean),
+    production: !dev
+  });
+  jobManager.startSchedule(numberConfig('SQLITE_BACKUP_SCHEDULE_MINUTES', 0), scheduledDatabases);
+  const terminalRegistry = new TerminalSessionRegistry({
+    maxSessionsPerUser: numberConfig('TERMINAL_MAX_SESSIONS_PER_USER', 3),
+    idleTimeoutMs: numberConfig('TERMINAL_IDLE_TIMEOUT_MINUTES', 30) * 60_000,
+    maxLifetimeMs: numberConfig('TERMINAL_MAX_LIFETIME_MINUTES', 480) * 60_000
+  });
+
   expressApp.get('/readyz', (_req, res) => db?.ping() ? res.json({ status: 'ready' }) : res.status(503).json({ status: 'unavailable' }));
 
   // --- API Routes ---
+
+  let overviewCache: { expiresAt: number; host: Awaited<ReturnType<typeof collectHostMetrics>>; system: Awaited<ReturnType<typeof collectSystemSummary>>; databases: Awaited<ReturnType<typeof collectSqliteHealth>> } | null = null;
+  async function collectOverviewInfrastructure() {
+    if (overviewCache && overviewCache.expiresAt > Date.now()) return overviewCache;
+    const [host, system, databases] = await Promise.all([
+      collectHostMetrics(),
+      collectSystemSummary(),
+      collectSqliteHealth(SQLITE_MANAGER_ROOT, DB_FILE)
+    ]);
+    overviewCache = { expiresAt: Date.now() + 15_000, host, system, databases };
+    return overviewCache;
+  }
+
+  expressApp.get('/api/observability', async (req, res) => {
+    if (!requireCapability(req, res, 'overview:read')) return;
+    try {
+      const { host } = await collectOverviewInfrastructure();
+      return res.json({
+        success: true,
+        generatedAt: new Date().toISOString(),
+        application: { uptimeSeconds: Math.floor(process.uptime()), startedAt: new Date(Date.now() - process.uptime() * 1000).toISOString() },
+        host,
+        api: requestMetrics.snapshot(),
+        terminalConnections: io.sockets.sockets.size
+      });
+    } catch (error: any) { return res.status(500).json({ success: false, error: error.message }); }
+  });
+
+  expressApp.get('/api/overview', async (req, res) => {
+    if (!requireCapability(req, res, 'overview:read')) return;
+    try {
+      const [{ host, system, databases }, critical, warning, recent] = await Promise.all([
+        collectOverviewInfrastructure(),
+        Promise.resolve(db.queryAudit({ level: 'critical', offset: 0, limit: 1 }).total),
+        Promise.resolve(db.queryAudit({ level: 'warning', offset: 0, limit: 1 }).total),
+        Promise.resolve(db.queryAudit({ offset: 0, limit: 8 }).items)
+      ]);
+      return res.json({
+        success: true,
+        generatedAt: new Date().toISOString(),
+        application: { uptimeSeconds: Math.floor(process.uptime()), startedAt: new Date(Date.now() - process.uptime() * 1000).toISOString() },
+        host,
+        system,
+        audit: {
+          critical,
+          warning,
+          recent: recent.map(({ id, category, action, event, level, result, timestamp }) => ({ id, category, action, event, level, result, timestamp }))
+        },
+        sessions: { active: db.getSessions().length },
+        databases,
+        api: requestMetrics.snapshot(),
+        terminalConnections: io.sockets.sockets.size
+      });
+    } catch (error: any) { return res.status(500).json({ success: false, error: error.message }); }
+  });
 
   // Auth check & login endpoint
   expressApp.post('/api/auth', async (req, res) => {
@@ -428,7 +549,7 @@ async function startServer() {
   // Fetch log history
   expressApp.get('/api/logs', async (req, res) => {
     try {
-      if (!requireRole(req, res, 'admin')) return;
+      if (!requireCapability(req, res, 'audit:read')) return;
 
       const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
       const offset = Math.max(0, Number(req.query.offset) || 0);
@@ -440,7 +561,7 @@ async function startServer() {
   });
 
   expressApp.get('/api/logs/export', (req, res) => {
-    if (!requireRole(req, res, 'admin')) return;
+    if (!requireCapability(req, res, 'audit:read')) return;
     const items = db.queryAudit({ query: typeof req.query.q === 'string' ? req.query.q : undefined, category: typeof req.query.category === 'string' ? req.query.category : undefined, level: typeof req.query.level === 'string' ? req.query.level : undefined, result: typeof req.query.result === 'string' ? req.query.result : undefined, offset: 0, limit: 20_000 }).items;
     if (req.query.format === 'csv') {
       const csv = ['timestamp,category,action,level,result,ip,sessionId,event,metadata', ...items.map((entry: AuditEntry) => [entry.timestamp, entry.category, entry.action, entry.level, entry.result, entry.ip, entry.sessionId, entry.event, JSON.stringify(entry.metadata || {})].map(escapeCsvCell).join(','))].join('\n');
@@ -450,7 +571,7 @@ async function startServer() {
   });
 
   expressApp.get('/api/logs/integrity', (req, res) => {
-    if (!requireRole(req, res, 'admin')) return;
+    if (!requireCapability(req, res, 'audit:read')) return;
     return res.json({ success: true, ...db.verifyAuditIntegrity() });
   });
 
@@ -518,6 +639,7 @@ async function startServer() {
       const newHash = await argon2.hash(newPassword, { type: argon2.argon2id });
       context.user.passwordHash = newHash; db.saveUser(context.user);
       db.clearUserSessions(context.user.id);
+      terminalRegistry.disconnectUser(context.user.id, 'password changed');
       const nextToken = crypto.randomBytes(32).toString('hex');
       const info = requestInfo(req); db.addSession(nextToken, context.user.id, info.ip, info.userAgent);
       setSessionCookie(res, nextToken);
@@ -538,42 +660,17 @@ async function startServer() {
         return res.status(401).json({ success: false, error: 'Unauthorized' });
       }
 
-      const totalMem = os.totalmem();
-      const freeMem = os.freemem();
-      const usedMem = totalMem - freeMem;
-      const memPercent = Math.round((usedMem / totalMem) * 100);
-      const diskPath = path.parse(process.cwd()).root;
-      const disk = await fs.promises.statfs(diskPath);
-      const diskTotal = Number(disk.blocks) * Number(disk.bsize);
-      const diskFree = Number(disk.bavail) * Number(disk.bsize);
-      const diskUsed = diskTotal - diskFree;
-
-      // CPU usage: compare idle/total across a 200ms interval
-      function getCpuTimes() {
-        const cpus = os.cpus();
-        let idle = 0, total = 0;
-        for (const cpu of cpus) {
-          for (const val of Object.values(cpu.times)) total += val;
-          idle += cpu.times.idle;
-        }
-        return { idle, total };
-      }
-      const t1 = getCpuTimes();
-      await new Promise(r => setTimeout(r, 200));
-      const t2 = getCpuTimes();
-      const idleDiff = t2.idle - t1.idle;
-      const totalDiff = t2.total - t1.total;
-      const cpuPercent = totalDiff === 0 ? 0 : Math.round((1 - idleDiff / totalDiff) * 100);
+      const metrics = await collectHostMetrics();
 
       return res.json({
         success: true,
-        cpu: cpuPercent,
-        memUsedMB: Math.round(usedMem / 1024 / 1024),
-        memTotalMB: Math.round(totalMem / 1024 / 1024),
-        memPercent,
-        diskUsedGB: Math.round(diskUsed / 1024 / 1024 / 1024 * 10) / 10,
-        diskTotalGB: Math.round(diskTotal / 1024 / 1024 / 1024 * 10) / 10,
-        diskPercent: diskTotal === 0 ? 0 : Math.round(diskUsed / diskTotal * 100)
+        cpu: metrics.cpu,
+        memUsedMB: metrics.memory.usedMB,
+        memTotalMB: metrics.memory.totalMB,
+        memPercent: metrics.memory.percent,
+        diskUsedGB: metrics.disk.usedGB,
+        diskTotalGB: metrics.disk.totalGB,
+        diskPercent: metrics.disk.percent
       });
     } catch (error: any) {
       return res.status(500).json({ success: false, error: error.message });
@@ -585,7 +682,9 @@ async function startServer() {
     try {
       const token = sessionToken(req);
       if (token) {
+        const sessionHash = crypto.createHash('sha256').update(token).digest('hex');
         db.removeSession(token);
+        terminalRegistry.disconnectSession(sessionHash, 'logout');
         const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
         audit({ category: 'auth', action: 'logout', event: 'User logged out', ip: clientIp });
       }
@@ -597,8 +696,8 @@ async function startServer() {
   });
 
   expressApp.post('/api/auth/socket-ticket', (req, res) => {
-    const context = requireRole(req, res, 'admin'); if (!context) return;
-    return res.json({ success: true, ticket: createTicket(socketTickets, { expiresAt: Date.now() + 30_000, userId: context.user.id }) });
+    const context = requireCapability(req, res, 'terminal:use'); if (!context) return;
+    return res.json({ success: true, ticket: createTicket(socketTickets, { expiresAt: Date.now() + 30_000, userId: context.user.id, sessionHash: context.session.tokenHash }) });
   });
 
   expressApp.post('/api/auth/preview-ticket', (req, res) => {
@@ -683,6 +782,7 @@ async function startServer() {
     const target = db.getSessions().find((session: StoredSession) => session.tokenHash.startsWith(req.params.id));
     if (!target || context.user.role !== 'root' && target.userId !== context.user.id) return res.status(404).json({ success: false, error: 'Không tìm thấy phiên' });
     db.removeSessionById(req.params.id);
+    terminalRegistry.disconnectSession(target.tokenHash, 'session revoked');
     auditRequest(req, { category: 'security', action: 'session_revoke', event: 'Session revoked', level: 'warning', metadata: { sessionId: req.params.id } });
     return res.json({ success: true });
   });
@@ -690,8 +790,8 @@ async function startServer() {
   expressApp.delete('/api/security/sessions', (req, res) => {
     const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
     const currentToken = sessionToken(req); const info = requestInfo(req);
-    if (context.user.role === 'root') { db.clearSessions(); db.addSession(currentToken, context.user.id, info.ip, info.userAgent); }
-    else { db.clearUserSessions(context.user.id); db.addSession(currentToken, context.user.id, info.ip, info.userAgent); }
+    if (context.user.role === 'root') { db.clearSessions(); db.addSession(currentToken, context.user.id, info.ip, info.userAgent); terminalRegistry.disconnectAll('all sessions revoked', context.session.tokenHash); }
+    else { db.clearUserSessions(context.user.id); db.addSession(currentToken, context.user.id, info.ip, info.userAgent); terminalRegistry.disconnectUser(context.user.id, 'all sessions revoked', context.session.tokenHash); }
     auditRequest(req, { category: 'security', action: 'sessions_revoke_others', event: 'All other sessions revoked', level: 'warning' });
     return res.json({ success: true });
   });
@@ -717,8 +817,9 @@ async function startServer() {
     if (user.id === 'root' && (req.body.role && req.body.role !== 'root' || req.body.enabled === false)) return res.status(400).json({ success: false, error: 'Không thể khóa hoặc hạ quyền tài khoản root' });
     if (req.body.role !== undefined) { if (!['viewer', 'operator', 'admin', 'root'].includes(req.body.role)) return res.status(400).json({ success: false, error: 'Vai trò không hợp lệ' }); user.role = req.body.role; }
     if (req.body.enabled !== undefined) user.enabled = Boolean(req.body.enabled);
-    if (req.body.password !== undefined) { if (String(req.body.password).length < 12) return res.status(400).json({ success: false, error: 'Mật khẩu phải có ít nhất 12 ký tự' }); user.passwordHash = await argon2.hash(String(req.body.password), { type: argon2.argon2id }); db.clearUserSessions(user.id); }
+    if (req.body.password !== undefined) { if (String(req.body.password).length < 12) return res.status(400).json({ success: false, error: 'Mật khẩu phải có ít nhất 12 ký tự' }); user.passwordHash = await argon2.hash(String(req.body.password), { type: argon2.argon2id }); db.clearUserSessions(user.id); terminalRegistry.disconnectUser(user.id, 'password reset'); }
     db.saveUser(user); auditRequest(req, { category: 'security', action: 'user_update', event: 'User updated', level: 'critical', metadata: { target: user.username, role: user.role, enabled: user.enabled } });
+    if (!user.enabled) { db.clearUserSessions(user.id); terminalRegistry.disconnectUser(user.id, 'user disabled'); }
     return res.json({ success: true });
   });
 
@@ -726,12 +827,12 @@ async function startServer() {
     if (!requireRole(req, res, 'root')) return;
     const user = db.getUserById(req.params.id); if (!user) return res.status(404).json({ success: false, error: 'Không tìm thấy user' });
     if (user.id === 'root') return res.status(400).json({ success: false, error: 'Không thể xóa tài khoản root' });
-    db.deleteUser(user.id); auditRequest(req, { category: 'security', action: 'user_delete', event: 'User deleted', level: 'critical', metadata: { target: user.username } });
+    terminalRegistry.disconnectUser(user.id, 'user deleted'); db.deleteUser(user.id); auditRequest(req, { category: 'security', action: 'user_delete', event: 'User deleted', level: 'critical', metadata: { target: user.username } });
     return res.json({ success: true });
   });
 
   expressApp.get('/api/system/services', async (req, res) => {
-    if (!requireRole(req, res, 'admin')) return;
+    if (!requireCapability(req, res, 'system:manage')) return;
     try {
       const { stdout } = await runSystemCommand('systemctl', ['list-units', '--type=service', '--all', '--no-legend', '--no-pager', '--plain']);
       const services = stdout.split(/\r?\n/).filter(Boolean).map(line => {
@@ -744,7 +845,7 @@ async function startServer() {
   });
 
   expressApp.get('/api/system/services/:unit/logs', async (req, res) => {
-    if (!requireRole(req, res, 'admin')) return;
+    if (!requireCapability(req, res, 'system:manage')) return;
     if (!validUnitName(req.params.unit)) return res.status(400).json({ success: false, error: 'Tên service không hợp lệ' });
     try {
       const lines = Math.min(500, Math.max(10, Number(req.query.lines) || 100));
@@ -754,7 +855,7 @@ async function startServer() {
   });
 
   expressApp.post('/api/system/services/:unit/action', async (req, res) => {
-    const context = requireRole(req, res, 'admin'); if (!context) return;
+    const context = requireCapability(req, res, 'system:manage'); if (!context) return;
     if (!hasStepUp(req)) return res.status(428).json({ success: false, code: 'STEP_UP_REQUIRED', error: 'Điều khiển service yêu cầu xác nhận lại danh tính' });
     const action = req.body?.action; if (!validUnitName(req.params.unit) || !['start', 'stop', 'restart', 'enable', 'disable'].includes(action)) return res.status(400).json({ success: false, error: 'Service hoặc hành động không hợp lệ' });
     if (['stop', 'disable'].includes(action) && context.user.role !== 'root') return res.status(403).json({ success: false, error: 'Chỉ root được dừng hoặc disable service' });
@@ -766,7 +867,7 @@ async function startServer() {
   });
 
   expressApp.get('/api/system/processes', async (req, res) => {
-    const context = requireRole(req, res, 'admin'); if (!context) return;
+    const context = requireCapability(req, res, 'system:manage'); if (!context) return;
     try {
       const { stdout } = await runSystemCommand('ps', ['-eo', 'pid=,ppid=,user=,%cpu=,%mem=,rss=,etime=,args=', '--sort=-%cpu']);
       const processes = stdout.split(/\r?\n/).filter(Boolean).slice(0, 500).map(line => {
@@ -778,7 +879,7 @@ async function startServer() {
   });
 
   expressApp.post('/api/system/processes/:pid/signal', async (req, res) => {
-    const context = requireRole(req, res, 'admin'); if (!context) return;
+    const context = requireCapability(req, res, 'system:manage'); if (!context) return;
     if (!hasStepUp(req)) return res.status(428).json({ success: false, code: 'STEP_UP_REQUIRED', error: 'Gửi signal yêu cầu xác nhận lại danh tính' });
     const pid = Number(req.params.pid); const signal = req.body?.signal;
     if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid || !['SIGTERM', 'SIGKILL'].includes(signal)) return res.status(400).json({ success: false, error: 'PID hoặc signal không hợp lệ' });
@@ -800,7 +901,7 @@ async function startServer() {
   }));
 
   expressApp.use('/api/sqlite', createSqliteManagerRouter({
-    authorize: (req, res, minimum) => Boolean(requireRole(req, res, minimum)),
+    authorize: (req, res, minimum) => Boolean(requireCapability(req, res, minimum === 'root' ? 'sqlite:dangerous' : 'sqlite:manage')),
     hasStepUp,
     rootDir: SQLITE_MANAGER_ROOT,
     browserRoot: SQLITE_BROWSER_ROOT,
@@ -809,14 +910,22 @@ async function startServer() {
     log: (req, action, event, metadata) => auditRequest(req, { category: 'database', action, event, level: action === 'sqlite_query' ? 'info' : 'warning', metadata })
   }));
 
+  expressApp.use('/api/jobs', createOperationsRouter({
+    manager: jobManager,
+    authorize: (req, res, minimum) => requireCapability(req, res, minimum === 'root' ? 'sqlite:dangerous' : 'jobs:manage'),
+    log: (req, action, metadata) => auditRequest(req, { category: 'operations', action, event: action === 'job_create' ? 'Background job created' : 'Background job cancellation requested', level: 'warning', metadata })
+  }));
+
   // --- Socket.io Terminal Implementation ---
 
   io.use((socket, nextFn) => {
     const ticket = socket.handshake.auth?.ticket;
-      const userId = typeof ticket === 'string' ? consumeSocketTicket(ticket) : null;
-      const user: StoredUser | undefined = userId ? db.getUserById(userId) : undefined;
-      if (user?.enabled && isRole(user.role) && roleRank[user.role] >= roleRank.admin) {
+      const ticketEntry = typeof ticket === 'string' ? consumeSocketTicket(ticket) : null;
+      const session = ticketEntry ? db.getSessionByHash(ticketEntry.sessionHash) : undefined;
+      const user: StoredUser | undefined = session && session.userId === ticketEntry?.userId ? db.getUserById(session.userId) : undefined;
+      if (session && user?.enabled && isRole(user.role) && hasCapability(user.role, 'terminal:use')) {
         socket.data.user = { id: user.id, username: user.username, role: user.role };
+        socket.data.sessionHash = session.tokenHash;
         return nextFn();
       }
     console.log('[SOCKET] Rejecting unauthenticated socket connection attempt.');
@@ -849,6 +958,20 @@ async function startServer() {
     let shell: pty.IPty | null = null;
     let commandBuffer = '';
     let acceptingCommandInput = false;
+    const registered = terminalRegistry.register({
+      id: socket.id,
+      userId: socket.data.user.id,
+      sessionHash: socket.data.sessionHash,
+      disconnect: reason => {
+        socket.emit('output', `\r\n\x1b[33m[SYSTEM] Terminal closed: ${reason}.\x1b[0m\r\n`);
+        socket.disconnect(true);
+      }
+    });
+    if (!registered) {
+      socket.emit('output', '\r\n\x1b[31;1m[SYSTEM] Terminal session limit reached.\x1b[0m\r\n');
+      socket.disconnect(true);
+      return;
+    }
 
     try {
       shell = pty.spawn(shellExec, args, {
@@ -886,6 +1009,11 @@ async function startServer() {
 
     // Handle inputs from frontend
     socket.on('input', (data: string) => {
+      if (typeof data !== 'string' || Buffer.byteLength(data, 'utf8') > 64 * 1024) {
+        terminalRegistry.disconnectTerminal(socket.id, 'invalid input packet');
+        return;
+      }
+      terminalRegistry.touch(socket.id);
       for (const char of acceptingCommandInput ? data : '') {
         if (char === '\r' || char === '\n') {
           const command = commandBuffer.trim(); commandBuffer = '';
@@ -904,6 +1032,7 @@ async function startServer() {
 
     // Handle disconnect (CRITICAL security & cleanup step!)
     socket.on('disconnect', async () => {
+      terminalRegistry.remove(socket.id);
       console.log(`[SOCKET] Socket disconnected. Forcefully killing active shell process: ${socket.id}`);
       
       if (shell) {
@@ -932,9 +1061,38 @@ async function startServer() {
     const mode = backendOnly ? 'Backend-only' : 'Full-stack Web Terminal';
     console.log(`> ${mode} server running on port ${port}`);
   });
+
+  let shutdownPromise: Promise<void> | undefined;
+  const shutdown = () => {
+    if (shutdownPromise) return shutdownPromise;
+    const fallback = setTimeout(() => process.exit(1), 10_000);
+    fallback.unref();
+    shutdownPromise = (async () => {
+      clearInterval(auditPruneTimer);
+      terminalRegistry.disconnectAll('server shutdown');
+      const listenerClosed = new Promise<void>((resolve, reject) => httpServer.close(error => error && (error as NodeJS.ErrnoException).code !== 'ERR_SERVER_NOT_RUNNING' ? reject(error) : resolve()));
+      const results = await Promise.allSettled([
+        listenerClosed,
+        new Promise<void>(resolve => io.close(() => resolve())),
+        jobManager.close()
+      ]);
+      let databaseError: unknown;
+      try { db.close(); } catch (error) { databaseError = error; }
+      clearTimeout(fallback);
+      const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);
+      if (databaseError) errors.push(databaseError);
+      if (errors.length) throw new AggregateError(errors, 'One or more resources failed to close');
+    })().catch(error => {
+      console.error('[SHUTDOWN ERROR]', error);
+      process.exitCode = 1;
+    });
+    return shutdownPromise;
+  };
+  process.once('SIGINT', () => { void shutdown(); });
+  process.once('SIGTERM', () => { void shutdown(); });
 }
 
 startServer().catch((err) => {
   console.error('[STARTUP ERROR]', err);
-  process.exit(1);
+  process.exitCode = 1;
 });

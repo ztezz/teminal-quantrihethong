@@ -4,6 +4,8 @@ import {
   Database,
   Folder,
   History,
+  ListTodo,
+  LayoutDashboard,
   Menu,
   Settings,
   Terminal as TerminalIcon,
@@ -79,9 +81,11 @@ interface SidebarProps {
 }
 
 const navigation: Array<{ tab: ActiveTab; label: string; restricted?: boolean; icon: typeof Database }> = [
+  { tab: "overview", label: "Tổng Quan", restricted: true, icon: LayoutDashboard },
   { tab: "terminal", label: "Cửa Sổ Dòng Lệnh", restricted: true, icon: TerminalIcon },
   { tab: "system", label: "Hệ Thống", restricted: true, icon: Database },
   { tab: "sqlite", label: "Quản Lý SQLite", restricted: true, icon: Database },
+  { tab: "jobs", label: "Tác Vụ", restricted: true, icon: ListTodo },
   { tab: "logs", label: "Nhật Ký Bảo Mật", restricted: true, icon: History },
   { tab: "files", label: "Quản Lý Tệp Tin", icon: Folder },
   { tab: "settings", label: "Cấu Hình", icon: Settings },
