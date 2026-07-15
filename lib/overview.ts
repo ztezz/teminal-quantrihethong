@@ -26,18 +26,29 @@ function cpuTimes() {
   return { idle, total };
 }
 
+// Global cached CPU usage calculated in background interval
+let cachedCpu = 0;
+let lastCpuTimes = cpuTimes();
+
+setInterval(() => {
+  const currentTimes = cpuTimes();
+  const idleDiff = currentTimes.idle - lastCpuTimes.idle;
+  const totalDiff = currentTimes.total - lastCpuTimes.total;
+  if (totalDiff > 0) {
+    cachedCpu = Math.round((1 - idleDiff / totalDiff) * 100);
+  }
+  lastCpuTimes = currentTimes;
+}, 3000).unref();
+
 export async function collectHostMetrics(sampleMs = 200): Promise<HostMetrics> {
   const totalMemory = os.totalmem();
   const usedMemory = totalMemory - os.freemem();
   const diskRoot = path.parse(process.cwd()).root;
-  const [disk, firstCpu] = await Promise.all([fs.promises.statfs(diskRoot), Promise.resolve(cpuTimes())]);
-  await new Promise(resolve => setTimeout(resolve, sampleMs));
-  const secondCpu = cpuTimes();
-  const totalDifference = secondCpu.total - firstCpu.total;
+  const disk = await fs.promises.statfs(diskRoot);
   const diskTotal = Number(disk.blocks) * Number(disk.bsize);
   const diskUsed = diskTotal - Number(disk.bavail) * Number(disk.bsize);
   return {
-    cpu: totalDifference ? Math.round((1 - (secondCpu.idle - firstCpu.idle) / totalDifference) * 100) : 0,
+    cpu: cachedCpu,
     memory: {
       usedMB: Math.round(usedMemory / 1024 / 1024),
       totalMB: Math.round(totalMemory / 1024 / 1024),
