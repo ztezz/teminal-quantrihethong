@@ -514,6 +514,7 @@ export default function Home() {
     try {
       const data = await sqliteRequest(`/schema?path=${encodeURIComponent(databasePath)}`);
       setSqliteObjects(data.objects || []);
+      setSqliteFiles(files => files.some(file => file.path === databasePath) ? files : [{ path: databasePath, name: databasePath.split(/[\\/]/).pop() || databasePath, size: 0, mtime: new Date().toISOString(), protected: false }, ...files]);
       const firstTable = data.objects?.find((item: SqliteObject) => item.type === 'table')?.name;
       if (firstTable) await loadSqliteRows(databasePath, firstTable, 0, { q: '', sort: '' });
       setSqliteMessage(`Đã mở database · quick_check: ${data.integrity}`);
@@ -527,8 +528,11 @@ export default function Home() {
     try {
       const res = await fetch(`${API_URL}/api/sqlite`, { credentials: 'include' }); const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Không thể tải danh sách SQLite');
-      setSqliteFiles(data.databases || []);
-      if (selectedSqlite && !(data.databases || []).some((item: SqliteFile) => item.path === selectedSqlite)) { setSelectedSqlite(''); setSqliteObjects([]); setSqliteRows([]); }
+      setSqliteFiles(files => {
+        const scanned = data.databases || [];
+        const openedExternal = selectedSqlite && !scanned.some((item: SqliteFile) => item.path === selectedSqlite) ? files.find(file => file.path === selectedSqlite) : undefined;
+        return openedExternal ? [openedExternal, ...scanned] : scanned;
+      });
     } catch (error: any) { setSqliteMessage(error.message); }
     finally { setSqliteLoading(false); }
   }, [sessionReady, currentUser, selectedSqlite]);
@@ -1828,15 +1832,15 @@ export default function Home() {
   // Loading indicator for verification check
   if (isAuthenticated === null) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen bg-[#0a0a0c] text-slate-100 font-sans">
-        <RefreshCw className="w-8 h-8 text-blue-500 animate-spin mb-4" />
-        <p className="text-sm text-slate-400">Đang xác thực phiên bảo mật...</p>
+      <div className="login-ambient app-grid-bg flex flex-col items-center justify-center min-h-screen text-slate-100 font-sans">
+        <div className="app-panel flex flex-col items-center px-10 py-8"><div className="relative mb-5"><div className="absolute inset-0 rounded-full bg-sky-400/20 blur-xl" /><RefreshCw className="relative w-8 h-8 text-sky-400 animate-spin" /></div>
+        <p className="app-kicker mb-2">Secure handshake</p><p className="text-sm text-slate-400">Đang xác thực phiên bảo mật...</p></div>
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col min-h-screen bg-[#0a0a0c] text-slate-300 font-sans selection:bg-blue-500/30 selection:text-white">
+    <div className="app-shell app-grid-bg flex flex-col min-h-screen text-slate-300 font-sans selection:bg-blue-500/30 selection:text-white">
       <AnimatePresence mode="wait">
         {!isAuthenticated ? (
           // 1. Sleek Password Protected Authorization Screen
@@ -1845,22 +1849,27 @@ export default function Home() {
             initial={{ opacity: 0, scale: 0.98 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.98 }}
-            className="fixed inset-0 bg-[#0a0a0c] flex items-center justify-center p-6 z-50 overflow-y-auto"
+            className="login-ambient app-grid-bg fixed inset-0 flex items-center justify-center p-4 sm:p-6 z-50 overflow-y-auto"
           >
-            <div className="w-full max-w-md p-8 bg-[#16161d] border border-white/10 rounded-xl shadow-2xl shadow-black relative overflow-hidden">
+            <div className="grid w-full max-w-5xl lg:grid-cols-[1.1fr_0.9fr] app-modal overflow-hidden">
+              <div className="hidden lg:flex flex-col justify-between p-10 border-r border-white/10 bg-[radial-gradient(circle_at_20%_20%,rgba(56,189,248,0.12),transparent_45%)]">
+                <div><div className="inline-flex items-center gap-2 app-kicker"><TerminalIcon className="w-4 h-4" />NodeShell Control</div><h1 className="mt-6 max-w-lg text-4xl font-semibold leading-tight tracking-tight text-white">Một trung tâm vận hành cho toàn bộ server của bạn.</h1><p className="mt-4 max-w-md text-sm leading-6 text-slate-400">Terminal thời gian thực, quản lý tệp, dịch vụ hệ thống, SQLite Studio và nhật ký kiểm toán trong cùng một phiên bảo mật.</p></div>
+                <div className="grid grid-cols-3 gap-3"><div className="rounded-xl border border-white/10 bg-black/20 p-4"><TerminalIcon className="w-4 h-4 text-sky-400" /><span className="mt-3 block text-[10px] uppercase tracking-wider text-slate-500">Live shell</span></div><div className="rounded-xl border border-white/10 bg-black/20 p-4"><ShieldCheck className="w-4 h-4 text-emerald-400" /><span className="mt-3 block text-[10px] uppercase tracking-wider text-slate-500">Audited</span></div><div className="rounded-xl border border-white/10 bg-black/20 p-4"><Database className="w-4 h-4 text-violet-400" /><span className="mt-3 block text-[10px] uppercase tracking-wider text-slate-500">Persistent</span></div></div>
+              </div>
+              <div className="relative p-6 sm:p-10">
               {/* Subtle top decoration glow */}
-              <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-blue-500 via-indigo-500 to-purple-500" />
+              <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-sky-400 via-cyan-300 to-emerald-400" />
               
               <div className="text-center mb-8">
-                <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-blue-500/10 mb-4 border border-blue-500/20">
-                  {twoFactorChallenge ? <ShieldCheck className="w-6 h-6 text-blue-500" /> : <Lock className="w-6 h-6 text-blue-500" />}
+                <p className="app-kicker mb-4">Authorized access only</p><div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-sky-500/10 mb-5 border border-sky-500/20 shadow-[0_0_35px_rgba(56,189,248,0.08)]">
+                  {twoFactorChallenge ? <ShieldCheck className="w-6 h-6 text-sky-400" /> : <Lock className="w-6 h-6 text-sky-400" />}
                 </div>
                 <h2 className="text-lg font-semibold text-white tracking-tight">{twoFactorChallenge ? 'Xác Thực Hai Lớp' : 'Yêu Cầu Xác Thực'}</h2>
                 <p className="text-sm text-slate-500 mt-1">{twoFactorChallenge ? 'Nhập mã 6 số hoặc mã khôi phục' : 'Nhập khóa truy cập VPS để khởi tạo Node-PTY'}</p>
               </div>
 
               <form onSubmit={twoFactorChallenge ? handleTwoFactorLogin : handleLogin} className="space-y-5">
-                {!twoFactorChallenge && <input type="text" required value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Tên đăng nhập" autoComplete="username" className="w-full bg-black border border-white/10 rounded-lg py-3 px-4 text-center text-white focus:outline-none focus:border-blue-500" />}
+                {!twoFactorChallenge && <input type="text" required value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Tên đăng nhập" autoComplete="username" className="app-input w-full py-3 px-4 text-center text-white focus:outline-none" />}
                 <div>
                   <input
                     type={twoFactorChallenge ? 'text' : 'password'}
@@ -1868,7 +1877,7 @@ export default function Home() {
                     placeholder={twoFactorChallenge ? '123456' : '••••••••••••'}
                     value={twoFactorChallenge ? twoFactorCode : password}
                     onChange={(e) => twoFactorChallenge ? setTwoFactorCode(e.target.value) : setPassword(e.target.value)}
-                    className="w-full bg-black border border-white/10 rounded-lg py-3 px-4 text-center text-white focus:outline-none focus:border-blue-500 transition-colors tracking-widest text-lg"
+                    className="app-input w-full py-3 px-4 text-center text-white focus:outline-none tracking-widest text-lg"
                     autoComplete={twoFactorChallenge ? 'one-time-code' : 'current-password'}
                     autoFocus
                   />
@@ -1888,7 +1897,7 @@ export default function Home() {
                 <button
                   type="submit"
                   disabled={loading}
-                  className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-lg transition-all shadow-[0_0_15px_rgba(37,99,235,0.4)] disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
+                  className="w-full bg-gradient-to-r from-sky-500 to-cyan-400 hover:from-sky-400 hover:to-cyan-300 text-slate-950 font-bold py-3 rounded-xl transition-all shadow-[0_12px_35px_rgba(14,165,233,0.2)] disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
                 >
                   {loading ? (
                     <RefreshCw className="w-4 h-4 animate-spin" />
@@ -1905,6 +1914,7 @@ export default function Home() {
               <p className="mt-6 text-[10px] text-center text-slate-600 uppercase tracking-wider font-mono">
                 Các phiên đã xác thực được ghi nhật ký vào SQLite nội bộ
               </p>
+              </div>
             </div>
           </motion.div>
         ) : (
@@ -1913,21 +1923,21 @@ export default function Home() {
             key="dashboard"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            className="flex flex-col w-full h-screen overflow-hidden bg-[#0a0a0c]"
+            className="app-shell flex flex-col w-full h-screen overflow-hidden"
           >
             {/* Top Navigation Bar */}
-            <header className="h-14 border-b border-white/10 bg-[#111116] flex items-center justify-between px-6 shrink-0 z-10">
+            <header className="app-topbar h-14 sm:h-16 border-b flex items-center justify-between px-3 sm:px-6 shrink-0 z-50">
               <div className="flex items-center gap-4">
                 <button
                   onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-                  className="p-1.5 text-slate-400 hover:text-white rounded hover:bg-white/5 transition"
+                  className="p-2 text-slate-400 hover:text-white rounded-lg border border-transparent hover:border-white/10 hover:bg-white/5 transition"
                 >
                   <Menu className="w-4 h-4" />
                 </button>
-                <div className="w-3 h-3 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]"></div>
-                <h1 className="text-xs sm:text-sm font-bold tracking-tight text-white uppercase flex items-center gap-2">
-                  Terminal NodeShell 
-                  <span className="text-slate-500 font-normal">v1.1.0</span>
+                <div className="relative hidden sm:block"><div className="w-2.5 h-2.5 rounded-full bg-emerald-400"></div><div className="absolute inset-0 rounded-full bg-emerald-400 animate-ping opacity-30"></div></div>
+                <h1 className="text-xs sm:text-sm font-bold tracking-tight text-white flex items-center gap-2">
+                  <span className="hidden sm:inline">NodeShell</span> Control
+                  <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[8px] text-slate-500 font-mono font-normal">v1.1</span>
                 </h1>
               </div>
 
@@ -1949,15 +1959,16 @@ export default function Home() {
 
                 <button 
                   onClick={handleLogout}
-                  className="px-4 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs font-semibold rounded border border-red-500/30 transition-colors cursor-pointer"
+                  className="px-3 sm:px-4 py-2 bg-rose-500/8 hover:bg-rose-500/15 text-rose-300 text-[10px] font-bold uppercase tracking-wider rounded-lg border border-rose-500/20 transition-colors cursor-pointer"
                 >
-                  CHẤM DỨT PHIÊN
+                  <span className="hidden sm:inline">Chấm dứt phiên</span><span className="sm:hidden">Thoát</span>
                 </button>
               </div>
             </header>
 
             {/* Main Content Area */}
             <div className="flex flex-1 overflow-hidden">
+              {isSidebarOpen && <button aria-label="Đóng thanh điều hướng" onClick={() => setIsSidebarOpen(false)} className="fixed inset-x-0 top-14 bottom-8 z-30 bg-black/60 backdrop-blur-sm md:hidden" />}
               {/* COLLAPSIBLE SIDEBAR */}
               <AnimatePresence initial={false}>
                 {isSidebarOpen && (
@@ -1965,38 +1976,38 @@ export default function Home() {
                     initial={{ width: 0, opacity: 0 }}
                     animate={{ width: 280, opacity: 1 }}
                     exit={{ width: 0, opacity: 0 }}
-                    className="bg-[#0d0d12] border-r border-white/10 flex flex-col h-full shrink-0 overflow-y-auto"
+                    className="app-sidebar border-r flex flex-col h-full shrink-0 overflow-y-auto"
                   >
                     {/* System Resource Widgets */}
-                    <div className="p-5 border-b border-white/10 space-y-5">
-                      <h3 className="text-[10px] uppercase font-bold text-slate-500 tracking-widest">GIÁM SÁT HỆ THỐNG</h3>
+                    <div className="p-4 border-b border-white/10 space-y-3">
+                      <div className="flex items-center justify-between"><h3 className="app-kicker">Tài nguyên</h3><span className="text-[9px] font-mono text-emerald-400">LIVE</span></div>
                       
-                      <div>
+                      <div className="rounded-xl border border-white/8 bg-white/[0.025] p-3">
                         <div className="flex justify-between items-end mb-1.5">
                           <label className="text-[9px] uppercase font-bold text-slate-500">Tải CPU</label>
                           <span className="text-xs font-mono text-white">{cpuPercent}%</span>
                         </div>
-                        <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
-                          <div className="h-full bg-blue-500 transition-all duration-500" style={{ width: `${cpuPercent}%` }}></div>
+                        <div className="metric-track h-1.5 w-full rounded-full overflow-hidden">
+                          <div className="h-full bg-gradient-to-r from-sky-500 to-cyan-300 transition-all duration-500" style={{ width: `${cpuPercent}%` }}></div>
                         </div>
                       </div>
 
-                      <div>
+                      <div className="rounded-xl border border-white/8 bg-white/[0.025] p-3">
                         <div className="flex justify-between items-end mb-1.5">
                           <label className="text-[9px] uppercase font-bold text-slate-500">Sử dụng Bộ nhớ</label>
                           <span className="text-xs font-mono text-white">{memUsedMB}MB / {memTotalMB}MB</span>
                         </div>
-                        <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
-                          <div className="h-full bg-purple-500 transition-all duration-500" style={{ width: `${memPercent}%` }}></div>
+                        <div className="metric-track h-1.5 w-full rounded-full overflow-hidden">
+                          <div className="h-full bg-gradient-to-r from-violet-500 to-fuchsia-400 transition-all duration-500" style={{ width: `${memPercent}%` }}></div>
                         </div>
                       </div>
 
-                      <div>
+                      <div className="rounded-xl border border-white/8 bg-white/[0.025] p-3">
                         <div className="flex justify-between items-end mb-1.5">
                           <label className="text-[9px] uppercase font-bold text-slate-500">Dung lượng ổ đĩa</label>
                           <span className="text-xs font-mono text-white">{diskUsedGB}GB / {diskTotalGB}GB</span>
                         </div>
-                        <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
+                        <div className="metric-track h-1.5 w-full rounded-full overflow-hidden">
                           <div
                             className={`h-full transition-all duration-500 ${diskPercent >= 90 ? 'bg-red-500' : diskPercent >= 75 ? 'bg-amber-500' : 'bg-emerald-500'}`}
                             style={{ width: `${diskPercent}%` }}
@@ -2006,24 +2017,24 @@ export default function Home() {
                     </div>
 
                     {/* Navigation Menu */}
-                    <div className="p-4 border-b border-white/10">
-                      <h3 className="text-[10px] uppercase font-bold text-slate-500 tracking-widest mb-3 px-2">DI CHUYỂN</h3>
-                      <nav className="space-y-1">
+                    <div className="p-3 border-b border-white/10">
+                      <h3 className="app-kicker mb-3 px-2">Workspace</h3>
+                      <nav className="space-y-1.5">
                         {currentUser && ['admin', 'root'].includes(currentUser.role) && <button
                           onClick={() => setActiveTab('terminal')}
                           className={`w-full flex items-center gap-3 px-3 py-2.5 rounded text-xs font-semibold uppercase tracking-wider transition cursor-pointer ${
-                            activeTab === 'terminal' 
-                              ? 'bg-blue-600/10 text-blue-400 border border-blue-500/20' 
-                              : 'text-slate-400 hover:bg-white/5 hover:text-white'
+                            activeTab === 'terminal'
+                              ? 'bg-sky-500/10 text-sky-300 border border-sky-400/20 shadow-[inset_3px_0_0_#38bdf8]'
+                              : 'text-slate-400 border border-transparent hover:bg-white/5 hover:text-white'
                           }`}
                         >
                           <TerminalIcon className="w-4 h-4" />
                           <span>Cửa Sổ Dòng Lệnh</span>
                         </button>}
 
-                        {currentUser && ['admin', 'root'].includes(currentUser.role) && <button onClick={() => setActiveTab('system')} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded text-xs font-semibold uppercase tracking-wider transition ${activeTab === 'system' ? 'bg-blue-600/10 text-blue-400 border border-blue-500/20' : 'text-slate-400 hover:bg-white/5 hover:text-white'}`}><Database className="w-4 h-4" /><span>Hệ Thống</span></button>}
+                        {currentUser && ['admin', 'root'].includes(currentUser.role) && <button onClick={() => setActiveTab('system')} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded text-xs font-semibold uppercase tracking-wider transition border ${activeTab === 'system' ? 'bg-sky-500/10 text-sky-300 border-sky-400/20 shadow-[inset_3px_0_0_#38bdf8]' : 'text-slate-400 border-transparent hover:bg-white/5 hover:text-white'}`}><Database className="w-4 h-4" /><span>Hệ Thống</span></button>}
 
-                        {currentUser && ['admin', 'root'].includes(currentUser.role) && <button onClick={() => setActiveTab('sqlite')} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded text-xs font-semibold uppercase tracking-wider transition ${activeTab === 'sqlite' ? 'bg-emerald-600/10 text-emerald-400 border border-emerald-500/20' : 'text-slate-400 hover:bg-white/5 hover:text-white'}`}><Database className="w-4 h-4" /><span>Quản Lý SQLite</span></button>}
+                        {currentUser && ['admin', 'root'].includes(currentUser.role) && <button onClick={() => setActiveTab('sqlite')} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded text-xs font-semibold uppercase tracking-wider transition border ${activeTab === 'sqlite' ? 'bg-emerald-500/10 text-emerald-300 border-emerald-400/20 shadow-[inset_3px_0_0_#34d399]' : 'text-slate-400 border-transparent hover:bg-white/5 hover:text-white'}`}><Database className="w-4 h-4" /><span>Quản Lý SQLite</span></button>}
 
                         {currentUser && ['admin', 'root'].includes(currentUser.role) && <button
                           onClick={() => {
@@ -2031,9 +2042,9 @@ export default function Home() {
                             loadLogs();
                           }}
                           className={`w-full flex items-center gap-3 px-3 py-2.5 rounded text-xs font-semibold uppercase tracking-wider transition cursor-pointer ${
-                            activeTab === 'logs' 
-                              ? 'bg-blue-600/10 text-blue-400 border border-blue-500/20' 
-                              : 'text-slate-400 hover:bg-white/5 hover:text-white'
+                            activeTab === 'logs'
+                              ? 'bg-sky-500/10 text-sky-300 border border-sky-400/20 shadow-[inset_3px_0_0_#38bdf8]'
+                              : 'text-slate-400 border border-transparent hover:bg-white/5 hover:text-white'
                           }`}
                         >
                           <History className="w-4 h-4" />
@@ -2046,9 +2057,9 @@ export default function Home() {
                             loadFiles(currentPath || getSavedFilePath());
                           }}
                           className={`w-full flex items-center gap-3 px-3 py-2.5 rounded text-xs font-semibold uppercase tracking-wider transition cursor-pointer ${
-                            activeTab === 'files' 
-                              ? 'bg-blue-600/10 text-blue-400 border border-blue-500/20' 
-                              : 'text-slate-400 hover:bg-white/5 hover:text-white'
+                            activeTab === 'files'
+                              ? 'bg-sky-500/10 text-sky-300 border border-sky-400/20 shadow-[inset_3px_0_0_#38bdf8]'
+                              : 'text-slate-400 border border-transparent hover:bg-white/5 hover:text-white'
                           }`}
                         >
                           <Folder className="w-4 h-4" />
@@ -2058,9 +2069,9 @@ export default function Home() {
                         <button
                           onClick={() => setActiveTab('settings')}
                           className={`w-full flex items-center gap-3 px-3 py-2.5 rounded text-xs font-semibold uppercase tracking-wider transition cursor-pointer ${
-                            activeTab === 'settings' 
-                              ? 'bg-blue-600/10 text-blue-400 border border-blue-500/20' 
-                              : 'text-slate-400 hover:bg-white/5 hover:text-white'
+                            activeTab === 'settings'
+                              ? 'bg-sky-500/10 text-sky-300 border border-sky-400/20 shadow-[inset_3px_0_0_#38bdf8]'
+                              : 'text-slate-400 border border-transparent hover:bg-white/5 hover:text-white'
                           }`}
                         >
                           <Settings className="w-4 h-4" />
@@ -2070,8 +2081,8 @@ export default function Home() {
                     </div>
 
                     {/* Interactive Logs in Sidebar */}
-                    <div className="p-5 mt-auto">
-                      <h3 className="text-[10px] uppercase font-bold text-slate-500 mb-3 tracking-widest">ĐĂNG NHẬP GẦN ĐÂY</h3>
+                    <div className="p-4 mt-auto">
+                      <h3 className="app-kicker mb-3">Hoạt động gần đây</h3>
                       <div className="space-y-3 font-mono text-[11px] leading-relaxed">
                         {logs.slice(0, 3).map((log, i) => (
                           <div key={i} className="border-b border-white/5 pb-2 last:border-0 last:pb-0">
@@ -2091,7 +2102,7 @@ export default function Home() {
               </AnimatePresence>
 
               {/* MAIN CONTENT INNER */}
-              <main className="flex-1 flex flex-col overflow-hidden bg-black">
+              <main className="app-workspace flex-1 flex flex-col overflow-hidden min-w-0">
                 {/* Dynamic Workspace Rendering */}
                 <div className="flex-1 overflow-hidden relative">
                   <AnimatePresence mode="wait">
@@ -2102,10 +2113,10 @@ export default function Home() {
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
                         exit={{ opacity: 0 }}
-                        className="w-full h-full p-6 bg-black flex flex-col"
+                        className="w-full h-full p-3 sm:p-6 flex flex-col"
                       >
                         {/* Quick Commands & Info Header Bar */}
-                        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between bg-[#0d0d12] border border-white/10 border-b-0 rounded-t-lg px-4 py-3 gap-3 shrink-0">
+                        <div className="app-panel flex flex-col sm:flex-row items-start sm:items-center justify-between border-b-0 rounded-b-none px-4 py-3 gap-3 shrink-0">
                           <div className="flex items-center gap-2 font-mono text-xs text-white">
                             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
                             <span>Phiên dòng lệnh chuẩn (tty)</span>
@@ -2153,7 +2164,7 @@ export default function Home() {
                         </div>
 
                         {/* Terminal wrapper */}
-                        <div className="flex-1 rounded-b-lg bg-black border border-white/10 overflow-hidden relative p-4 shadow-2xl">
+                        <div className="flex-1 min-h-0 rounded-b-2xl bg-[#030609] border border-white/10 overflow-hidden relative p-2 sm:p-4 shadow-[0_24px_70px_rgba(0,0,0,0.35)]">
                           <div 
                             ref={terminalRef} 
                             className="w-full h-full [&_.xterm-viewport]:!overflow-y-auto" 
@@ -2222,10 +2233,10 @@ export default function Home() {
                         initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: -10 }}
-                        className="w-full h-full p-8 overflow-y-auto bg-[#0a0a0c]"
+                        className="workspace-screen w-full h-full p-4 sm:p-8 overflow-y-auto"
                       >
                         <div className="max-w-6xl mx-auto space-y-6">
-                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-white/10 pb-4">
+                          <div className="workspace-heading flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                             <div>
                               <h3 className="text-lg font-bold text-white uppercase tracking-wider mb-1">Nhật Ký Kiểm Toán</h3>
                               <p className="text-xs text-slate-500 font-mono">{logTotal} sự kiện xác thực, terminal và filesystem</p>
@@ -2240,7 +2251,7 @@ export default function Home() {
                             <div className="flex gap-2"><select value={logResult} onChange={(e) => setLogResult(e.target.value)} className="min-w-0 flex-1 bg-black border border-white/10 rounded px-2 py-2 text-xs"><option value="">Mọi kết quả</option><option value="success">Thành công</option><option value="failure">Thất bại</option></select><button type="submit" className="px-3 bg-blue-600 rounded text-xs">Lọc</button></div>
                           </form>
 
-                          <div className="rounded-xl border border-white/10 bg-[#0d0d12]/60 overflow-hidden shadow-2xl">
+                          <div className="app-panel overflow-hidden">
                             <div className="overflow-x-auto">
                               <table className="w-full text-left border-collapse text-sm">
                                 <thead>
@@ -2279,7 +2290,7 @@ export default function Home() {
                       </motion.div>
                     )}
 
-                    {activeTab === 'system' && currentUser && ['admin', 'root'].includes(currentUser.role) && <motion.div key="system-tab" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="w-full h-full p-6 overflow-y-auto bg-[#0a0a0c]">
+                    {activeTab === 'system' && currentUser && ['admin', 'root'].includes(currentUser.role) && <motion.div key="system-tab" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="workspace-screen w-full h-full p-4 sm:p-6 overflow-y-auto">
                       <div className="max-w-7xl mx-auto space-y-5">
                         <div className="flex flex-col sm:flex-row sm:items-center gap-3 border-b border-white/10 pb-4"><div className="mr-auto"><h3 className="text-lg font-bold text-white uppercase tracking-wider">Quản Trị Hệ Thống</h3><p className="text-xs text-slate-500 font-mono">systemd services và Linux processes</p></div><div className="flex rounded border border-white/10 overflow-hidden"><button onClick={() => setSystemView('services')} className={`px-3 py-2 text-xs ${systemView === 'services' ? 'bg-blue-600 text-white' : 'bg-black'}`}>Services</button><button onClick={() => setSystemView('processes')} className={`px-3 py-2 text-xs ${systemView === 'processes' ? 'bg-blue-600 text-white' : 'bg-black'}`}>Processes</button></div><button onClick={() => loadSystemData()} className="px-3 py-2 text-xs border border-white/10 rounded"><RefreshCw className={`inline w-3.5 h-3.5 mr-1 ${systemLoading ? 'animate-spin' : ''}`} />Tải lại</button></div>
                         <input value={systemQuery} onChange={(e) => setSystemQuery(e.target.value)} placeholder="Tìm service, PID, user hoặc command..." className="w-full bg-black border border-white/10 rounded px-3 py-2 text-xs" />
@@ -2290,9 +2301,9 @@ export default function Home() {
                       </div>
                     </motion.div>}
 
-                    {activeTab === 'sqlite' && currentUser && ['admin', 'root'].includes(currentUser.role) && <motion.div key="sqlite-tab" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="w-full h-full overflow-y-auto bg-[#080b0a]">
+                    {activeTab === 'sqlite' && currentUser && ['admin', 'root'].includes(currentUser.role) && <motion.div key="sqlite-tab" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="workspace-screen w-full h-full overflow-y-auto">
                       <div className="max-w-[1600px] mx-auto p-3 sm:p-6 space-y-4">
-                        <div className="flex flex-col sm:flex-row sm:items-center gap-3 border-b border-emerald-500/15 pb-4">
+                        <div className="workspace-heading flex flex-col sm:flex-row sm:items-center gap-3">
                           <div className="mr-auto"><div className="flex items-center gap-2"><Database className="w-5 h-5 text-emerald-400" /><h3 className="text-lg font-bold text-white uppercase tracking-wider">SQLite Studio</h3><span className="rounded-full border border-emerald-500/20 bg-emerald-500/5 px-2 py-0.5 text-[9px] font-mono text-emerald-400">LOCAL DATA LAB</span></div><p className="mt-1 text-xs text-slate-500 font-mono">Browse, mutate, inspect and safeguard server databases</p></div>
                           <button onClick={showOpenSqlite} className="flex items-center justify-center gap-2 px-3 py-2 rounded bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-bold"><Folder className="w-4 h-4" />Mở SQLite</button>
                           <button onClick={() => loadSqliteFiles()} className="flex items-center justify-center gap-2 px-3 py-2 rounded border border-white/10 bg-white/5 text-xs"><RefreshCw className={`w-4 h-4 ${sqliteLoading ? 'animate-spin' : ''}`} />Quét lại</button>
@@ -2367,11 +2378,11 @@ export default function Home() {
                         initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: -10 }}
-                        className="w-full h-full p-8 overflow-y-auto bg-[#0a0a0c]"
+                        className="workspace-screen w-full h-full p-4 sm:p-8 overflow-y-auto"
                       >
                         <div className="max-w-3xl mx-auto space-y-8">
                           {/* Section 1: Terminal UI Styles */}
-                          <div className="p-6 rounded-xl border border-white/10 bg-[#111116]/40 space-y-6">
+                          <div className="app-panel p-4 sm:p-6 space-y-6">
                             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-white/5 pb-4">
                               <div>
                                 <h3 className="text-base font-bold text-white uppercase tracking-wider mb-1">Tùy biến dòng lệnh</h3>
@@ -2705,11 +2716,11 @@ export default function Home() {
                         initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: -10 }}
-                        className="w-full h-full p-6 overflow-y-auto bg-[#0a0a0c]"
+                        className="workspace-screen w-full h-full p-3 sm:p-6 overflow-y-auto"
                       >
                         <div className="max-w-6xl mx-auto space-y-6">
                           {/* Top Header */}
-                          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between border-b border-white/10 pb-4 gap-4">
+                          <div className="workspace-heading flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
                             <div>
                               <h3 className="text-lg font-bold text-white uppercase tracking-wider mb-1">Quản Lý Tệp Tin</h3>
                               <p className="text-xs text-slate-500 font-mono">Duyệt, xem, tạo, sửa và xóa tệp tin trên hệ thống VPS</p>
@@ -3198,19 +3209,19 @@ export default function Home() {
                         </div>
                       </motion.div>
                     )}
-                    {metadata && <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"><div className="w-full max-w-md rounded-xl border border-white/10 bg-[#111116] p-5 space-y-4">
+                    {metadata && <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"><div className="app-modal w-full max-w-md p-5 space-y-4">
                       <div className="flex"><h4 className="font-bold text-white">Quyền và sở hữu</h4><button onClick={() => setMetadata(null)} className="ml-auto"><X className="w-4 h-4" /></button></div>
                       <p className="text-xs font-mono truncate">{metadata.path}</p>
                       <label className="block text-xs">Mode<input value={metadata.mode} onChange={(e) => setMetadata({ ...metadata, mode: e.target.value })} className="mt-1 w-full bg-black border border-white/10 rounded p-2 font-mono" /></label>
                       <div className="grid grid-cols-2 gap-3"><label className="text-xs">UID<input type="number" value={metadata.uid} onChange={(e) => setMetadata({ ...metadata, uid: Number(e.target.value) })} className="mt-1 w-full bg-black border border-white/10 rounded p-2" /></label><label className="text-xs">GID<input type="number" value={metadata.gid} onChange={(e) => setMetadata({ ...metadata, gid: Number(e.target.value) })} className="mt-1 w-full bg-black border border-white/10 rounded p-2" /></label></div>
                       <button onClick={async () => { try { await requestFileApi('/api/files/metadata', { method: 'PATCH', body: JSON.stringify(metadata) }); setMetadata(null); await loadFiles(currentPath, null, 'none'); } catch (error: any) { setFileError(error.message); } }} className="w-full bg-blue-600 rounded py-2 text-sm text-white">Lưu quyền</button>
                     </div></div>}
-                    {showTrash && <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"><div className="w-full max-w-2xl max-h-[80vh] overflow-auto rounded-xl border border-white/10 bg-[#111116] p-5 space-y-4">
+                    {showTrash && <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"><div className="app-modal w-full max-w-2xl max-h-[80vh] overflow-auto p-5 space-y-4">
                       <div className="flex items-center"><h4 className="font-bold text-white">Thùng rác</h4><button onClick={() => setShowTrash(false)} className="ml-auto"><X className="w-4 h-4" /></button></div>
                       {trashItems.length === 0 ? <p className="text-sm text-slate-500">Thùng rác trống.</p> : trashItems.map((item) => <label key={item.id} className="flex gap-3 p-3 border border-white/5 rounded text-xs"><input type="checkbox" checked={selectedTrashIds.includes(item.id)} onChange={() => setSelectedTrashIds((ids) => ids.includes(item.id) ? ids.filter((id) => id !== item.id) : [...ids, item.id])} /><span className="flex-1 min-w-0"><span className="block text-white truncate">{item.name || item.originalPath.split('/').pop()}</span><span className="text-slate-500 font-mono break-all">{item.originalPath}</span></span><span className="text-slate-500">{item.deletedAt ? new Date(item.deletedAt).toLocaleString() : ''}</span></label>)}
                       <div className="flex flex-wrap gap-2"><button disabled={!selectedTrashIds.length} onClick={() => trashAction('restore', selectedTrashIds)} className="px-3 py-2 bg-emerald-600 rounded text-xs disabled:opacity-30">Khôi phục</button><button disabled={!selectedTrashIds.length} onClick={() => confirm('Xóa vĩnh viễn các mục đã chọn?') && trashAction('delete', selectedTrashIds)} className="px-3 py-2 bg-red-600 rounded text-xs disabled:opacity-30">Xóa vĩnh viễn</button><button onClick={() => confirm('Dọn sạch toàn bộ thùng rác?') && trashAction('empty')} className="ml-auto px-3 py-2 bg-red-950 text-red-300 rounded text-xs">Dọn sạch</button></div>
                     </div></div>}
-                    {showSnapshots && <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"><div className="w-full max-w-4xl max-h-[85vh] overflow-auto rounded-xl border border-white/10 bg-[#111116] p-5 space-y-4">
+                    {showSnapshots && <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"><div className="app-modal w-full max-w-4xl max-h-[85vh] overflow-auto p-5 space-y-4">
                       <div className="flex items-center gap-3"><Database className="w-5 h-5 text-amber-400" /><div><h4 className="font-bold text-white">Lịch sử snapshot</h4><p className="text-[10px] text-slate-500 font-mono">{snapshotPath || 'Tất cả tệp'} · {snapshots.length} phiên bản</p></div><button onClick={() => setShowSnapshots(false)} className="ml-auto"><X className="w-4 h-4" /></button></div>
                       {snapshots.length === 0 ? <p className="py-12 text-center text-sm text-slate-500">Chưa có snapshot phù hợp.</p> : <div className="space-y-2">{snapshots.map(snapshot => <div key={snapshot.id} className="grid md:grid-cols-[1fr_180px_auto] gap-3 items-center p-3 rounded border border-white/5 bg-black/40"><div className="min-w-0"><div className="text-xs text-white truncate">{snapshot.originalPath}</div><div className="mt-1 text-[10px] text-slate-500 font-mono">{snapshot.reason} · {(snapshot.size / 1024).toFixed(1)} KB · mode {snapshot.mode.toString(8)}</div><code className="block mt-1 text-[9px] text-slate-600 truncate" title={snapshot.checksum}>SHA-256 {snapshot.checksum}</code></div><div className="text-[10px] text-slate-500">{new Date(snapshot.createdAt).toLocaleString()}</div><div className="flex gap-2"><button onClick={() => downloadSnapshot(snapshot.id, snapshot.originalPath.split('/').pop() || 'snapshot')} className="text-xs text-blue-400">Tải</button>{currentUser?.role !== 'viewer' && <><button onClick={() => restoreSnapshot(snapshot.id)} className="text-xs text-emerald-400">Khôi phục</button><button onClick={() => deleteSnapshot(snapshot.id)} className="text-xs text-red-400">Xóa</button></>}</div></div>)}</div>}
                     </div></div>}
@@ -3223,7 +3234,7 @@ export default function Home() {
             </div>
 
             {/* Footer Status Bar */}
-            <footer className="h-8 bg-[#111116] border-t border-white/10 flex items-center justify-between px-6 shrink-0 text-[10px] font-mono text-slate-500 uppercase tracking-widest z-10 select-none">
+            <footer className="status-footer h-8 border-t flex items-center justify-between px-3 sm:px-6 shrink-0 text-[9px] sm:text-[10px] font-mono text-slate-500 uppercase tracking-widest z-50 select-none">
               <div className="flex gap-6">
                 <span className="flex items-center gap-1.5">
                   <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
@@ -3241,7 +3252,7 @@ export default function Home() {
           </motion.div>
         )}
       </AnimatePresence>
-      {stepUpPrompt && <div className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center p-4"><div className="w-full max-w-md rounded-xl border border-red-500/30 bg-[#111116] p-6 space-y-4 shadow-2xl">
+      {stepUpPrompt && <div className="fixed inset-0 z-[100] bg-black/85 backdrop-blur-sm flex items-center justify-center p-4"><div className="app-modal w-full max-w-md p-6 space-y-4 !border-rose-500/25">
         <div className="flex items-start gap-3"><ShieldCheck className="w-6 h-6 text-red-400 shrink-0" /><div><h3 className="font-bold text-white">Xác nhận thao tác nguy hiểm</h3><p className="mt-1 text-xs text-slate-400">Quyền xác nhận có hiệu lực 5 phút cho session hiện tại.</p></div></div>
         <input type="password" value={stepUpPassword} onChange={(e) => setStepUpPassword(e.target.value)} placeholder="Mật khẩu hiện tại" autoFocus className="w-full bg-black border border-white/10 rounded px-3 py-2 text-sm" />
         <input value={stepUpCode} onChange={(e) => setStepUpCode(e.target.value)} placeholder="Mã 2FA hoặc recovery code (nếu đã bật)" autoComplete="one-time-code" className="w-full bg-black border border-white/10 rounded px-3 py-2 text-sm" />

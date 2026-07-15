@@ -112,3 +112,13 @@ test('filesystem browser lists directories and valid SQLite files only', async (
     assert.equal(escaped.status, 403);
   } finally { await context.close(); }
 });
+
+test('schema endpoint opens an existing database by absolute browser path', async () => {
+  const context = await fixture();
+  try {
+    const opened = await context.request(`/schema?path=${encodeURIComponent(context.filename)}`);
+    assert.equal(opened.status, 200);
+    assert.equal(opened.body.integrity, 'ok');
+    assert.equal(opened.body.objects.some((item: { name: string }) => item.name === 'people'), true);
+  } finally { await context.close(); }
+});
