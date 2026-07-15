@@ -109,6 +109,7 @@ interface SqliteFile { path: string; name: string; size: number; mtime: string; 
 interface SqliteObject { type: string; name: string; tableName: string; sql: string | null }
 interface SqliteColumn { name: string; type?: string; pk?: number; notnull?: number; dflt_value?: unknown; primaryKey?: boolean }
 interface SqliteBackup { name: string; mtime?: string; size?: number }
+interface SqliteBrowserItem { name: string; path: string; type: 'directory' | 'database'; size?: number; mtime?: string; protected?: boolean }
 interface SqliteHistoryEntry { id: string; path: string; sql: string; ranAt: string; durationMs?: number; rowCount?: number; success: boolean }
 type SqliteWorkspace = 'data' | 'sql' | 'schema' | 'operations';
 type SqliteRecordModal = { mode: 'add' | 'edit'; row?: Record<string, unknown> } | null;
@@ -264,9 +265,11 @@ export default function Home() {
   const [sqliteResult, setSqliteResult] = useState<Record<string, unknown>[]>([]);
   const [sqliteMessage, setSqliteMessage] = useState<string | null>(null);
   const [sqliteLoading, setSqliteLoading] = useState(false);
-  const [showCreateSqlite, setShowCreateSqlite] = useState(false);
-  const [newSqlitePath, setNewSqlitePath] = useState('data/app.sqlite');
-  const [newSqliteSchema, setNewSqliteSchema] = useState('');
+  const [showSqliteBrowser, setShowSqliteBrowser] = useState(false);
+  const [sqliteBrowserPath, setSqliteBrowserPath] = useState('');
+  const [sqliteBrowserParent, setSqliteBrowserParent] = useState<string | null>(null);
+  const [sqliteBrowserRoot, setSqliteBrowserRoot] = useState('');
+  const [sqliteBrowserItems, setSqliteBrowserItems] = useState<SqliteBrowserItem[]>([]);
   const [sqliteWorkspace, setSqliteWorkspace] = useState<SqliteWorkspace>('data');
   const [sqliteColumns, setSqliteColumns] = useState<SqliteColumn[]>([]);
   const [sqliteRowIdentities, setSqliteRowIdentities] = useState<Record<string, unknown>[]>([]);
@@ -530,15 +533,24 @@ export default function Home() {
     finally { setSqliteLoading(false); }
   }, [sessionReady, currentUser, selectedSqlite]);
 
-  const createSqlite = async () => {
-    if (!newSqlitePath.trim()) return;
+  const browseSqlitePath = async (requestedPath?: string) => {
     setSqliteLoading(true); setSqliteMessage(null);
     try {
-      const res = await fetchWithStepUp(`${API_URL}/api/sqlite`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: newSqlitePath, schema: newSqliteSchema }) });
-      const data = await res.json(); if (!data.success) throw new Error(data.error || 'Không thể tạo database');
-      setShowCreateSqlite(false); setNewSqliteSchema(''); await loadSqliteFiles(); await openSqlite(data.path);
+      const endpoint = requestedPath?.trim() ? `/browse?path=${encodeURIComponent(requestedPath.trim())}` : '/browse';
+      const data = await sqliteRequest(endpoint);
+      setSqliteBrowserPath(data.currentPath); setSqliteBrowserParent(data.parentPath); setSqliteBrowserRoot(data.root); setSqliteBrowserItems(data.items || []);
     } catch (error: any) { setSqliteMessage(error.message); }
     finally { setSqliteLoading(false); }
+  };
+
+  const showOpenSqlite = async () => {
+    setShowSqliteBrowser(true);
+    await browseSqlitePath(sqliteBrowserPath || undefined);
+  };
+
+  const selectExistingSqlite = async (databasePath: string) => {
+    setShowSqliteBrowser(false);
+    await openSqlite(databasePath);
   };
 
   const runSqliteQuery = async () => {
@@ -2282,7 +2294,7 @@ export default function Home() {
                       <div className="max-w-[1600px] mx-auto p-3 sm:p-6 space-y-4">
                         <div className="flex flex-col sm:flex-row sm:items-center gap-3 border-b border-emerald-500/15 pb-4">
                           <div className="mr-auto"><div className="flex items-center gap-2"><Database className="w-5 h-5 text-emerald-400" /><h3 className="text-lg font-bold text-white uppercase tracking-wider">SQLite Studio</h3><span className="rounded-full border border-emerald-500/20 bg-emerald-500/5 px-2 py-0.5 text-[9px] font-mono text-emerald-400">LOCAL DATA LAB</span></div><p className="mt-1 text-xs text-slate-500 font-mono">Browse, mutate, inspect and safeguard server databases</p></div>
-                          <button onClick={() => setShowCreateSqlite(true)} className="flex items-center justify-center gap-2 px-3 py-2 rounded bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-bold"><Plus className="w-4 h-4" />Tạo SQLite</button>
+                          <button onClick={showOpenSqlite} className="flex items-center justify-center gap-2 px-3 py-2 rounded bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-bold"><Folder className="w-4 h-4" />Mở SQLite</button>
                           <button onClick={() => loadSqliteFiles()} className="flex items-center justify-center gap-2 px-3 py-2 rounded border border-white/10 bg-white/5 text-xs"><RefreshCw className={`w-4 h-4 ${sqliteLoading ? 'animate-spin' : ''}`} />Quét lại</button>
                         </div>
                         {sqliteMessage && <div className={`px-3 py-2 rounded border text-xs font-mono ${/không|lỗi|thất bại|invalid|error/i.test(sqliteMessage) ? 'border-red-500/25 bg-red-500/5 text-red-400' : 'border-emerald-500/20 bg-emerald-500/5 text-emerald-300'}`}>{sqliteMessage}</div>}
@@ -3204,7 +3216,7 @@ export default function Home() {
                     </div></div>}
                     {serviceLogs && <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"><div className="w-full max-w-5xl max-h-[85vh] flex flex-col rounded-xl border border-white/10 bg-[#111116] p-5 gap-4"><div className="flex items-center"><div><h4 className="font-bold text-white">Journal: {serviceLogs.unit}</h4><p className="text-[10px] text-slate-500">200 dòng gần nhất</p></div><button onClick={() => setServiceLogs(null)} className="ml-auto"><X className="w-4 h-4" /></button></div><pre className="flex-1 overflow-auto whitespace-pre-wrap break-words bg-black border border-white/5 rounded p-4 text-[11px] leading-relaxed text-slate-300 font-mono">{serviceLogs.logs || 'Không có log.'}</pre></div></div>}
                     {sqliteRecordModal && <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-4"><div className="w-full max-w-2xl max-h-[85vh] overflow-y-auto rounded-xl border border-emerald-500/20 bg-[#0d1110] shadow-2xl"><div className="sticky top-0 z-[1] flex items-center gap-3 p-5 border-b border-white/10 bg-[#0d1110]"><Table2 className="w-5 h-5 text-emerald-400" /><div><h4 className="font-bold text-white">{sqliteRecordModal.mode === 'add' ? 'Thêm bản ghi' : 'Chỉnh sửa bản ghi'}</h4><p className="mt-1 text-[10px] text-slate-500 font-mono">{selectedSqliteTable} · nhập chính xác <span className="text-emerald-400">NULL</span> để lưu giá trị null</p></div><button onClick={() => setSqliteRecordModal(null)} className="ml-auto"><X className="w-4 h-4" /></button></div><div className="grid sm:grid-cols-2 gap-3 p-5">{Object.entries(sqliteRecordValues).map(([column, value]) => <label key={column} className="block text-[10px] uppercase tracking-wider text-slate-500"><span className="flex items-center gap-2">{column}{sqliteColumns.find(item => item.name === column)?.primaryKey && <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[8px] text-amber-400">PK</span>}</span><textarea value={value === null ? 'NULL' : typeof value === 'object' ? JSON.stringify(value) : String(value)} onChange={event => setSqliteRecordValues(values => ({ ...values, [column]: event.target.value }))} rows={2} className="mt-1.5 w-full resize-y rounded border border-white/10 bg-black p-2.5 text-xs font-mono normal-case tracking-normal text-white outline-none focus:border-emerald-500/40" /></label>)}</div><div className="sticky bottom-0 flex justify-end gap-2 p-4 border-t border-white/10 bg-[#0d1110]"><button onClick={() => setSqliteRecordModal(null)} className="px-4 py-2 text-xs border border-white/10 rounded">Hủy</button><button onClick={saveSqliteRecord} disabled={sqliteLoading} className="flex items-center gap-2 px-4 py-2 text-xs bg-emerald-500 text-black font-bold rounded disabled:opacity-40"><Save className="w-3.5 h-3.5" />{sqliteRecordModal.mode === 'add' ? 'Thêm bản ghi' : 'Lưu thay đổi'}</button></div></div></div>}
-                    {showCreateSqlite && <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"><div className="w-full max-w-2xl rounded-xl border border-emerald-500/20 bg-[#0d1110] p-5 space-y-4 shadow-2xl"><div className="flex items-start gap-3"><Database className="w-5 h-5 text-emerald-400" /><div><h4 className="font-bold text-white">Tạo SQLite mới</h4><p className="mt-1 text-[10px] text-slate-500 font-mono">Đường dẫn tương đối trong vùng SQLite của server</p></div><button onClick={() => setShowCreateSqlite(false)} className="ml-auto"><X className="w-4 h-4" /></button></div><label className="block text-xs text-slate-400">Đường dẫn database<input value={newSqlitePath} onChange={event => setNewSqlitePath(event.target.value)} placeholder="data/app.sqlite" className="mt-1.5 w-full bg-black border border-white/10 focus:border-emerald-500/50 outline-none rounded px-3 py-2.5 text-white font-mono" /></label><label className="block text-xs text-slate-400">Schema khởi tạo <span className="text-slate-600">(không bắt buộc)</span><textarea value={newSqliteSchema} onChange={event => setNewSqliteSchema(event.target.value)} placeholder={'CREATE TABLE users (\n  id INTEGER PRIMARY KEY,\n  name TEXT NOT NULL\n);'} spellCheck={false} className="mt-1.5 w-full min-h-48 resize-y bg-black border border-white/10 focus:border-emerald-500/50 outline-none rounded p-3 text-emerald-200 text-xs font-mono" /></label><div className="flex justify-end gap-2"><button onClick={() => setShowCreateSqlite(false)} className="px-4 py-2 text-xs border border-white/10 rounded">Hủy</button><button onClick={createSqlite} disabled={sqliteLoading || !newSqlitePath.trim()} className="px-4 py-2 text-xs bg-emerald-500 text-black font-bold rounded disabled:opacity-40">Tạo database</button></div></div></div>}
+                    {showSqliteBrowser && <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3 sm:p-4"><div className="w-full max-w-4xl max-h-[88vh] flex flex-col rounded-xl border border-emerald-500/20 bg-[#0d1110] shadow-2xl overflow-hidden"><div className="flex items-start gap-3 p-5 border-b border-white/10"><Folder className="w-5 h-5 text-emerald-400" /><div><h4 className="font-bold text-white">Mở SQLite có sẵn</h4><p className="mt-1 text-[10px] text-slate-500 font-mono">Duyệt filesystem từ {sqliteBrowserRoot || 'root'} · chỉ hiện file SQLite hợp lệ</p></div><button onClick={() => setShowSqliteBrowser(false)} className="ml-auto"><X className="w-4 h-4" /></button></div><form onSubmit={event => { event.preventDefault(); browseSqlitePath(sqliteBrowserPath); }} className="flex gap-2 p-3 border-b border-white/10"><button type="button" disabled={!sqliteBrowserParent} onClick={() => sqliteBrowserParent && browseSqlitePath(sqliteBrowserParent)} title="Thư mục cha" className="p-2.5 rounded border border-white/10 disabled:opacity-30"><ArrowLeft className="w-4 h-4" /></button><input value={sqliteBrowserPath} onChange={event => setSqliteBrowserPath(event.target.value)} placeholder="/var/lib/app" className="min-w-0 flex-1 bg-black border border-white/10 focus:border-emerald-500/50 outline-none rounded px-3 py-2 text-xs text-white font-mono" /><button type="submit" className="px-4 py-2 rounded bg-white/5 border border-white/10 text-xs">Đi tới</button></form><div className="flex-1 min-h-64 overflow-y-auto divide-y divide-white/5">{sqliteBrowserItems.map(item => <button key={item.path} onClick={() => item.type === 'directory' ? browseSqlitePath(item.path) : selectExistingSqlite(item.path)} className="w-full flex items-center gap-3 p-3 sm:px-5 text-left hover:bg-white/[0.03]"><span className={`p-2 rounded ${item.type === 'directory' ? 'bg-blue-500/10 text-blue-400' : 'bg-emerald-500/10 text-emerald-400'}`}>{item.type === 'directory' ? <Folder className="w-4 h-4" /> : <Database className="w-4 h-4" />}</span><span className="min-w-0 flex-1"><span className="block text-xs text-white truncate">{item.name}</span><span className="block mt-1 text-[9px] text-slate-600 font-mono truncate">{item.path}</span></span>{item.type === 'database' ? <span className="text-[9px] text-slate-500">{((item.size || 0) / 1024).toFixed(1)} KB</span> : <ChevronRight className="w-4 h-4 text-slate-700" />}</button>)}{sqliteBrowserItems.length === 0 && <div className="p-12 text-center text-xs text-slate-600">Thư mục trống hoặc không có file SQLite hợp lệ.</div>}</div><div className="flex items-center justify-between gap-3 p-3 border-t border-white/10 text-[9px] text-slate-600 font-mono"><span className="truncate">Root: {sqliteBrowserRoot}</span><button onClick={() => setShowSqliteBrowser(false)} className="px-3 py-1.5 text-xs border border-white/10 rounded text-slate-300">Đóng</button></div></div></div>}
                   </AnimatePresence>
                 </div>
               </main>

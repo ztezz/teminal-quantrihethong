@@ -20,6 +20,7 @@ type Options = {
   hasStepUp: (req: Request) => boolean;
   log: (req: Request, action: string, event: string, metadata?: Record<string, unknown>) => void;
   rootDir?: string;
+  browserRoot?: string;
   backupDir?: string;
   protectedFiles?: string[];
 };
@@ -72,10 +73,12 @@ function parseCsv(input: string) {
   return records.filter(row => row.some(value => value !== '')).map(row => Object.fromEntries(headers.map((header, index) => [header, row[index] ?? ''])));
 }
 
-export function createSqliteManagerRouter({ authorize, hasStepUp, log, rootDir, backupDir, protectedFiles = [] }: Options) {
+export function createSqliteManagerRouter({ authorize, hasStepUp, log, rootDir, browserRoot: browserRootOption, backupDir, protectedFiles = [] }: Options) {
   const router = Router();
   const root = path.resolve(rootDir || process.cwd());
   const canonicalRoot = fs.realpathSync(root);
+  const browserRoot = path.resolve(browserRootOption || path.parse(process.cwd()).root);
+  const canonicalBrowserRoot = fs.realpathSync(browserRoot);
   const backupRoot = path.resolve(backupDir || path.join(root, '.terminal-sqlite-backups'));
   const backupRelative = path.relative(root, backupRoot);
   if (backupRelative === '..' || backupRelative.startsWith(`..${path.sep}`) || path.isAbsolute(backupRelative)) throw new Error('SQLite backup directory must be inside the manager root');
@@ -87,6 +90,7 @@ export function createSqliteManagerRouter({ authorize, hasStepUp, log, rootDir, 
     return res.status(status).json({ success: false, error: error.message || 'Không thể xử lý SQLite' });
   };
   const relative = (target: string) => path.relative(root, target).split(path.sep).join('/');
+  const displayPath = (target: string) => isInside(root, target) ? relative(target) : target;
   const isInside = (parent: string, target: string) => {
     const value = path.relative(parent, target);
     return value === '' || !value.startsWith(`..${path.sep}`) && value !== '..' && !path.isAbsolute(value);
@@ -97,8 +101,10 @@ export function createSqliteManagerRouter({ authorize, hasStepUp, log, rootDir, 
   };
   const resolveDatabase = (userPath: unknown, mustExist = true) => {
     if (typeof userPath !== 'string' || !userPath.trim() || userPath.length > 1024) throw httpError(400, 'Đường dẫn database không hợp lệ');
-    const target = path.resolve(root, userPath.replace(/^[/\\]+/, ''));
-    if (!isInside(root, target)) throw httpError(403, 'Database nằm ngoài thư mục quản lý');
+    const target = path.isAbsolute(userPath) ? path.resolve(userPath) : path.resolve(root, userPath.replace(/^[/\\]+/, ''));
+    const allowedRoot = path.isAbsolute(userPath) ? browserRoot : root;
+    const canonicalAllowedRoot = path.isAbsolute(userPath) ? canonicalBrowserRoot : canonicalRoot;
+    if (!isInside(allowedRoot, target)) throw httpError(403, 'Database nằm ngoài thư mục được phép duyệt');
     if (isInside(backupRoot, target)) throw httpError(403, 'Thư mục backup không thể được mở như database quản lý');
     if (!SQLITE_EXTENSIONS.has(path.extname(target).toLowerCase())) throw httpError(400, 'Database phải có đuôi .sqlite, .sqlite3 hoặc .db');
     let existing = mustExist ? target : path.dirname(target);
@@ -108,7 +114,7 @@ export function createSqliteManagerRouter({ authorize, hasStepUp, log, rootDir, 
       existing = parent;
     }
     const canonicalExisting = fs.realpathSync(existing);
-    if (!isInside(canonicalRoot, canonicalExisting)) throw httpError(403, 'Symbolic link trỏ ra ngoài thư mục quản lý');
+    if (!isInside(canonicalAllowedRoot, canonicalExisting)) throw httpError(403, 'Symbolic link trỏ ra ngoài thư mục được phép duyệt');
     return target;
   };
   const openDatabase = (userPath: unknown, readOnly = false) => {
@@ -237,6 +243,30 @@ export function createSqliteManagerRouter({ authorize, hasStepUp, log, rootDir, 
 
   router.use((req, res, next) => authorize(req, res, 'admin') ? next() : undefined);
 
+  router.get('/browse', async (req, res) => {
+    try {
+      const requested = typeof req.query.path === 'string' && req.query.path.trim() ? path.resolve(req.query.path) : browserRoot;
+      if (!isInside(browserRoot, requested)) throw httpError(403, 'Thư mục nằm ngoài filesystem root được phép duyệt');
+      const canonicalRequested = fs.realpathSync(requested);
+      if (!isInside(canonicalBrowserRoot, canonicalRequested)) throw httpError(403, 'Symbolic link trỏ ra ngoài filesystem root được phép duyệt');
+      const stat = await fsp.stat(canonicalRequested);
+      if (!stat.isDirectory()) throw httpError(400, 'Đường dẫn không phải thư mục');
+      const entries = await fsp.readdir(canonicalRequested, { withFileTypes: true });
+      const items = (await Promise.all(entries.map(async entry => {
+        try {
+          const target = path.join(canonicalRequested, entry.name);
+          if (entry.isDirectory() && !entry.isSymbolicLink()) return { name: entry.name, path: target, type: 'directory' as const };
+          if (!entry.isFile() || !SQLITE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) return null;
+          const itemStat = await fsp.stat(target);
+          if (itemStat.size < 16 || await sqliteHeader(target).catch(() => '') !== 'SQLite format 3\0') return null;
+          return { name: entry.name, path: target, type: 'database' as const, size: itemStat.size, mtime: itemStat.mtime.toISOString(), protected: protectedPaths.has(path.resolve(target)) };
+        } catch { return null; }
+      }))).filter(Boolean).sort((a, b) => Number(a!.type === 'database') - Number(b!.type === 'database') || a!.name.localeCompare(b!.name));
+      const parent = canonicalRequested === canonicalBrowserRoot ? null : path.dirname(canonicalRequested);
+      return res.json({ success: true, root: canonicalBrowserRoot, currentPath: canonicalRequested, parentPath: parent, items });
+    } catch (error) { return fail(res, error); }
+  });
+
   router.get('/', async (_req, res) => {
     try {
       const queue = [root];
@@ -260,29 +290,6 @@ export function createSqliteManagerRouter({ authorize, hasStepUp, log, rootDir, 
       }
       databases.sort((a, b) => a.path.localeCompare(b.path));
       return res.json({ success: true, root: canonicalRoot, databases, scanned, truncated: Boolean(queue.length) });
-    } catch (error) { return fail(res, error); }
-  });
-
-  router.post('/', async (req, res) => {
-    if (!requireStepUp(req, res, 'Tạo database yêu cầu xác nhận lại danh tính')) return;
-    try {
-      let databasePath = String(req.body?.path || '').trim().replace(/\\/g, '/');
-      if (!path.posix.extname(databasePath)) databasePath += '.sqlite';
-      const filename = resolveDatabase(databasePath, false);
-      await fsp.mkdir(path.dirname(filename), { recursive: true });
-      if (fs.existsSync(filename)) throw httpError(409, 'Database đã tồn tại');
-      const database = new DatabaseSync(filename, { open: true });
-      try {
-        database.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA user_version = 0;');
-        if (typeof req.body?.schema === 'string' && req.body.schema.trim()) {
-          if (req.body.schema.length > MAX_SQL_LENGTH) throw httpError(413, 'Schema SQL quá dài');
-          if (/\b(?:ATTACH|DETACH)\b|\bVACUUM\s+INTO\b|load_extension\s*\(/i.test(req.body.schema)) throw httpError(403, 'Schema có thể truy cập ngoài database hiện tại đã bị chặn');
-          database.exec(req.body.schema);
-        }
-      } catch (error) { database.close(); await fsp.rm(filename, { force: true }); throw error; }
-      database.close();
-      log(req, 'sqlite_create', 'SQLite database created', { path: relative(filename) });
-      return res.status(201).json({ success: true, path: relative(filename) });
     } catch (error) { return fail(res, error); }
   });
 
@@ -578,7 +585,7 @@ export function createSqliteManagerRouter({ authorize, hasStepUp, log, rootDir, 
       const target = backupPath(name);
       if (fs.existsSync(target)) throw httpError(409, 'Backup đã tồn tại');
       await backup(database, target);
-      log(req, 'sqlite_backup_create', 'SQLite backup created', { path: relative(opened.filename), backup: name });
+      log(req, 'sqlite_backup_create', 'SQLite backup created', { path: displayPath(opened.filename), backup: name });
       const stat = await fsp.stat(target);
       return res.status(201).json({ success: true, backup: { name, size: stat.size, mtime: stat.mtime.toISOString() } });
     } catch (error) { return fail(res, error); } finally { database?.close(); }

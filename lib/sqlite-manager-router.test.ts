@@ -20,6 +20,7 @@ async function fixture() {
   app.use(express.json({ limit: '2mb' }));
   app.use('/api/sqlite', createSqliteManagerRouter({
     rootDir: root,
+    browserRoot: root,
     authorize: (_req, res, minimum) => role === 'root' || minimum === 'admin' ? true : (res.status(403).json({ success: false }), false),
     hasStepUp: () => stepUp,
     log: () => undefined
@@ -94,5 +95,20 @@ test('backup files are isolated from scans and can be created and listed', async
     assert.deepEqual(databases.body.databases.map((item: { path: string }) => item.path), ['sample.sqlite']);
     const escaped = await context.request('/backups', { method: 'POST', body: JSON.stringify({ path: 'sample.sqlite', name: '../escape.sqlite' }) });
     assert.equal(escaped.status, 400);
+  } finally { await context.close(); }
+});
+
+test('filesystem browser lists directories and valid SQLite files only', async () => {
+  const context = await fixture();
+  try {
+    fs.mkdirSync(path.join(context.root, 'nested'));
+    fs.writeFileSync(path.join(context.root, 'fake.sqlite'), 'not sqlite');
+    fs.writeFileSync(path.join(context.root, 'notes.txt'), 'text');
+    const browsed = await context.request('/browse');
+    assert.equal(browsed.status, 200);
+    assert.deepEqual(browsed.body.items.map((item: { name: string }) => item.name), ['nested', 'sample.sqlite']);
+    assert.equal(browsed.body.items.find((item: { name: string }) => item.name === 'sample.sqlite').type, 'database');
+    const escaped = await context.request(`/browse?path=${encodeURIComponent(path.dirname(context.root))}`);
+    assert.equal(escaped.status, 403);
   } finally { await context.close(); }
 });

@@ -28,6 +28,7 @@ const FILE_MANAGER_ROOT = path.resolve(process.env.FILE_MANAGER_ROOT || process.
 const FILE_MANAGER_TRASH_DIR = path.resolve(process.env.FILE_MANAGER_TRASH_DIR || path.join(process.cwd(), '.terminal-trash'));
 const FILE_MANAGER_SNAPSHOT_DIR = path.resolve(process.env.FILE_MANAGER_SNAPSHOT_DIR || path.join(process.cwd(), '.terminal-snapshots'));
 const SQLITE_MANAGER_ROOT = path.resolve(process.env.SQLITE_MANAGER_ROOT || FILE_MANAGER_ROOT);
+const SQLITE_BROWSER_ROOT = path.resolve(process.env.SQLITE_BROWSER_ROOT || path.parse(process.cwd()).root);
 const SQLITE_BACKUP_DIR = path.resolve(process.env.SQLITE_BACKUP_DIR || path.join(SQLITE_MANAGER_ROOT, '.terminal-sqlite-backups'));
 const SESSION_COOKIE = 'terminal_session';
 const STEP_UP_COOKIE = 'terminal_step_up';
@@ -802,6 +803,7 @@ async function startServer() {
     authorize: (req, res, minimum) => Boolean(requireRole(req, res, minimum)),
     hasStepUp,
     rootDir: SQLITE_MANAGER_ROOT,
+    browserRoot: SQLITE_BROWSER_ROOT,
     backupDir: SQLITE_BACKUP_DIR,
     protectedFiles: [DB_FILE],
     log: (req, action, event, metadata) => auditRequest(req, { category: 'database', action, event, level: action === 'sqlite_query' ? 'info' : 'warning', metadata })
