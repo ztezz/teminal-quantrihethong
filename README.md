@@ -106,6 +106,7 @@ Mở `http://localhost:3000`.
 | `FRONTEND_ORIGIN` | Backend | Origin frontend chính xác, ví dụ `https://terminal.example.com`; không có dấu `/` cuối. |
 | `TRUST_PROXY` | Backend | Proxy tin cậy của Express. Đặt `1` khi backend chỉ nằm sau đúng một reverse proxy; để trống nếu truy cập trực tiếp. |
 | `DATABASE_PATH` | Backend | Đường dẫn database SQLite, mặc định `terminal_database.sqlite` trong working directory. |
+| `SQLITE_MANAGER_ROOT` | Backend | Thư mục gốc được phép quét, tạo và quản lý database SQLite; mặc định dùng `FILE_MANAGER_ROOT`. |
 | `LEGACY_DATABASE_PATH` | Backend | File JSON cũ để import một lần, mặc định `terminal_database.json` cạnh database SQLite. |
 | `FILE_MANAGER_ROOT` | Backend | Thư mục gốc hiển thị trong File Manager. Dùng `/` để quản lý toàn máy chủ. |
 | `FILE_MANAGER_TRASH_DIR` | Backend | Nơi lưu thùng rác, phải có quyền ghi. |

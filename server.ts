@@ -9,6 +9,7 @@ import QRCode from 'qrcode';
 import dotenv from 'dotenv';
 import * as pty from 'node-pty';
 import { createFileManagerRouter } from './lib/file-manager-router';
+import { createSqliteManagerRouter } from './lib/sqlite-manager-router';
 import { escapeCsvCell, validateRuntimeConfig } from './lib/security-utils';
 import { SqliteDatabase, type AuditEntry, type AuditLevel, type AuditResult, type Role, type StoredSession, type StoredUser } from './lib/sqlite-database';
 import os from 'os';
@@ -26,6 +27,7 @@ const handle = nextApp?.getRequestHandler();
 const FILE_MANAGER_ROOT = path.resolve(process.env.FILE_MANAGER_ROOT || process.cwd());
 const FILE_MANAGER_TRASH_DIR = path.resolve(process.env.FILE_MANAGER_TRASH_DIR || path.join(process.cwd(), '.terminal-trash'));
 const FILE_MANAGER_SNAPSHOT_DIR = path.resolve(process.env.FILE_MANAGER_SNAPSHOT_DIR || path.join(process.cwd(), '.terminal-snapshots'));
+const SQLITE_MANAGER_ROOT = path.resolve(process.env.SQLITE_MANAGER_ROOT || FILE_MANAGER_ROOT);
 const SESSION_COOKIE = 'terminal_session';
 const STEP_UP_COOKIE = 'terminal_step_up';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -793,6 +795,14 @@ async function startServer() {
     rootDir: FILE_MANAGER_ROOT,
     trashDir: FILE_MANAGER_TRASH_DIR,
     snapshotDir: FILE_MANAGER_SNAPSHOT_DIR
+  }));
+
+  expressApp.use('/api/sqlite', createSqliteManagerRouter({
+    authorize: (req, res, minimum) => Boolean(requireRole(req, res, minimum)),
+    hasStepUp,
+    rootDir: SQLITE_MANAGER_ROOT,
+    protectedFiles: [DB_FILE],
+    log: (req, action, event, metadata) => auditRequest(req, { category: 'database', action, event, level: action === 'sqlite_query' ? 'info' : 'warning', metadata })
   }));
 
   // --- Socket.io Terminal Implementation ---
