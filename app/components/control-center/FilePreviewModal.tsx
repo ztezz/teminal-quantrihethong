@@ -7,6 +7,7 @@ import { API_URL, previewKind } from "./helpers";
 import { getFileIcon } from "./FileIcon";
 import { CodeEditor } from "./CodeEditor";
 import { PdfViewer } from "./PdfViewer";
+import { VideoPlayer } from "./VideoPlayer";
 import type { ConfirmOptions, UserRole } from "./types";
 
 interface FilePreviewModalProps {
@@ -100,7 +101,7 @@ export function FilePreviewModal({ role, filePath, fileContent, editorOriginal, 
           <button type="button" onClick={() => void close()} aria-label="Đóng xem trước" className="ml-0 inline-flex h-9 w-9 items-center justify-center rounded border border-white/10 text-slate-400 hover:bg-white/5 hover:text-white"><X className="h-4 w-4" /></button>
         </div>
         <div className="min-h-0 flex-1 overflow-auto">
-          {kind === "video" ? <div className="flex h-full items-center justify-center bg-black p-4"><video key={filePath} src={mediaUrl} controls playsInline preload="metadata" className="max-h-full w-full bg-black">Trình duyệt không hỗ trợ video.</video></div>
+          {kind === "video" ? <VideoPlayer key={`${filePath}-${previewTicket}`} src={mediaUrl} fileName={fileName} />
             : kind === "audio" ? <div className="flex h-full min-h-64 items-center justify-center bg-gradient-to-br from-slate-950 via-purple-950/40 to-black p-8"><audio key={filePath} src={mediaUrl} controls preload="metadata" className="w-full max-w-2xl">Trình duyệt không hỗ trợ âm thanh.</audio></div>
               : kind === "image" ? <ImagePreview src={mediaUrl} alt={`Xem trước ${fileName}`} fileName={fileName} />
                 : kind === "pdf" || kind === "office" ? <PdfViewer key={`${filePath}-${previewTicket}`} fileName={fileName} src={`${API_URL}/api/files/${kind === "office" ? "office-preview" : "media"}?path=${encodeURIComponent(filePath)}&ticket=${encodeURIComponent(previewTicket || "")}`} />

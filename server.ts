@@ -117,7 +117,7 @@ function hasStepUp(req: express.Request): boolean {
   return Boolean(entry && token && entry.expiresAt > Date.now() && entry.sessionHash === crypto.createHash('sha256').update(token).digest('hex'));
 }
 
-const previewTickets = new Map<string, { path: string; expiresAt: number; remainingUses: number }>();
+const previewTickets = new Map<string, { path: string; expiresAt: number; maxExpiresAt: number; remainingUses: number }>();
 const socketTickets = new Map<string, { expiresAt: number; userId: string; sessionHash: string }>();
 const loginChallenges = new Map<string, { expiresAt: number; ip: string; userAgent: string; userId: string }>();
 function createTicket<T extends { expiresAt: number }>(store: Map<string, T>, value: T): string {
@@ -132,6 +132,7 @@ function consumePreviewTicket(ticket: string, filePath: string): boolean {
   const entry = previewTickets.get(ticket);
   if (!entry || entry.expiresAt <= Date.now() || entry.path !== filePath) return false;
   entry.remainingUses--;
+  entry.expiresAt = Math.min(entry.maxExpiresAt, Date.now() + 30 * 60_000);
   if (entry.remainingUses <= 0) previewTickets.delete(ticket);
   return true;
 }
@@ -702,7 +703,8 @@ async function startServer() {
 
   expressApp.post('/api/auth/preview-ticket', (req, res) => {
     if (!authenticated(req) || typeof req.body.path !== 'string') return res.status(401).json({ success: false, error: 'Unauthorized' });
-    return res.json({ success: true, ticket: createTicket(previewTickets, { path: req.body.path, expiresAt: Date.now() + 60_000, remainingUses: 16 }) });
+    const now = Date.now();
+    return res.json({ success: true, ticket: createTicket(previewTickets, { path: req.body.path, expiresAt: now + 30 * 60_000, maxExpiresAt: now + 8 * 60 * 60_000, remainingUses: 512 }) });
   });
 
   expressApp.post('/api/auth/step-up', async (req, res) => {

@@ -131,6 +131,20 @@ test('media preview serves AVIF with the correct MIME type', async () => {
   } finally { await context.close(); }
 });
 
+test('media preview supports bounded byte ranges for video seeking', async () => {
+  const context = await fixture();
+  try {
+    fs.writeFileSync(path.join(context.root, 'clip.mp4'), Buffer.from('0123456789'));
+    const response = await context.request('/media?path=clip.mp4', { headers: { range: 'bytes=2-5' } });
+    assert.equal(response.status, 206);
+    assert.equal(response.headers.get('accept-ranges'), 'bytes');
+    assert.equal(response.headers.get('content-range'), 'bytes 2-5/10');
+    assert.equal(response.headers.get('content-length'), '4');
+    assert.equal(response.headers.get('content-type'), 'video/mp4');
+    assert.equal(response.body, '2345');
+  } finally { await context.close(); }
+});
+
 test('rejects path traversal outside the managed root', async () => {
   const context = await fixture();
   try {
