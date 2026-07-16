@@ -26,6 +26,7 @@ import {
 } from "lucide-react";
 import { getFileIcon } from "../FileIcon";
 import { API_URL, previewKind } from "../helpers";
+import { CodeEditor } from "../CodeEditor";
 import type { ConfirmOptions, FileBookmark, UserRole } from "../types";
 
 interface FileItem {
@@ -39,10 +40,6 @@ interface FileItem {
 interface FileClipboard {
   operation: "copy" | "move";
   paths: string[];
-}
-interface EditorPosition {
-  line: number;
-  char: number;
 }
 export interface FileWorkspaceData {
   role?: UserRole;
@@ -70,13 +67,9 @@ export interface FileWorkspaceData {
   searchTruncated: boolean;
   uploadProgress: Record<string, number>;
   previewTicket: string | null;
-  editorFind: string;
-  editorReplace: string;
-  editorPosition: EditorPosition;
 }
 export interface FileWorkspaceActions {
   uploadInputRef: RefObject<HTMLInputElement | null>;
-  editorRef: RefObject<HTMLTextAreaElement | null>;
   uploadFiles: (files: globalThis.File[]) => void;
   loadFiles: (
     path?: string,
@@ -110,9 +103,6 @@ export interface FileWorkspaceActions {
   askConfirm: (options: ConfirmOptions) => Promise<boolean>;
   setViewingFile: Dispatch<SetStateAction<string | null>>;
   setFileContent: Dispatch<SetStateAction<string | null>>;
-  setEditorFind: Dispatch<SetStateAction<string>>;
-  setEditorReplace: Dispatch<SetStateAction<string>>;
-  setEditorPosition: Dispatch<SetStateAction<EditorPosition>>;
   openContextMenu: (event: MouseEvent, kind: "file", item: FileItem) => void;
   openTerminal: () => void;
   createArchive: () => void;
@@ -154,14 +144,10 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
     searchTruncated,
     uploadProgress,
     previewTicket,
-    editorFind,
-    editorReplace,
-    editorPosition,
   } = data;
   const currentUser = role ? { role } : null;
   const {
     uploadInputRef,
-    editorRef,
     uploadFiles,
     loadFiles,
     openTrash,
@@ -191,9 +177,6 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
     askConfirm,
     setViewingFile,
     setFileContent,
-    setEditorFind,
-    setEditorReplace,
-    setEditorPosition,
     openContextMenu,
     openTerminal,
     createArchive,
@@ -648,7 +631,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
                       <span>Hủy</span>
                     </button>
                   </>
-                ) : (
+                ) : currentUser?.role !== "viewer" ? (
                   <button
                     onClick={() => setIsEditingFile(true)}
                     className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-xs font-semibold text-white rounded transition cursor-pointer"
@@ -656,7 +639,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
                     <Edit className="w-3.5 h-3.5" />
                     <span>Chỉnh sửa</span>
                   </button>
-                )}
+                ) : null}
                 <button
                   onClick={async () => {
                     if (
@@ -728,101 +711,8 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
                 className="h-[75vh] w-full bg-white"
               />
             ) : (
-              <div className="p-4 bg-black">
-                <div className="flex flex-wrap gap-2 mb-2">
-                  <input
-                    value={editorFind}
-                    onChange={(e) => setEditorFind(e.target.value)}
-                    placeholder="Tìm"
-                    className="bg-[#111116] border border-white/10 px-2 py-1 text-xs rounded"
-                  />
-                  <input
-                    value={editorReplace}
-                    onChange={(e) => setEditorReplace(e.target.value)}
-                    placeholder="Thay thế"
-                    className="bg-[#111116] border border-white/10 px-2 py-1 text-xs rounded"
-                  />
-                  <button
-                    onClick={() => {
-                      const area = editorRef.current;
-                      if (!area || !editorFind) return;
-                      const start = (fileContent || "").indexOf(
-                        editorFind,
-                        area.selectionEnd,
-                      );
-                      const index =
-                        start < 0
-                          ? (fileContent || "").indexOf(editorFind)
-                          : start;
-                      if (index >= 0) {
-                        area.focus();
-                        area.setSelectionRange(
-                          index,
-                          index + editorFind.length,
-                        );
-                      }
-                    }}
-                    className="px-2 py-1 text-xs bg-white/10 rounded"
-                  >
-                    Tìm tiếp
-                  </button>
-                  <button
-                    disabled={!isEditingFile}
-                    onClick={() =>
-                      setFileContent(
-                        (fileContent || "")
-                          .split(editorFind)
-                          .join(editorReplace),
-                      )
-                    }
-                    className="px-2 py-1 text-xs bg-white/10 rounded disabled:opacity-30"
-                  >
-                    Thay tất cả
-                  </button>
-                </div>
-                <textarea
-                  ref={editorRef}
-                  value={fileContent || ""}
-                  onChange={(e) => setFileContent(e.target.value)}
-                  onSelect={(e) => {
-                    const value = e.currentTarget.value.slice(
-                      0,
-                      e.currentTarget.selectionStart,
-                    );
-                    const lines = value.split("\n");
-                    setEditorPosition({
-                      line: lines.length,
-                      char: lines[lines.length - 1].length + 1,
-                    });
-                  }}
-                  onKeyDown={(e) => {
-                    if (
-                      (e.ctrlKey || e.metaKey) &&
-                      e.key.toLowerCase() === "s"
-                    ) {
-                      e.preventDefault();
-                      saveEditedFile();
-                    }
-                    if (isEditingFile && e.key === "Tab") {
-                      e.preventDefault();
-                      const area = e.currentTarget;
-                      const start = area.selectionStart;
-                      const next = `${area.value.slice(0, start)}  ${area.value.slice(area.selectionEnd)}`;
-                      setFileContent(next);
-                      requestAnimationFrame(() =>
-                        area.setSelectionRange(start + 2, start + 2),
-                      );
-                    }
-                  }}
-                  readOnly={!isEditingFile}
-                  className="w-full h-96 bg-black text-slate-300 font-mono text-xs focus:outline-none resize-y p-3 rounded border border-white/5 focus:border-white/20 select-all leading-relaxed"
-                  spellCheck={false}
-                  placeholder="Nội dung tệp rỗng..."
-                />
-                <div className="mt-2 text-right text-[10px] font-mono text-slate-500">
-                  Dòng {editorPosition.line}, ký tự {editorPosition.char} |{" "}
-                  {(fileContent || "").length} ký tự | Ctrl+S để lưu
-                </div>
+              <div className="p-2 sm:p-4 bg-black">
+                <CodeEditor value={fileContent || ""} fileName={viewingFile} readOnly={!isEditingFile} dirty={fileContent !== editorOriginal} onChange={setFileContent} onSave={saveEditedFile} />
               </div>
             )}
           </div>

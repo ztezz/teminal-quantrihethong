@@ -40,7 +40,7 @@ setInterval(() => {
   lastCpuTimes = currentTimes;
 }, 3000).unref();
 
-export async function collectHostMetrics(sampleMs = 200): Promise<HostMetrics> {
+export async function collectHostMetrics(): Promise<HostMetrics> {
   const totalMemory = os.totalmem();
   const usedMemory = totalMemory - os.freemem();
   const diskRoot = path.parse(process.cwd()).root;

@@ -386,10 +386,6 @@ export default function Home() {
   const [snapshots, setSnapshots] = useState<FileSnapshot[]>([]);
   const [snapshotPath, setSnapshotPath] = useState("");
   const [editorOriginal, setEditorOriginal] = useState("");
-  const [editorFind, setEditorFind] = useState("");
-  const [editorReplace, setEditorReplace] = useState("");
-  const [editorPosition, setEditorPosition] = useState({ line: 1, char: 1 });
-  const editorRef = useRef<HTMLTextAreaElement>(null);
   const pendingTerminalCwdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const fileListRequestRef = useRef(0);
@@ -1444,7 +1440,6 @@ export default function Home() {
       if (data.success) {
         setFileMtime(data.mtime);
         setEditorOriginal(fileContent);
-        setIsEditingFile(false);
         replaceToast(toast, "success", "Đã lưu tệp.");
       } else {
         setFileError(data.error || "Lỗi khi lưu tệp tin");
@@ -3187,13 +3182,9 @@ export default function Home() {
                           searchTruncated,
                           uploadProgress,
                           previewTicket,
-                          editorFind,
-                          editorReplace,
-                          editorPosition,
                         }}
                         actions={{
                           uploadInputRef,
-                          editorRef,
                           uploadFiles,
                           loadFiles,
                           openTrash,
@@ -3223,9 +3214,6 @@ export default function Home() {
                           askConfirm,
                           setViewingFile,
                           setFileContent,
-                          setEditorFind,
-                          setEditorReplace,
-                          setEditorPosition,
                           openContextMenu,
                           openTerminal: openTerminalAtCurrentPath,
                           createArchive: createFileArchive,
