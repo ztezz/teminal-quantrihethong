@@ -8,7 +8,7 @@ import { Transform } from 'stream';
 import { pipeline } from 'stream/promises';
 import * as archiver from 'archiver';
 import unzipper from 'unzipper';
-import { ARCHIVE_LIMITS, validateArchivePlan } from './security-utils';
+import { ARCHIVE_LIMITS, accountArchiveSourceEntry, validateArchivePlan, type ArchiveSourceStats } from './security-utils';
 
 const fsp = fs.promises;
 const MAX_EDITOR_SIZE = 2 * 1024 * 1024;
@@ -502,11 +502,49 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
       const format = req.body.format ?? 'zip'; if (!['zip', 'tar', 'tar.gz'].includes(format)) throw httpError(400, 'Định dạng archive không được hỗ trợ');
       const defaultName = `archive-${Date.now()}.${format}`; const name = req.body.name ?? defaultName; if (!validName(name)) throw httpError(400, 'Tên archive không hợp lệ');
       const target = path.join(destinationDir, name); await ensureMissing(target);
-      await new Promise<void>((resolve, reject) => {
-        const output = fs.createWriteStream(target, { flags: 'wx' }); const archive = format === 'zip' ? new archiver.ZipArchive() : new archiver.TarArchive(format === 'tar.gz' ? { gzip: true } : {});
-        output.on('close', resolve); output.on('error', reject); archive.on('error', reject); archive.pipe(output);
-        try { for (const value of sources) { const source = resolveInsideRoot(value); const stat = fs.lstatSync(source); if (stat.isDirectory()) archive.directory(source, path.basename(source)); else archive.file(source, { name: path.basename(source) }); } archive.finalize(); } catch (error) { archive.abort(); reject(error); }
-      }).catch(async error => { await fsp.rm(target, { force: true }); throw error; });
+      const canonicalTarget = path.join(await fsp.realpath(destinationDir), name);
+      const plan: Array<{ source: string; archivePath: string; stat: fs.Stats; directory: boolean }> = [];
+      let sourceStats: ArchiveSourceStats = { entries: 0, totalSize: 0 };
+      const inspect = async (source: string, archivePath: string, depth: number): Promise<void> => {
+        const stat = await fsp.lstat(source);
+        const type = stat.isSymbolicLink() ? 'symlink' : stat.isDirectory() ? 'directory' : stat.isFile() ? 'file' : 'other';
+        sourceStats = accountArchiveSourceEntry(sourceStats, { path: relative(source), type, size: stat.size, depth });
+        plan.push({ source, archivePath, stat, directory: type === 'directory' });
+        if (type === 'directory') {
+          const children = await fsp.readdir(source);
+          for (const child of children) await inspect(path.join(source, child), path.posix.join(archivePath, child), depth + 1);
+        }
+      };
+      for (const value of sources) {
+        const source = resolveInsideRoot(value); const stat = await fsp.lstat(source);
+        if (stat.isDirectory()) {
+          const canonicalSource = await fsp.realpath(source);
+          const targetRelative = path.relative(canonicalSource, canonicalTarget);
+          if (targetRelative === '' || (!targetRelative.startsWith('..' + path.sep) && targetRelative !== '..' && !path.isAbsolute(targetRelative))) throw httpError(400, 'Archive đích không thể nằm trong thư mục nguồn');
+        }
+        await inspect(source, path.basename(source), 0);
+      }
+      await (async () => {
+        const archive = format === 'zip' ? new archiver.ZipArchive() : new archiver.TarArchive(format === 'tar.gz' ? { gzip: true } : {});
+        let outputBytes = 0;
+        const quota = new Transform({ transform(chunk, _encoding, callback) {
+          outputBytes += chunk.length;
+          if (outputBytes > ARCHIVE_LIMITS.maxOutputSize) return callback(httpError(413, 'Archive đầu ra vượt quá giới hạn dung lượng'));
+          callback(null, chunk);
+        } });
+        const outputPipeline = pipeline(archive, quota, fs.createWriteStream(target, { flags: 'wx' }));
+        try {
+          for (const entry of plan) {
+            if (entry.directory) archive.append(Buffer.alloc(0), { name: entry.archivePath.endsWith('/') ? entry.archivePath : `${entry.archivePath}/`, type: 'directory', stats: entry.stat });
+            else archive.file(entry.source, { name: entry.archivePath, stats: entry.stat });
+          }
+          await Promise.all([archive.finalize(), outputPipeline]);
+        } catch (error) {
+          archive.abort();
+          await outputPipeline.catch(() => undefined);
+          throw error;
+        }
+      })().catch(async error => { await fsp.rm(target, { force: true }); throw error; });
       await log(`Đã tạo archive: ${relative(target)}`, clientIp(req)); return res.status(201).json({ success: true, path: relative(target) });
     } catch (error) { return fail(res, error); }
   });

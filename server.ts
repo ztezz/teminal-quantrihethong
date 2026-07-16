@@ -815,11 +815,15 @@ async function startServer() {
     const context = requireRole(req, res, 'root'); if (!context) return;
     const user = db.getUserById(req.params.id); if (!user) return res.status(404).json({ success: false, error: 'Không tìm thấy user' });
     if (user.id === 'root' && (req.body.role && req.body.role !== 'root' || req.body.enabled === false)) return res.status(400).json({ success: false, error: 'Không thể khóa hoặc hạ quyền tài khoản root' });
+    const previousRole = user.role;
     if (req.body.role !== undefined) { if (!['viewer', 'operator', 'admin', 'root'].includes(req.body.role)) return res.status(400).json({ success: false, error: 'Vai trò không hợp lệ' }); user.role = req.body.role; }
     if (req.body.enabled !== undefined) user.enabled = Boolean(req.body.enabled);
-    if (req.body.password !== undefined) { if (String(req.body.password).length < 12) return res.status(400).json({ success: false, error: 'Mật khẩu phải có ít nhất 12 ký tự' }); user.passwordHash = await argon2.hash(String(req.body.password), { type: argon2.argon2id }); db.clearUserSessions(user.id); terminalRegistry.disconnectUser(user.id, 'password reset'); }
+    const passwordChanged = req.body.password !== undefined;
+    if (passwordChanged) { if (String(req.body.password).length < 12) return res.status(400).json({ success: false, error: 'Mật khẩu phải có ít nhất 12 ký tự' }); user.passwordHash = await argon2.hash(String(req.body.password), { type: argon2.argon2id }); }
     db.saveUser(user); auditRequest(req, { category: 'security', action: 'user_update', event: 'User updated', level: 'critical', metadata: { target: user.username, role: user.role, enabled: user.enabled } });
-    if (!user.enabled) { db.clearUserSessions(user.id); terminalRegistry.disconnectUser(user.id, 'user disabled'); }
+    if (passwordChanged || !user.enabled) db.clearUserSessions(user.id);
+    const disconnectReason = user.role !== previousRole ? 'role changed' : !user.enabled ? 'user disabled' : passwordChanged ? 'password reset' : undefined;
+    if (disconnectReason) terminalRegistry.disconnectUser(user.id, disconnectReason);
     return res.json({ success: true });
   });
 

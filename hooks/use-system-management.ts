@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiClient, ApiError } from "@/lib/client/api";
 import type { SystemProcess, SystemService, UserRole } from "@/app/components/control-center/types";
 
@@ -17,6 +17,13 @@ export function useSystemManagement(enabled: boolean, role: UserRole | undefined
   const [error, setError] = useState<string | null>(null);
   const [serviceLogs, setServiceLogs] = useState<{ unit: string; logs: string } | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    if (!enabled) {
+      controllerRef.current?.abort();
+    }
+    return () => controllerRef.current?.abort();
+  }, [enabled]);
 
   const load = useCallback(async (target: SystemView = view) => {
     if (!enabled || !role || !["admin", "root"].includes(role)) return;

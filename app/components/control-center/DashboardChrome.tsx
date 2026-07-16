@@ -60,13 +60,14 @@ export function Header({ socketStatus, onToggleSidebar, onLogout }: HeaderProps)
 }
 
 interface SidebarMetrics {
-  cpuPercent: number;
-  memUsedMB: number;
-  memTotalMB: number;
-  memPercent: number;
-  diskUsedGB: number;
-  diskTotalGB: number;
-  diskPercent: number;
+  cpuPercent: number | null;
+  memUsedMB: number | null;
+  memTotalMB: number | null;
+  memPercent: number | null;
+  diskUsedGB: number | null;
+  diskTotalGB: number | null;
+  diskPercent: number | null;
+  unavailable: boolean;
 }
 
 interface SidebarProps {
@@ -98,10 +99,10 @@ export function Sidebar({ open, width, activeTab, role, metrics, logs, onSelectT
       {open && (
         <motion.aside initial={{ width: 0, opacity: 0 }} animate={{ width, opacity: 1 }} exit={{ width: 0, opacity: 0 }} className="app-sidebar relative border-r flex flex-col h-full shrink-0 overflow-y-auto">
           <div className="p-4 border-b border-white/10 space-y-3">
-            <div className="flex items-center justify-between"><h3 className="app-kicker">Tài nguyên</h3><span className="text-[9px] font-mono text-emerald-400">LIVE</span></div>
-            <Metric label="Tải CPU" value={`${metrics.cpuPercent}%`} percent={metrics.cpuPercent} barClass="bg-gradient-to-r from-sky-500 to-cyan-300" />
-            <Metric label="Sử dụng Bộ nhớ" value={`${metrics.memUsedMB}MB / ${metrics.memTotalMB}MB`} percent={metrics.memPercent} barClass="bg-gradient-to-r from-violet-500 to-fuchsia-400" />
-            <Metric label="Dung lượng ổ đĩa" value={`${metrics.diskUsedGB}GB / ${metrics.diskTotalGB}GB`} percent={metrics.diskPercent} barClass={metrics.diskPercent >= 90 ? "bg-red-500" : metrics.diskPercent >= 75 ? "bg-amber-500" : "bg-emerald-500"} />
+            <div className="flex items-center justify-between"><h3 className="app-kicker">Tài nguyên</h3><span className={`text-[9px] font-mono ${metrics.unavailable ? "text-amber-400" : "text-emerald-400"}`}>{metrics.unavailable ? "STALE" : "LIVE"}</span></div>
+            <Metric label="Tải CPU" value={metrics.cpuPercent === null ? "Chưa có dữ liệu" : `${metrics.cpuPercent}%`} percent={metrics.cpuPercent ?? 0} barClass="bg-gradient-to-r from-sky-500 to-cyan-300" />
+            <Metric label="Sử dụng Bộ nhớ" value={metrics.memUsedMB === null ? "Chưa có dữ liệu" : `${metrics.memUsedMB}MB / ${metrics.memTotalMB}MB`} percent={metrics.memPercent ?? 0} barClass="bg-gradient-to-r from-violet-500 to-fuchsia-400" />
+            <Metric label="Dung lượng ổ đĩa" value={metrics.diskUsedGB === null ? "Chưa có dữ liệu" : `${metrics.diskUsedGB}GB / ${metrics.diskTotalGB}GB`} percent={metrics.diskPercent ?? 0} barClass={(metrics.diskPercent ?? 0) >= 90 ? "bg-red-500" : (metrics.diskPercent ?? 0) >= 75 ? "bg-amber-500" : "bg-emerald-500"} />
           </div>
           <div className="p-3 border-b border-white/10">
             <h3 className="app-kicker mb-3 px-2">Workspace</h3>

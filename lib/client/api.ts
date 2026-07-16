@@ -42,10 +42,13 @@ export function createApiClient(options: ApiClientOptions = {}) {
     if (!path.startsWith("/")) throw new Error("API paths must start with /");
 
     const { body, query, headers: requestHeaders, ...init } = requestOptions;
-    const url = new URL(`${baseUrl}${path}`);
+    let url = `${baseUrl}${path}`;
+    const searchParams = new URLSearchParams();
     for (const [key, value] of Object.entries(query ?? {})) {
-      if (value !== null && value !== undefined) url.searchParams.set(key, String(value));
+      if (value !== null && value !== undefined) searchParams.set(key, String(value));
     }
+    const queryString = searchParams.toString();
+    if (queryString) url += `${url.includes("?") ? "&" : "?"}${queryString}`;
 
     const headers = new Headers(options.defaultHeaders);
     new Headers(requestHeaders).forEach((value, key) => headers.set(key, value));

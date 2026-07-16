@@ -1,4 +1,5 @@
 const CACHE_NAME = "nodeshell-static-v1";
+const CACHE_PREFIX = "nodeshell-static-";
 const STATIC_PATHS = new Set(["/icon.svg", "/manifest.webmanifest"]);
 
 self.addEventListener("install", (event) => {
@@ -8,11 +9,14 @@ self.addEventListener("install", (event) => {
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
-    caches.keys().then((names) =>
-      Promise.all(names.filter((name) => name !== CACHE_NAME).map((name) => caches.delete(name))),
-    ),
+    caches.keys()
+      .then((names) => Promise.all(
+        names
+          .filter((name) => name.startsWith(CACHE_PREFIX) && name !== CACHE_NAME)
+          .map((name) => caches.delete(name)),
+      ))
+      .then(() => self.clients.claim()),
   );
-  self.clients.claim();
 });
 
 self.addEventListener("fetch", (event) => {
@@ -31,7 +35,7 @@ self.addEventListener("fetch", (event) => {
       return fetch(request).then((response) => {
         if (response.ok && response.type === "basic") {
           const copy = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+          event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.put(request, copy)));
         }
         return response;
       });

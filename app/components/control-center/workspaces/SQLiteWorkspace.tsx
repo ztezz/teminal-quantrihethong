@@ -348,6 +348,7 @@ export function SQLiteWorkspace({ data, actions }: SQLiteWorkspaceProps) {
             )}
             <div
               role="separator"
+              tabIndex={0}
               aria-label="Thay đổi chiều rộng trình duyệt SQLite"
               aria-orientation="vertical"
               onPointerDown={(event) => startResize(event, "sqlite")}
@@ -466,6 +467,7 @@ export function SQLiteWorkspace({ data, actions }: SQLiteWorkspaceProps) {
                       <div className="relative flex-1">
                         <Search className="absolute left-3 top-2.5 w-3.5 h-3.5 text-slate-600" />
                         <input
+                          aria-label="Tìm trong bảng SQLite"
                           value={sqliteSearch}
                           onChange={(event) =>
                             setSqliteSearch(event.target.value)

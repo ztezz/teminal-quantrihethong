@@ -228,9 +228,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
               </span>
             )}
           </div>
-          <div
-            className={`flex flex-wrap gap-2 ${currentUser?.role === "viewer" ? "pointer-events-none opacity-40" : ""}`}
-          >
+          <div className="flex flex-wrap gap-2">
             <input
               id="file-upload-input"
               ref={uploadInputRef}
@@ -262,6 +260,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
             </button>
             <button
               onClick={() => uploadInputRef.current?.click()}
+              disabled={currentUser?.role === "viewer"}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white rounded transition cursor-pointer"
             >
               <Upload className="w-3.5 h-3.5" />
@@ -286,6 +285,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
                 setShowCreateFolder(true);
                 setShowCreateFile(false);
               }}
+              disabled={currentUser?.role === "viewer"}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-xs font-semibold text-white rounded transition cursor-pointer"
             >
               <FolderPlus className="w-3.5 h-3.5" />
@@ -296,6 +296,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
                 setShowCreateFile(true);
                 setShowCreateFolder(false);
               }}
+              disabled={currentUser?.role === "viewer"}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-xs font-semibold text-white rounded transition cursor-pointer"
             >
               <FilePlus className="w-3.5 h-3.5" />
@@ -832,7 +833,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
             onDragOver={(event) => event.preventDefault()}
             onDrop={(event) => {
               event.preventDefault();
-              uploadFiles(Array.from(event.dataTransfer.files));
+              if (currentUser?.role !== "viewer") uploadFiles(Array.from(event.dataTransfer.files));
             }}
           >
             <div className="flex flex-wrap gap-2 p-2 border-b border-white/10 text-[11px]">
@@ -847,26 +848,19 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
                   Mở Terminal tại đây
                 </button>
               )}
-              <button
-                onClick={createArchive}
-                className="px-2 py-1 bg-white/5 rounded"
-              >
-                Tạo archive
-              </button>
-              <button
-                onClick={createSymlink}
-                className="px-2 py-1 bg-white/5 rounded"
-              >
-                Tạo symlink
-              </button>
+              {currentUser?.role !== "viewer" && <>
+                <button onClick={createArchive} className="px-2 py-1 bg-white/5 rounded">Tạo archive</button>
+                <button onClick={createSymlink} className="px-2 py-1 bg-white/5 rounded">Tạo symlink</button>
+              </>}
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-sm">
                 <thead>
                   <tr className="bg-[#111116]/80 border-b border-white/10 text-[10px] text-slate-500 font-mono uppercase tracking-widest">
                     <th className="py-3.5 pl-4 font-semibold">
-                      <input
-                        type="checkbox"
+                        <input
+                          type="checkbox"
+                          disabled={currentUser?.role === "viewer"}
                         checked={
                           filteredFiles.length > 0 &&
                           filteredFiles.every((item) =>
@@ -910,7 +904,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
                   ) : filteredFiles.length === 0 ? (
                     <tr>
                       <td
-                        colSpan={4}
+                        colSpan={5}
                         className="py-12 text-center text-slate-600 font-mono italic"
                       >
                         {fileSearchQuery
@@ -919,20 +913,19 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
                       </td>
                     </tr>
                   ) : (
-                    filteredFiles.map((file, index) => {
+                    filteredFiles.map((file) => {
                       const fullItemPath = file.path;
                       return (
                         <tr
-                          key={index}
-                          onContextMenu={(event) =>
-                            openContextMenu(event, "file", file)
-                          }
+                          key={fullItemPath}
+                          onContextMenu={currentUser?.role === "viewer" ? undefined : (event) => openContextMenu(event, "file", file)}
                           className="hover:bg-white/[0.02] transition-colors group"
                         >
                           {/* File / Folder Name Clickable */}
                           <td className="py-3.5 pl-4">
                             <input
                               type="checkbox"
+                              disabled={currentUser?.role === "viewer"}
                               checked={selectedPaths.includes(fullItemPath)}
                               onChange={() =>
                                 setSelectedPaths((items) =>
@@ -1019,50 +1012,19 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
                                   >
                                     <Eye className="w-3.5 h-3.5" />
                                   </button>
-                                  <button
-                                    onClick={() => {
-                                      openFile(fullItemPath).then(() => {
-                                        setIsEditingFile(true);
-                                      });
-                                    }}
-                                    className="p-1.5 rounded bg-blue-500/5 hover:bg-blue-500/20 text-blue-400 border border-blue-500/10 cursor-pointer transition-colors"
-                                    title="Sửa tệp"
-                                  >
-                                    <Edit className="w-3.5 h-3.5" />
-                                  </button>
+                                  {currentUser?.role !== "viewer" && (
+                                    <button onClick={() => openFile(fullItemPath, true)} className="p-1.5 rounded bg-blue-500/5 hover:bg-blue-500/20 text-blue-400 border border-blue-500/10 cursor-pointer transition-colors" title="Sửa tệp"><Edit className="w-3.5 h-3.5" /></button>
+                                  )}
                                 </>
                               )}
-                              <button
-                                onClick={() => openMetadata(fullItemPath)}
-                                className="p-1.5 rounded bg-white/5 text-slate-400 border border-white/10"
-                                title="Quyền"
-                              >
-                                <Lock className="w-3.5 h-3.5" />
-                              </button>
-                              {!file.isDirectory &&
-                                /\.(zip|tar|tgz|tar\.gz)$/i.test(file.name) && (
-                                  <button
-                                    onClick={() => extractArchive(fullItemPath)}
-                                    className="p-1.5 rounded bg-cyan-500/5 text-cyan-400 border border-cyan-500/10"
-                                    title="Giải nén"
-                                  >
-                                    <Download className="w-3.5 h-3.5" />
-                                  </button>
+                              {currentUser?.role !== "viewer" && <>
+                                <button onClick={() => openMetadata(fullItemPath)} className="p-1.5 rounded bg-white/5 text-slate-400 border border-white/10" title="Quyền"><Lock className="w-3.5 h-3.5" /></button>
+                                {!file.isDirectory && /\.(zip|tar|tgz|tar\.gz)$/i.test(file.name) && (
+                                  <button onClick={() => extractArchive(fullItemPath)} className="p-1.5 rounded bg-cyan-500/5 text-cyan-400 border border-cyan-500/10" title="Giải nén"><Download className="w-3.5 h-3.5" /></button>
                                 )}
-                              <button
-                                onClick={() => moveOrRename(fullItemPath)}
-                                className="p-1.5 rounded bg-amber-500/5 hover:bg-amber-500/20 text-amber-400 border border-amber-500/10 cursor-pointer transition-colors"
-                                title="Đổi tên"
-                              >
-                                <Move className="w-3.5 h-3.5" />
-                              </button>
-                              <button
-                                onClick={() => deleteFileOrFolder(fullItemPath)}
-                                className="p-1.5 rounded bg-red-500/5 hover:bg-red-500/20 text-red-400 border border-red-500/10 cursor-pointer transition-colors"
-                                title="Xóa"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
+                                <button onClick={() => moveOrRename(fullItemPath)} className="p-1.5 rounded bg-amber-500/5 hover:bg-amber-500/20 text-amber-400 border border-amber-500/10 cursor-pointer transition-colors" title="Đổi tên"><Move className="w-3.5 h-3.5" /></button>
+                                <button onClick={() => deleteFileOrFolder(fullItemPath)} className="p-1.5 rounded bg-red-500/5 hover:bg-red-500/20 text-red-400 border border-red-500/10 cursor-pointer transition-colors" title="Xóa"><Trash2 className="w-3.5 h-3.5" /></button>
+                              </>}
                             </div>
                           </td>
                         </tr>

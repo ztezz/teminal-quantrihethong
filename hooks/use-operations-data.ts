@@ -18,22 +18,21 @@ interface MetricsResponse extends MetricsData {
 }
 
 export function useMetricsPolling(enabled: boolean) {
-  const [metrics, setMetrics] = useState<MetricsData>({
-    cpu: 0,
-    memUsedMB: 0,
-    memTotalMB: 0,
-    memPercent: 0,
-    diskUsedGB: 0,
-    diskTotalGB: 0,
-    diskPercent: 0,
-  });
+  const [metrics, setMetrics] = useState<MetricsData | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
   useVisibilityPolling({
     enabled,
     interval: 5_000,
     request: (signal) => apiClient.request<MetricsResponse>("/api/metrics", { signal }),
-    onData: setMetrics,
+    onData: (payload) => {
+      setMetrics(payload);
+      setError(null);
+      setUpdatedAt(Date.now());
+    },
+    onError: (caught) => setError(caught instanceof Error ? caught.message : "Không thể tải tài nguyên"),
   });
-  return metrics;
+  return { metrics, error, updatedAt };
 }
 
 export function useOverviewPolling(enabled: boolean) {

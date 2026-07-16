@@ -24,3 +24,5 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm run build:backend
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test --config=playwright.static.config.ts

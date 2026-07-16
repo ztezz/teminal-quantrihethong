@@ -103,10 +103,13 @@ export default function Home() {
   >("idle");
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isSettingsLoadedRef = useRef<boolean>(false);
+  const settingsDebounceRef = useRef<NodeJS.Timeout | null>(null);
+  const stepUpPromiseRef = useRef<Promise<boolean> | null>(null);
+  const stepUpResolveRef = useRef<((granted: boolean) => void) | null>(null);
 
   // Logs & Settings Management UI State
   const auditLog = useAuditLog(sessionReady);
-  const { logs, total: logTotal, offset: logOffset, query: logQuery, setQuery: setLogQuery, category: logCategory, setCategory: setLogCategory, level: logLevel, setLevel: setLogLevel, result: logResult, setResult: setLogResult, integrity: logIntegrity, load: loadLogs, checkIntegrity: checkLogIntegrity, exportLogs: exportAuditLogs } = auditLog;
+  const { logs, total: logTotal, offset: logOffset, query: logQuery, setQuery: setLogQuery, category: logCategory, setCategory: setLogCategory, level: logLevel, setLevel: setLogLevel, result: logResult, setResult: setLogResult, integrity: logIntegrity, loading: logLoading, error: logError, load: loadLogs, checkIntegrity: checkLogIntegrity, exportLogs: exportAuditLogs } = auditLog;
   const [activeTab, setActiveTab] = useState<ActiveTab>(getSavedActiveTab);
   const [isSidebarOpen, setIsSidebarOpen] = useState(getSavedSidebarState);
   const [sqliteFiles, setSqliteFiles] = useState<SqliteFile[]>([]);
@@ -333,7 +336,14 @@ export default function Home() {
   }, [currentUser, activeTab]);
 
   // System metrics
-  const { cpu: cpuPercent, memUsedMB, memTotalMB, memPercent, diskUsedGB, diskTotalGB, diskPercent } = useMetricsPolling(Boolean(isAuthenticated && sessionReady));
+  const { metrics, error: metricsError } = useMetricsPolling(Boolean(isAuthenticated && sessionReady));
+  const cpuPercent = metrics?.cpu ?? null;
+  const memUsedMB = metrics?.memUsedMB ?? null;
+  const memTotalMB = metrics?.memTotalMB ?? null;
+  const memPercent = metrics?.memPercent ?? null;
+  const diskUsedGB = metrics?.diskUsedGB ?? null;
+  const diskTotalGB = metrics?.diskTotalGB ?? null;
+  const diskPercent = metrics?.diskPercent ?? null;
 
   // File Manager States
   const [filesList, setFilesList] = useState<any[]>([]);
@@ -382,6 +392,10 @@ export default function Home() {
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const pendingTerminalCwdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
+  const fileListRequestRef = useRef(0);
+  const fileOpenRequestRef = useRef(0);
+  const sqliteOpenRequestRef = useRef(0);
+  const sqliteRowsRequestRef = useRef(0);
 
   const visibleFiles = searchResults ?? filesList;
   const filteredFiles = visibleFiles.filter((file) =>
@@ -396,6 +410,7 @@ export default function Home() {
       fallbackToRoot = false,
     ) => {
       if (!sessionReady) return;
+      const requestId = ++fileListRequestRef.current;
       setFileLoading(true);
       setFileError(null);
       setFileSearchQuery("");
@@ -420,6 +435,7 @@ export default function Home() {
           data = await rootResponse.json();
           historyMode = "replace";
         }
+        if (requestId !== fileListRequestRef.current) return;
         if (data.success) {
           setFilesList(data.files);
           setCurrentPath(data.currentPath);
@@ -450,9 +466,10 @@ export default function Home() {
           setFileError(data.error || "Không thể tải danh sách tệp tin");
         }
       } catch (err: any) {
-        setFileError("Lỗi kết nối đến máy chủ: " + err.message);
+        if (requestId === fileListRequestRef.current)
+          setFileError("Lỗi kết nối đến máy chủ: " + err.message);
       } finally {
-        setFileLoading(false);
+        if (requestId === fileListRequestRef.current) setFileLoading(false);
       }
     },
     [sessionReady],
@@ -496,8 +513,15 @@ export default function Home() {
     return data;
   };
 
-  const requestStepUp = () =>
-    new Promise<boolean>((resolve) => setStepUpPrompt({ resolve }));
+  const requestStepUp = () => {
+    if (stepUpPromiseRef.current) return stepUpPromiseRef.current;
+    const promise = new Promise<boolean>((resolve) => {
+      stepUpResolveRef.current = resolve;
+      setStepUpPrompt({ resolve });
+    });
+    stepUpPromiseRef.current = promise;
+    return promise;
+  };
   const system = useSystemManagement(sessionReady && activeTab === "system", currentUser?.role, requestStepUp);
   const { view: systemView, setView: setSystemView, services, processes, query: systemQuery, setQuery: setSystemQuery, loading: systemLoading, error: systemError, setError: setSystemError, serviceLogs, setServiceLogs, load: loadSystemData, openServiceLogs } = system;
   const serviceAction = async (unit: string, action: string) => {
@@ -562,6 +586,7 @@ export default function Home() {
     } = {},
   ) => {
     if (!databasePath || !table) return;
+    const requestId = ++sqliteRowsRequestRef.current;
     setSqliteLoading(true);
     setSqliteMessage(null);
     try {
@@ -581,6 +606,7 @@ export default function Home() {
         params.set("order", order);
       }
       const data = await sqliteRequest(`/rows?${params}`);
+      if (requestId !== sqliteRowsRequestRef.current) return;
       setSelectedSqliteTable(table);
       setSqliteRows(data.rows || data.items || []);
       setSqliteColumns(data.columns || []);
@@ -595,13 +621,15 @@ export default function Home() {
       setSqliteLimit(limit);
       setSqliteResult([]);
     } catch (error: any) {
-      setSqliteMessage(error.message);
+      if (requestId === sqliteRowsRequestRef.current) setSqliteMessage(error.message);
     } finally {
-      setSqliteLoading(false);
+      if (requestId === sqliteRowsRequestRef.current) setSqliteLoading(false);
     }
   };
 
   const openSqlite = async (databasePath: string) => {
+    const requestId = ++sqliteOpenRequestRef.current;
+    sqliteRowsRequestRef.current += 1;
     setSqliteLoading(true);
     setSqliteMessage(null);
     setSelectedSqlite(databasePath);
@@ -612,6 +640,7 @@ export default function Home() {
       const data = await sqliteRequest(
         `/schema?path=${encodeURIComponent(databasePath)}`,
       );
+      if (requestId !== sqliteOpenRequestRef.current) return;
       setSqliteObjects(data.objects || []);
       setSqliteFiles((files) =>
         files.some((file) => file.path === databasePath)
@@ -632,12 +661,15 @@ export default function Home() {
       )?.name;
       if (firstTable)
         await loadSqliteRows(databasePath, firstTable, 0, { q: "", sort: "" });
+      if (requestId !== sqliteOpenRequestRef.current) return;
       setSqliteMessage(`Đã mở database · quick_check: ${data.integrity}`);
     } catch (error: any) {
-      setSqliteObjects([]);
-      setSqliteMessage(error.message);
+      if (requestId === sqliteOpenRequestRef.current) {
+        setSqliteObjects([]);
+        setSqliteMessage(error.message);
+      }
     } finally {
-      setSqliteLoading(false);
+      if (requestId === sqliteOpenRequestRef.current) setSqliteLoading(false);
     }
   };
 
@@ -980,13 +1012,13 @@ export default function Home() {
     }
   };
 
-  const loadSqliteOperations = async () => {
-    if (!selectedSqlite) return;
+  const loadSqliteOperations = async (databasePath = selectedSqlite) => {
+    if (!databasePath) return;
     setSqliteLoading(true);
     setSqliteMessage(null);
     try {
       const [stats, backups] = await Promise.all([
-        sqliteRequest(`/statistics?path=${encodeURIComponent(selectedSqlite)}`),
+        sqliteRequest(`/statistics?path=${encodeURIComponent(databasePath)}`),
         sqliteRequest("/backups"),
       ]);
       setSqliteStats(stats.stats || stats.data || stats);
@@ -1182,19 +1214,19 @@ export default function Home() {
     }
   };
 
-  const uploadFiles = (files: globalThis.File[]) => {
+  const uploadFiles = async (files: globalThis.File[]) => {
     if (!sessionReady || !files.length) return;
     setFileLoading(true);
     setFileError(null);
-    let remaining = files.length;
-    files.forEach((file) => {
+    const directory = currentPath;
+    const uploadOne = (file: globalThis.File): Promise<void> => new Promise((resolve, reject) => {
       const key = `${file.name}-${file.size}-${file.lastModified}`;
       const xhr = new XMLHttpRequest();
       xhr.open("POST", `${API_URL}/api/files/upload`);
       xhr.withCredentials = true;
       xhr.setRequestHeader("Content-Type", "application/octet-stream");
       xhr.setRequestHeader("X-File-Name", encodeURIComponent(file.name));
-      xhr.setRequestHeader("X-Directory", encodeURIComponent(currentPath));
+      xhr.setRequestHeader("X-Directory", encodeURIComponent(directory));
       xhr.upload.onprogress = (event) => {
         if (event.lengthComputable)
           setUploadProgress((progress) => ({
@@ -1202,37 +1234,36 @@ export default function Home() {
             [key]: Math.round((event.loaded / event.total) * 100),
           }));
       };
-      xhr.onerror = () => setFileError(`Upload ${file.name} thất bại`);
+      xhr.onerror = () => reject(new Error(`Upload ${file.name} thất bại`));
       xhr.onload = async () => {
-        if (xhr.status === 428 && (await requestStepUp())) {
-          uploadFiles([file]);
-          return;
-        }
-        if (xhr.status >= 400) {
-          try {
-            setFileError(
-              JSON.parse(xhr.responseText).error ||
-                `Upload ${file.name} thất bại`,
-            );
-          } catch {
-            setFileError(`Upload ${file.name} thất bại`);
+        try {
+          if (xhr.status === 428) {
+            if (!(await requestStepUp())) throw new Error(`Upload ${file.name} đã bị hủy`);
+            await uploadOne(file);
+            resolve();
+            return;
           }
-        }
-      };
-      xhr.onloadend = () => {
-        setUploadProgress((progress) => {
-          const next = { ...progress };
-          delete next[key];
-          return next;
-        });
-        remaining -= 1;
-        if (remaining === 0) {
-          setFileLoading(false);
-          loadFiles(currentPath, null, "none");
+          if (xhr.status >= 400) {
+            let message = `Upload ${file.name} thất bại`;
+            try { message = JSON.parse(xhr.responseText).error || message; } catch {}
+            throw new Error(message);
+          }
+          resolve();
+        } catch (error) {
+          reject(error);
         }
       };
       xhr.send(file);
     });
+
+    const results = await Promise.allSettled(files.map(uploadOne));
+    setUploadProgress({});
+    const failures = results
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map((result) => result.reason instanceof Error ? result.reason.message : "Upload thất bại");
+    if (failures.length) setFileError(failures.join("; "));
+    setFileLoading(false);
+    await loadFiles(directory, null, "none");
   };
 
   const openTrash = async () => {
@@ -1339,24 +1370,26 @@ export default function Home() {
     URL.revokeObjectURL(url);
   };
 
-  const openFile = async (filePath: string) => {
+  const openFile = async (filePath: string, edit = false) => {
     if (!sessionReady) return;
-    if (previewKind(filePath) !== "text") {
-      const ticketData = await requestFileApi("/api/auth/preview-ticket", {
-        method: "POST",
-        body: JSON.stringify({ path: filePath }),
-      });
-      setPreviewTicket(ticketData.ticket);
-      setViewingFile(filePath);
-      setFileContent(null);
-      setFileMtime(null);
-      setIsEditingFile(false);
-      setFileError(null);
-      return;
-    }
+    const requestId = ++fileOpenRequestRef.current;
     setFileLoading(true);
     setFileError(null);
     try {
+      if (previewKind(filePath) !== "text") {
+        if (edit) throw new Error("Chỉ có thể chỉnh sửa tệp văn bản");
+        const ticketData = await requestFileApi("/api/auth/preview-ticket", {
+          method: "POST",
+          body: JSON.stringify({ path: filePath }),
+        });
+        if (requestId !== fileOpenRequestRef.current) return;
+        setPreviewTicket(ticketData.ticket);
+        setViewingFile(filePath);
+        setFileContent(null);
+        setFileMtime(null);
+        setIsEditingFile(false);
+        return;
+      }
       const res = await fetch(
         `${API_URL}/api/files/read?path=${encodeURIComponent(filePath)}`,
         {
@@ -1364,6 +1397,7 @@ export default function Home() {
         },
       );
       const data = await res.json();
+      if (requestId !== fileOpenRequestRef.current) return;
       if (data.success) {
         if (data.isBinary) {
           setFileError(
@@ -1376,15 +1410,15 @@ export default function Home() {
           setFileContent(data.content);
           setEditorOriginal(data.content);
           setFileMtime(data.mtime);
-          setIsEditingFile(false);
+          setIsEditingFile(edit);
         }
       } else {
         setFileError(data.error || "Không thể mở tệp tin");
       }
     } catch (err: any) {
-      setFileError("Lỗi kết nối máy chủ: " + err.message);
+      if (requestId === fileOpenRequestRef.current) setFileError(err.message);
     } finally {
-      setFileLoading(false);
+      if (requestId === fileOpenRequestRef.current) setFileLoading(false);
     }
   };
 
@@ -1551,19 +1585,23 @@ export default function Home() {
     const currentName = filePath.split("/").pop() || "";
     const newName = prompt("Tên mới:", currentName)?.trim();
     if (!newName || newName === currentName) return;
-    const res = await fetchWithStepUp(`${API_URL}/api/files/move`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({
-        sourcePath: filePath,
-        destinationDir: currentPath,
-        newName,
-      }),
-    });
-    const data = await res.json();
-    if (!data.success) setFileError(data.error || "Không thể đổi tên");
-    else await loadFiles(currentPath);
+    try {
+      const res = await fetchWithStepUp(`${API_URL}/api/files/move`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          sourcePath: filePath,
+          destinationDir: currentPath,
+          newName,
+        }),
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || "Không thể đổi tên");
+      await loadFiles(currentPath);
+    } catch (error) {
+      setFileError(error instanceof Error ? error.message : "Không thể đổi tên");
+    }
   };
 
   const renameFileBookmark = (bookmark: FileBookmark) => {
@@ -1684,6 +1722,17 @@ export default function Home() {
   const [stepUpCode, setStepUpCode] = useState("");
   const [stepUpError, setStepUpError] = useState<string | null>(null);
 
+  const settleStepUp = (granted: boolean) => {
+    const resolve = stepUpResolveRef.current;
+    stepUpResolveRef.current = null;
+    stepUpPromiseRef.current = null;
+    setStepUpPrompt(null);
+    setStepUpPassword("");
+    setStepUpCode("");
+    setStepUpError(null);
+    resolve?.(granted);
+  };
+
   const submitStepUp = async () => {
     setStepUpError(null);
     try {
@@ -1695,27 +1744,19 @@ export default function Home() {
       });
       const data = await res.json();
       if (!data.success) throw new Error(data.error || "Xác nhận thất bại");
-      const prompt = stepUpPrompt;
-      setStepUpPrompt(null);
-      setStepUpPassword("");
-      setStepUpCode("");
-      prompt?.resolve(true);
+      settleStepUp(true);
     } catch (err: any) {
       setStepUpError(err.message);
     }
   };
   const cancelStepUp = () => {
-    const prompt = stepUpPrompt;
-    setStepUpPrompt(null);
-    setStepUpPassword("");
-    setStepUpCode("");
-    setStepUpError(null);
-    prompt?.resolve(false);
+    settleStepUp(false);
   };
 
   // Terminal and socket refs
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermInstance = useRef<any>(null);
+  const fitAddonRef = useRef<{ fit: () => void } | null>(null);
   const socketInstance = useRef<Socket | null>(null);
   const [socketStatus, setSocketStatus] = useState<
     "idle" | "connecting" | "connected" | "error"
@@ -1793,10 +1834,7 @@ export default function Home() {
     } catch (err) {
       console.error("Failed to load settings:", err);
     } finally {
-      // Mark settings as loaded after initial load triggers state updates
-      setTimeout(() => {
-        isSettingsLoadedRef.current = true;
-      }, 300);
+      isSettingsLoadedRef.current = true;
     }
   }, [sessionReady]);
 
@@ -2182,6 +2220,9 @@ export default function Home() {
     if (socketInstance.current) {
       socketInstance.current.disconnect();
     }
+    if (stepUpPromiseRef.current) settleStepUp(false);
+    isSettingsLoadedRef.current = false;
+    if (settingsDebounceRef.current) clearTimeout(settingsDebounceRef.current);
 
     try {
       await fetch(`${API_URL}/api/auth/logout`, {
@@ -2430,6 +2471,7 @@ export default function Home() {
 
       fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
+      fitAddonRef.current = fitAddon;
       term.open(terminalElement);
 
       // Force instant resize computation
@@ -2623,6 +2665,7 @@ export default function Home() {
       if (term) {
         term.dispose();
       }
+      if (fitAddonRef.current === fitAddon) fitAddonRef.current = null;
       if (resizeObserverRef.current) {
         resizeObserverRef.current.disconnect();
       }
@@ -2631,22 +2674,21 @@ export default function Home() {
 
   // Handle dynamic font size or theme adjustment in living terminal
   useEffect(() => {
+    let fitTimer: number | undefined;
     if (xtermInstance.current) {
       xtermInstance.current.options.fontSize = fontSize;
       xtermInstance.current.options.theme = getTerminalColors(theme);
-      // Wait for font styling to re-render in container, then fit
-      setTimeout(async () => {
-        try {
-          const { FitAddon } = await import("@xterm/addon-fit");
-          const fitAddon = new FitAddon();
-          xtermInstance.current.loadAddon(fitAddon);
-          fitAddon.fit();
-        } catch {}
-      }, 50);
+      fitTimer = window.setTimeout(() => fitAddonRef.current?.fit(), 50);
     }
-    setTimeout(() => {
-      saveSettings(fontSize, theme);
-    }, 0);
+    if (!isSettingsLoadedRef.current) {
+      return () => { if (fitTimer) window.clearTimeout(fitTimer); };
+    }
+    if (settingsDebounceRef.current) clearTimeout(settingsDebounceRef.current);
+    settingsDebounceRef.current = setTimeout(() => saveSettings(fontSize, theme), 300);
+    return () => {
+      if (fitTimer) window.clearTimeout(fitTimer);
+      if (settingsDebounceRef.current) clearTimeout(settingsDebounceRef.current);
+    };
   }, [fontSize, theme, saveSettings]);
 
   useEffect(() => {
@@ -2729,6 +2771,8 @@ export default function Home() {
   };
   const displayedSocketStatus =
     activeTab === "terminal" ? socketStatus : "idle";
+  // Actions execute after user input; callbacks do not read refs during render.
+  // eslint-disable-next-line react-hooks/refs
   const paletteActions = [
     {
       label: "Tổng quan",
@@ -2886,7 +2930,7 @@ export default function Home() {
                   width={mainSidebarWidth}
                   activeTab={activeTab}
                   role={currentUser.role}
-                  metrics={{ cpuPercent, memUsedMB, memTotalMB, memPercent, diskUsedGB, diskTotalGB, diskPercent }}
+                  metrics={{ cpuPercent, memUsedMB, memTotalMB, memPercent, diskUsedGB, diskTotalGB, diskPercent, unavailable: Boolean(metricsError) }}
                   logs={logs}
                   onSelectTab={(tab) => {
                     setActiveTab(tab);
@@ -2944,6 +2988,8 @@ export default function Home() {
                           level={logLevel}
                           result={logResult}
                           integrity={logIntegrity}
+                          loading={logLoading}
+                          error={logError}
                           onQueryChange={setLogQuery}
                           onCategoryChange={setLogCategory}
                           onLevelChange={setLogLevel}
@@ -3324,7 +3370,7 @@ export default function Home() {
         onOpenSqliteOperations={(path) => {
           setSelectedSqlite(path);
           setSqliteWorkspace("operations");
-          void loadSqliteOperations();
+          void loadSqliteOperations(path);
         }}
         onDeleteSqlite={deleteSqlite}
         onBrowseObject={(database, name) => {

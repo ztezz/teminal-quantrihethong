@@ -78,6 +78,7 @@ export function SystemWorkspace({
           </button>
         </div>
         <input
+          aria-label="Tìm kiếm service hoặc process"
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
           placeholder="Tìm service, PID, user hoặc command..."

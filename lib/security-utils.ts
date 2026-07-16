@@ -2,10 +2,27 @@ export const ARCHIVE_LIMITS = {
   maxEntries: 1_000,
   maxFileSize: 100 * 1024 * 1024,
   maxTotalSize: 512 * 1024 * 1024,
+  maxOutputSize: 512 * 1024 * 1024,
+  maxDepth: 64,
   maxCompressionRatio: 100
 } as const;
 
 type ArchiveEntryMetadata = { path: string; compressedSize: number; uncompressedSize: number };
+export type ArchiveSourceEntry = { path: string; type: 'file' | 'directory' | 'symlink' | 'other'; size: number; depth: number };
+export type ArchiveSourceStats = { entries: number; totalSize: number };
+
+export function accountArchiveSourceEntry(stats: ArchiveSourceStats, entry: ArchiveSourceEntry): ArchiveSourceStats {
+  if (entry.type === 'symlink') throw Object.assign(new Error(`Không thể lưu symbolic link vào archive: ${entry.path}`), { status: 400 });
+  if (entry.type === 'other') throw Object.assign(new Error(`Loại tệp không được hỗ trợ trong archive: ${entry.path}`), { status: 400 });
+  if (!Number.isSafeInteger(entry.depth) || entry.depth < 0 || entry.depth > ARCHIVE_LIMITS.maxDepth) throw Object.assign(new Error(`Nguồn archive vượt quá độ sâu ${ARCHIVE_LIMITS.maxDepth}: ${entry.path}`), { status: 413 });
+  if (!Number.isSafeInteger(entry.size) || entry.size < 0) throw Object.assign(new Error(`Tệp có dung lượng không hợp lệ: ${entry.path}`), { status: 400 });
+  const entries = stats.entries + 1;
+  if (entries > ARCHIVE_LIMITS.maxEntries) throw Object.assign(new Error(`Nguồn archive vượt quá ${ARCHIVE_LIMITS.maxEntries} mục`), { status: 413 });
+  if (entry.type === 'file' && entry.size > ARCHIVE_LIMITS.maxFileSize) throw Object.assign(new Error(`Tệp nguồn vượt quá ${ARCHIVE_LIMITS.maxFileSize / 1024 / 1024}MB: ${entry.path}`), { status: 413 });
+  const totalSize = stats.totalSize + (entry.type === 'file' ? entry.size : 0);
+  if (!Number.isSafeInteger(totalSize) || totalSize > ARCHIVE_LIMITS.maxTotalSize) throw Object.assign(new Error(`Nguồn archive vượt quá ${ARCHIVE_LIMITS.maxTotalSize / 1024 / 1024}MB`), { status: 413 });
+  return { entries, totalSize };
+}
 
 export function validateArchivePlan(entries: ArchiveEntryMetadata[]): string[] {
   if (entries.length > ARCHIVE_LIMITS.maxEntries) throw Object.assign(new Error(`ZIP vượt quá ${ARCHIVE_LIMITS.maxEntries} mục`), { status: 413 });

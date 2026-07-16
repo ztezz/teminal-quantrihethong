@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ARCHIVE_LIMITS, escapeCsvCell, publicApiUrl, validateArchivePlan, validateRuntimeConfig } from './security-utils';
+import { ARCHIVE_LIMITS, accountArchiveSourceEntry, escapeCsvCell, publicApiUrl, validateArchivePlan, validateRuntimeConfig } from './security-utils';
 
 test('publicApiUrl defaults to same-origin and normalizes an absolute URL', () => {
   assert.equal(publicApiUrl(undefined), '');
@@ -43,6 +43,22 @@ test('validateArchivePlan enforces entry and total-size limits', () => {
     { path: 'e.bin', compressedSize: ARCHIVE_LIMITS.maxFileSize, uncompressedSize: ARCHIVE_LIMITS.maxFileSize },
     { path: 'f.bin', compressedSize: ARCHIVE_LIMITS.maxFileSize, uncompressedSize: ARCHIVE_LIMITS.maxFileSize }
   ]), /sau giải nén/);
+});
+
+test('accountArchiveSourceEntry accounts bounded files and directories', () => {
+  const directory = accountArchiveSourceEntry({ entries: 0, totalSize: 0 }, { path: 'folder', type: 'directory', size: 4096, depth: 0 });
+  assert.deepEqual(accountArchiveSourceEntry(directory, { path: 'folder/file.txt', type: 'file', size: 123, depth: 1 }), { entries: 2, totalSize: 123 });
+});
+
+test('accountArchiveSourceEntry rejects symlinks and excessive depth', () => {
+  assert.throws(() => accountArchiveSourceEntry({ entries: 0, totalSize: 0 }, { path: 'link', type: 'symlink', size: 1, depth: 0 }), Object.assign(/symbolic link/, { status: 400 }));
+  assert.throws(() => accountArchiveSourceEntry({ entries: 0, totalSize: 0 }, { path: 'deep/file', type: 'file', size: 1, depth: ARCHIVE_LIMITS.maxDepth + 1 }), /độ sâu/);
+});
+
+test('accountArchiveSourceEntry enforces entry, file, and total source limits', () => {
+  assert.throws(() => accountArchiveSourceEntry({ entries: ARCHIVE_LIMITS.maxEntries, totalSize: 0 }, { path: 'extra', type: 'directory', size: 0, depth: 0 }), /mục/);
+  assert.throws(() => accountArchiveSourceEntry({ entries: 0, totalSize: 0 }, { path: 'large.bin', type: 'file', size: ARCHIVE_LIMITS.maxFileSize + 1, depth: 0 }), /Tệp nguồn/);
+  assert.throws(() => accountArchiveSourceEntry({ entries: 1, totalSize: ARCHIVE_LIMITS.maxTotalSize }, { path: 'extra.bin', type: 'file', size: 1, depth: 0 }), /Nguồn archive/);
 });
 
 test('validateRuntimeConfig normalizes a secure production origin', () => {

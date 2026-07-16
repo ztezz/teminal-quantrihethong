@@ -17,6 +17,8 @@ interface LogsWorkspaceProps {
   level: string;
   result: string;
   integrity: LogIntegrity | null;
+  loading: boolean;
+  error: string | null;
   onQueryChange: (value: string) => void;
   onCategoryChange: (value: string) => void;
   onLevelChange: (value: string) => void;
@@ -35,6 +37,8 @@ export function LogsWorkspace({
   level,
   result,
   integrity,
+  loading,
+  error,
   onQueryChange,
   onCategoryChange,
   onLevelChange,
@@ -86,13 +90,16 @@ export function LogsWorkspace({
             </button>
             <button
               onClick={() => onLoad(offset)}
+              disabled={loading}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-[#111116] text-xs border border-white/10 rounded"
             >
-              <RefreshCw className="w-3.5 h-3.5" />
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
               Tải lại
             </button>
           </div>
         </div>
+
+        {error && <div role="alert" className="rounded border border-red-500/20 bg-red-500/5 p-3 text-xs text-red-400">{error}</div>}
 
         <form
           onSubmit={(event) => {
@@ -102,12 +109,14 @@ export function LogsWorkspace({
           className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2"
         >
           <input
+            aria-label="Tìm kiếm nhật ký"
             value={query}
             onChange={(event) => onQueryChange(event.target.value)}
             placeholder="Tìm sự kiện, IP, lệnh..."
             className="lg:col-span-2 bg-black border border-white/10 rounded px-3 py-2 text-xs"
           />
           <select
+            aria-label="Nhóm nhật ký"
             value={category}
             onChange={(event) => onCategoryChange(event.target.value)}
             className="bg-black border border-white/10 rounded px-3 py-2 text-xs"
@@ -120,6 +129,7 @@ export function LogsWorkspace({
             <option value="legacy">Cũ</option>
           </select>
           <select
+            aria-label="Mức nhật ký"
             value={level}
             onChange={(event) => onLevelChange(event.target.value)}
             className="bg-black border border-white/10 rounded px-3 py-2 text-xs"
@@ -131,6 +141,7 @@ export function LogsWorkspace({
           </select>
           <div className="flex gap-2">
             <select
+              aria-label="Kết quả nhật ký"
               value={result}
               onChange={(event) => onResultChange(event.target.value)}
               className="min-w-0 flex-1 bg-black border border-white/10 rounded px-2 py-2 text-xs"
