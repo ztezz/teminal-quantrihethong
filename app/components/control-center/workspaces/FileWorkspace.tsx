@@ -27,6 +27,7 @@ import {
 import { getFileIcon } from "../FileIcon";
 import { API_URL, previewKind } from "../helpers";
 import { CodeEditor } from "../CodeEditor";
+import { PdfViewer } from "../PdfViewer";
 import type { ConfirmOptions, FileBookmark, UserRole } from "../types";
 
 interface FileItem {
@@ -704,12 +705,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
               </div>
             ) : previewKind(viewingFile) === "pdf" ||
               previewKind(viewingFile) === "office" ? (
-              <iframe
-                key={viewingFile}
-                src={`${API_URL}/api/files/${previewKind(viewingFile) === "office" ? "office-preview" : "media"}?path=${encodeURIComponent(viewingFile)}&ticket=${encodeURIComponent(previewTicket || "")}`}
-                title={`Xem trước ${viewingFile}`}
-                className="h-[75vh] w-full bg-white"
-              />
+              <PdfViewer key={`${viewingFile}-${previewTicket}`} fileName={viewingFile.replace(/\\/g, "/").split("/").pop() || viewingFile} src={`${API_URL}/api/files/${previewKind(viewingFile) === "office" ? "office-preview" : "media"}?path=${encodeURIComponent(viewingFile)}&ticket=${encodeURIComponent(previewTicket || "")}`} />
             ) : (
               <div className="p-2 sm:p-4 bg-black">
                 <CodeEditor value={fileContent || ""} fileName={viewingFile} readOnly={!isEditingFile} dirty={fileContent !== editorOriginal} onChange={setFileContent} onSave={saveEditedFile} />
