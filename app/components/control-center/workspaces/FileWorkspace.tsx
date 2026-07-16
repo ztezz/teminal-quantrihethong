@@ -18,16 +18,13 @@ import {
   Lock,
   Move,
   RefreshCw,
-  Save,
   Search,
   Trash2,
   Upload,
   X,
 } from "lucide-react";
 import { getFileIcon } from "../FileIcon";
-import { API_URL, previewKind } from "../helpers";
-import { CodeEditor } from "../CodeEditor";
-import { PdfViewer } from "../PdfViewer";
+import { FilePreviewModal } from "../FilePreviewModal";
 import type { ConfirmOptions, FileBookmark, UserRole } from "../types";
 
 interface FileItem {
@@ -422,8 +419,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
           </div>
 
           {/* Search Input Bar */}
-          {!viewingFile && (
-            <div className="relative w-full md:w-80 shrink-0">
+          <div className="relative w-full md:w-80 shrink-0">
               <span className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none">
                 <Search className="h-4 w-4 text-slate-500" />
               </span>
@@ -450,8 +446,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
                   <X className="h-3.5 w-3.5" />
                 </button>
               )}
-            </div>
-          )}
+          </div>
         </div>
         <div className="flex items-center gap-1 overflow-x-auto text-[11px] font-mono text-slate-500">
           <button
@@ -483,8 +478,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
               );
             })}
         </div>
-        {!viewingFile && (
-          <label className="flex items-center gap-2 text-[11px] text-slate-400">
+        <label className="flex items-center gap-2 text-[11px] text-slate-400">
             <input
               type="checkbox"
               checked={recursiveSearch}
@@ -497,11 +491,9 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
             {searchTruncated && (
               <span className="text-amber-400">Kết quả đã bị giới hạn</span>
             )}
-          </label>
-        )}
+        </label>
 
-        {!viewingFile &&
-          currentUser?.role !== "viewer" &&
+        {currentUser?.role !== "viewer" &&
           selectedPaths.length > 0 && (
             <div className="flex flex-wrap items-center gap-2 rounded border border-blue-500/20 bg-blue-500/5 p-2 text-xs">
               <span className="mr-auto">
@@ -537,7 +529,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
               </button>
             </div>
           )}
-        {!viewingFile && fileClipboard && (
+        {fileClipboard && (
           <button
             onClick={() =>
               transferFiles(fileClipboard.operation, fileClipboard.paths)
@@ -583,138 +575,8 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
           </div>
         )}
 
-        {/* Conditional View: File Editor OR Directory List */}
-        {viewingFile ? (
-          <div className="rounded-xl border border-white/10 bg-[#0d0d12]/60 overflow-hidden shadow-2xl flex flex-col">
-            {/* Editor Header */}
-            <div className="bg-[#111116]/80 px-5 py-3.5 border-b border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div className="flex items-center gap-2 font-mono">
-                {getFileIcon(viewingFile)}
-                <span
-                  className="text-xs text-white truncate max-w-md"
-                  title={viewingFile}
-                >
-                  {viewingFile.replace(/\\/g, "/").split("/").pop()}
-                </span>
-                <span className="text-[10px] uppercase font-bold px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-400 border border-purple-500/20">
-                  {previewKind(viewingFile) !== "text"
-                    ? previewKind(viewingFile)
-                    : isEditingFile
-                      ? fileContent !== editorOriginal
-                        ? "Chưa lưu"
-                        : "Đang chỉnh sửa"
-                      : "Chỉ xem"}
-                </span>
-              </div>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => openSnapshots(viewingFile)}
-                  className="px-3 py-1.5 bg-amber-500/10 text-amber-300 border border-amber-500/20 rounded text-xs"
-                >
-                  Lịch sử
-                </button>
-                {previewKind(viewingFile) !== "text" ? null : isEditingFile ? (
-                  <>
-                    <button
-                      onClick={saveEditedFile}
-                      className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white rounded transition cursor-pointer"
-                    >
-                      <Save className="w-3.5 h-3.5" />
-                      <span>Lưu tệp</span>
-                    </button>
-                    <button
-                      onClick={() => {
-                        setIsEditingFile(false);
-                        openFile(viewingFile);
-                      }}
-                      className="flex items-center gap-1.5 px-3 py-1.5 bg-[#1c1c24] hover:bg-[#252530] text-xs font-semibold text-slate-300 rounded border border-white/10 transition cursor-pointer"
-                    >
-                      <span>Hủy</span>
-                    </button>
-                  </>
-                ) : currentUser?.role !== "viewer" ? (
-                  <button
-                    onClick={() => setIsEditingFile(true)}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-xs font-semibold text-white rounded transition cursor-pointer"
-                  >
-                    <Edit className="w-3.5 h-3.5" />
-                    <span>Chỉnh sửa</span>
-                  </button>
-                ) : null}
-                <button
-                  onClick={async () => {
-                    if (
-                      isEditingFile &&
-                      fileContent !== editorOriginal &&
-                      !(await askConfirm({
-                        message: "Bỏ các thay đổi chưa lưu?",
-                        danger: true,
-                        confirmLabel: "Bỏ thay đổi",
-                      }))
-                    )
-                      return;
-                    setViewingFile(null);
-                    setFileContent(null);
-                  }}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-[#111116] hover:bg-[#1c1c24] text-xs font-semibold text-slate-400 border border-white/10 rounded transition cursor-pointer"
-                >
-                  <ArrowLeft className="w-3.5 h-3.5" />
-                  <span>Đóng</span>
-                </button>
-              </div>
-            </div>
-
-            {/* Editor Content */}
-            {previewKind(viewingFile) === "video" ? (
-              <div className="bg-black p-4 flex justify-center">
-                <video
-                  key={viewingFile}
-                  src={`${API_URL}/api/files/media?path=${encodeURIComponent(viewingFile)}&ticket=${encodeURIComponent(previewTicket || "")}`}
-                  controls
-                  playsInline
-                  preload="metadata"
-                  className="max-h-[70vh] w-full bg-black"
-                >
-                  Trình duyệt không hỗ trợ phát video này.
-                </video>
-              </div>
-            ) : previewKind(viewingFile) === "audio" ? (
-              <div className="min-h-64 bg-gradient-to-br from-slate-950 via-purple-950/40 to-black p-8 flex items-center justify-center">
-                <audio
-                  key={viewingFile}
-                  src={`${API_URL}/api/files/media?path=${encodeURIComponent(viewingFile)}&ticket=${encodeURIComponent(previewTicket || "")}`}
-                  controls
-                  preload="metadata"
-                  className="w-full max-w-2xl"
-                >
-                  Trình duyệt không hỗ trợ phát âm thanh này.
-                </audio>
-              </div>
-            ) : previewKind(viewingFile) === "image" ? (
-              <div className="min-h-96 bg-[linear-gradient(45deg,#111_25%,transparent_25%),linear-gradient(-45deg,#111_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#111_75%),linear-gradient(-45deg,transparent_75%,#111_75%)] bg-[length:24px_24px] bg-[position:0_0,0_12px,12px_-12px,-12px_0px] p-4 flex items-center justify-center overflow-auto">
-                {/* Authenticated filesystem images cannot use Next's build-time image optimizer. */}
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={`${API_URL}/api/files/media?path=${encodeURIComponent(viewingFile)}&ticket=${encodeURIComponent(previewTicket || "")}`}
-                  alt={
-                    viewingFile.replace(/\\/g, "/").split("/").pop() ||
-                    "Ảnh xem trước"
-                  }
-                  className="max-h-[75vh] max-w-full object-contain shadow-2xl"
-                />
-              </div>
-            ) : previewKind(viewingFile) === "pdf" ||
-              previewKind(viewingFile) === "office" ? (
-              <PdfViewer key={`${viewingFile}-${previewTicket}`} fileName={viewingFile.replace(/\\/g, "/").split("/").pop() || viewingFile} src={`${API_URL}/api/files/${previewKind(viewingFile) === "office" ? "office-preview" : "media"}?path=${encodeURIComponent(viewingFile)}&ticket=${encodeURIComponent(previewTicket || "")}`} />
-            ) : (
-              <div className="p-2 sm:p-4 bg-black">
-                <CodeEditor value={fileContent || ""} fileName={viewingFile} readOnly={!isEditingFile} dirty={fileContent !== editorOriginal} onChange={setFileContent} onSave={saveEditedFile} />
-              </div>
-            )}
-          </div>
-        ) : (
-          /* Directory List */
-          <div
+        {/* Directory List remains visible while previews open in a modal. */}
+        <div
             className="rounded-xl border border-white/10 bg-[#0d0d12]/60 overflow-hidden shadow-2xl"
             onDragOver={(event) => event.preventDefault()}
             onDrop={(event) => {
@@ -921,7 +783,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
               </table>
             </div>
           </div>
-        )}
+        {viewingFile && <FilePreviewModal role={role} filePath={viewingFile} fileContent={fileContent} editorOriginal={editorOriginal} editing={isEditingFile} previewTicket={previewTicket} onContentChange={setFileContent} onEditingChange={setIsEditingFile} onSave={saveEditedFile} onReload={() => { void openFile(viewingFile); }} onSnapshots={() => openSnapshots(viewingFile)} onConfirm={askConfirm} onClose={() => { setViewingFile(null); setFileContent(null); }} />}
       </div>
     </motion.div>
   );

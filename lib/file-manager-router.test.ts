@@ -120,6 +120,17 @@ test('media preview permits framing only from the configured frontend origin', a
   } finally { await context.close(); }
 });
 
+test('media preview serves AVIF with the correct MIME type', async () => {
+  const context = await fixture();
+  try {
+    fs.writeFileSync(path.join(context.root, 'sample.avif'), Buffer.from([0, 0, 0, 24, 102, 116, 121, 112, 97, 118, 105, 102]));
+    const response = await context.request('/media?path=sample.avif');
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'image/avif');
+    assert.equal(response.headers.get('content-disposition'), "inline; filename*=UTF-8''sample.avif");
+  } finally { await context.close(); }
+});
+
 test('rejects path traversal outside the managed root', async () => {
   const context = await fixture();
   try {
