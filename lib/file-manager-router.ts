@@ -52,6 +52,7 @@ type Options = {
   rootDir?: string;
   trashDir?: string;
   snapshotDir?: string;
+  previewFrameAncestor?: string;
 };
 
 type TrashMetadata = { originalPath: string; deletedAt: string };
@@ -77,7 +78,7 @@ function modeInfo(mode: number) {
   };
 }
 
-export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, consumePreviewTicket, log, rootDir, trashDir, snapshotDir }: Options) {
+export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, consumePreviewTicket, log, rootDir, trashDir, snapshotDir, previewFrameAncestor = "'self'" }: Options) {
   const router = Router();
   const root = path.resolve(rootDir || process.cwd());
   const trashRoot = path.resolve(trashDir || path.join(process.cwd(), '.terminal-trash'));
@@ -224,6 +225,11 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
     const ticket = acceptsQueryToken && typeof req.query.ticket === 'string' ? req.query.ticket : '';
     const filePath = acceptsQueryToken && typeof req.query.path === 'string' ? req.query.path : '';
     if (!authenticate(req) && !Boolean(ticket && consumePreviewTicket(ticket, filePath))) return res.status(401).json({ success: false, code: 'UNAUTHORIZED', error: 'Unauthorized' });
+    if (acceptsQueryToken) {
+      res.removeHeader('X-Frame-Options');
+      res.setHeader('Content-Security-Policy', `default-src 'none'; frame-ancestors ${previewFrameAncestor}`);
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    }
     const role = sessionRole(cookieToken(req));
     if (!acceptsQueryToken && !['GET', 'HEAD', 'OPTIONS'].includes(req.method) && role === 'viewer') return res.status(403).json({ success: false, code: 'READ_ONLY', error: 'Tài khoản chỉ có quyền xem' });
     if (req.method === 'PATCH' && req.path === '/metadata' && role !== 'root') return res.status(403).json({ success: false, code: 'ROOT_REQUIRED', error: 'Chỉ tài khoản root được thay đổi quyền và chủ sở hữu' });

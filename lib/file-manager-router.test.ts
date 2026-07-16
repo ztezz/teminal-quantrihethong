@@ -17,6 +17,12 @@ async function fixture() {
   fs.mkdirSync(root);
   let role: Role = 'root';
   const app = express();
+  app.use((_req, res, next) => {
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Content-Security-Policy', "default-src 'self'; frame-ancestors 'none'");
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-site');
+    next();
+  });
   app.use(express.json({ limit: '3mb' }));
   app.use('/api/files', createFileManagerRouter({
     rootDir: root,
@@ -26,7 +32,8 @@ async function fixture() {
     sessionRole: token => token === 'valid-token' ? role : null,
     hasStepUp: () => true,
     consumePreviewTicket: () => false,
-    log: async () => undefined
+    log: async () => undefined,
+    previewFrameAncestor: 'https://terminal.example.com'
   }));
   const server = http.createServer(app);
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -42,7 +49,8 @@ async function fixture() {
       }
     });
     const text = await response.text();
-    return { status: response.status, body: text ? JSON.parse(text) : null };
+    const contentType = response.headers.get('content-type') || '';
+    return { status: response.status, headers: response.headers, body: text ? contentType.includes('application/json') ? JSON.parse(text) : text : null };
   };
   return {
     root,
@@ -96,6 +104,19 @@ test('viewer can list and read files but cannot mutate them', async () => {
     assert.equal(create.status, 403);
     assert.equal(create.body.code, 'READ_ONLY');
     assert.equal(fs.existsSync(path.join(context.root, 'blocked.txt')), false);
+  } finally { await context.close(); }
+});
+
+test('media preview permits framing only from the configured frontend origin', async () => {
+  const context = await fixture();
+  try {
+    fs.writeFileSync(path.join(context.root, 'document.pdf'), '%PDF-1.4\n%%EOF');
+    const response = await context.request('/media?path=document.pdf');
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('x-frame-options'), null);
+    assert.equal(response.headers.get('content-security-policy'), "default-src 'none'; frame-ancestors https://terminal.example.com");
+    assert.equal(response.headers.get('cross-origin-resource-policy'), 'cross-origin');
+    assert.equal(response.headers.get('content-type'), 'application/pdf');
   } finally { await context.close(); }
 });
 

@@ -355,7 +355,7 @@ async function startServer() {
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
     res.setHeader('Cross-Origin-Resource-Policy', 'same-site');
-    res.setHeader('Content-Security-Policy', `default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'${dev ? " 'unsafe-eval'" : ''}; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: https:; font-src 'self' data:; connect-src 'self' https: wss:; worker-src 'self' blob:; manifest-src 'self'`);
+    res.setHeader('Content-Security-Policy', `default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; frame-src 'self' https:; form-action 'self'; script-src 'self' 'unsafe-inline'${dev ? " 'unsafe-eval'" : ''}; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: https:; font-src 'self' data:; connect-src 'self' https: wss:; worker-src 'self' blob:; manifest-src 'self'`);
     if (!dev) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
     nextMiddleware();
   });
@@ -901,7 +901,8 @@ async function startServer() {
     log: async (event, ip, details) => audit({ category: 'file', action: details?.action || event.split(':', 1)[0].slice(0, 80), event, level: details?.level || (/xóa|metadata|quyền/i.test(event) ? 'warning' : 'info'), result: details?.result || 'success', ip, metadata: details?.metadata }),
     rootDir: FILE_MANAGER_ROOT,
     trashDir: FILE_MANAGER_TRASH_DIR,
-    snapshotDir: FILE_MANAGER_SNAPSHOT_DIR
+    snapshotDir: FILE_MANAGER_SNAPSHOT_DIR,
+    previewFrameAncestor: runtimeConfig.frontendOrigin || "'self'"
   }));
 
   expressApp.use('/api/sqlite', createSqliteManagerRouter({
