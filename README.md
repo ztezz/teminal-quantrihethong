@@ -5,6 +5,7 @@
 > [!WARNING]
 > Backend có thể chạy với quyền `root`. Một tài khoản web bị chiếm quyền đồng nghĩa với toàn bộ máy chủ có thể bị kiểm soát. Chỉ triển khai qua HTTPS, dùng mật khẩu mạnh và giới hạn người có thể truy cập.
 
+
 ## Tính Năng
 
 - Terminal tương tác thời gian thực bằng Xterm.js, Socket.IO và `node-pty`.
