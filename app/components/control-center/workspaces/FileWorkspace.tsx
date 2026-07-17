@@ -16,7 +16,7 @@ import {
   FolderPlus,
   History,
   Lock,
-  Move,
+  Pencil,
   RefreshCw,
   Search,
   Trash2,
@@ -607,6 +607,17 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
                 </button>
               )}
               {currentUser?.role !== "viewer" && <>
+                <button
+                  onClick={() => {
+                    if (selectedPaths.length === 1) moveOrRename(selectedPaths[0]);
+                  }}
+                  disabled={selectedPaths.length !== 1}
+                  className="flex items-center gap-1.5 px-2 py-1 bg-amber-500/10 hover:bg-amber-500/20 disabled:opacity-40 disabled:cursor-not-allowed text-amber-400 border border-amber-500/20 rounded"
+                  title={selectedPaths.length === 1 ? "Đổi tên mục đã chọn" : "Chọn một tệp hoặc thư mục để đổi tên"}
+                >
+                  <Pencil className="w-3 h-3" />
+                  Đổi tên
+                </button>
                 <button onClick={createArchive} className="px-2 py-1 bg-white/5 rounded">Tạo archive</button>
                 <button onClick={createSymlink} className="px-2 py-1 bg-white/5 rounded">Tạo symlink</button>
               </>}
@@ -780,7 +791,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
                                 {!file.isDirectory && /\.(zip|tar|tgz|tar\.gz)$/i.test(file.name) && (
                                   <button onClick={() => extractArchive(fullItemPath)} className="p-1.5 rounded bg-cyan-500/5 text-cyan-400 border border-cyan-500/10" title="Giải nén"><Download className="w-3.5 h-3.5" /></button>
                                 )}
-                                <button onClick={() => moveOrRename(fullItemPath)} className="p-1.5 rounded bg-amber-500/5 hover:bg-amber-500/20 text-amber-400 border border-amber-500/10 cursor-pointer transition-colors" title="Đổi tên"><Move className="w-3.5 h-3.5" /></button>
+                                <button onClick={() => moveOrRename(fullItemPath)} className="inline-flex items-center gap-1 p-1.5 rounded bg-amber-500/5 hover:bg-amber-500/20 text-amber-400 border border-amber-500/10 cursor-pointer transition-colors" title="Đổi tên"><Pencil className="w-3.5 h-3.5" /><span className="hidden xl:inline">Đổi tên</span></button>
                                 <button onClick={() => deleteFileOrFolder(fullItemPath)} className="p-1.5 rounded bg-red-500/5 hover:bg-red-500/20 text-red-400 border border-red-500/10 cursor-pointer transition-colors" title="Xóa"><Trash2 className="w-3.5 h-3.5" /></button>
                               </>}
                             </div>

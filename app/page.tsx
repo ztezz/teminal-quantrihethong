@@ -1597,6 +1597,9 @@ export default function Home() {
     const currentName = filePath.split("/").pop() || "";
     const newName = prompt("Tên mới:", currentName)?.trim();
     if (!newName || newName === currentName) return;
+    const destinationDir = filePath.includes("/")
+      ? filePath.slice(0, filePath.lastIndexOf("/"))
+      : "";
     try {
       const res = await fetchWithStepUp(`${API_URL}/api/files/move`, {
         method: "POST",
@@ -1604,13 +1607,14 @@ export default function Home() {
         credentials: "include",
         body: JSON.stringify({
           sourcePath: filePath,
-          destinationDir: currentPath,
+          destinationDir,
           newName,
         }),
       });
       const data = await res.json();
       if (!data.success) throw new Error(data.error || "Không thể đổi tên");
-      await loadFiles(currentPath);
+      setSelectedPaths([]);
+      await loadFiles(currentPath, null, "none");
     } catch (error) {
       setFileError(error instanceof Error ? error.message : "Không thể đổi tên");
     }
