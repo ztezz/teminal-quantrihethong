@@ -12,7 +12,7 @@ import { ARCHIVE_LIMITS, accountArchiveSourceEntry, validateArchivePlan, type Ar
 
 const fsp = fs.promises;
 const MAX_EDITOR_SIZE = 2 * 1024 * 1024;
-const MAX_UPLOAD_SIZE = 25 * 1024 * 1024;
+const MAX_UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
 const MAX_BULK_ITEMS = 100;
 const MAX_SEARCH_RESULTS = 500;
 const MAX_SEARCH_ENTRIES = 20_000;
@@ -57,6 +57,7 @@ type Options = {
 
 type TrashMetadata = { originalPath: string; deletedAt: string };
 type SnapshotMetadata = { id: string; originalPath: string; createdAt: string; reason: string; size: number; mode: number; mtime: string; checksum: string };
+type UploadMetadata = { id: string; targetPath: string; size: number; owner: string; createdAt: string };
 
 function clientIp(req: Request) {
   return req.ip || req.socket.remoteAddress || '127.0.0.1';
@@ -83,11 +84,14 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
   const root = path.resolve(rootDir || process.cwd());
   const trashRoot = path.resolve(trashDir || path.join(process.cwd(), '.terminal-trash'));
   const snapshotRoot = path.resolve(snapshotDir || path.join(process.cwd(), '.terminal-snapshots'));
+  const uploadRoot = path.join(root, '.terminal-uploads');
   const canonicalRoot = fs.realpathSync(root);
   const maxSnapshotFileSize = Number(process.env.SNAPSHOT_MAX_FILE_MB || 100) * 1024 * 1024;
   const maxSnapshotTotalSize = Number(process.env.SNAPSHOT_MAX_TOTAL_MB || 2048) * 1024 * 1024;
   const configuredOfficeConcurrency = Number(process.env.OFFICE_MAX_CONCURRENCY || 1);
   const maxOfficeConversions = Number.isSafeInteger(configuredOfficeConcurrency) && configuredOfficeConcurrency > 0 ? configuredOfficeConcurrency : 1;
+  const configuredMaxUploadSize = Number(process.env.UPLOAD_MAX_FILE_MB || 10240) * 1024 * 1024;
+  const maxUploadSize = Number.isSafeInteger(configuredMaxUploadSize) && configuredMaxUploadSize > 0 ? configuredMaxUploadSize : 10 * 1024 * 1024 * 1024;
   let activeOfficeConversions = 0;
 
   const cookieToken = (req: Request) => {
@@ -95,6 +99,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
     return encodedToken ? decodeURIComponent(encodedToken) : '';
   };
   const authenticate = (req: Request) => { const token = cookieToken(req); return Boolean(token && hasSession(token)); };
+  const uploadOwner = (req: Request) => crypto.createHash('sha256').update(cookieToken(req)).digest('hex');
   const relative = (absolutePath: string) => path.relative(root, absolutePath).split(path.sep).join('/');
   const httpError = (status: number, message: string) => Object.assign(new Error(message), { status });
   const sensitivePath = (value: unknown) => {
@@ -132,6 +137,8 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
     if (!allowTrash && (relativeTrash === '' || (!relativeTrash.startsWith('..' + path.sep) && relativeTrash !== '..' && !path.isAbsolute(relativeTrash)))) throw httpError(403, 'Không thể truy cập trực tiếp thùng rác');
     const relativeSnapshots = path.relative(snapshotRoot, target);
     if (relativeSnapshots === '' || (!relativeSnapshots.startsWith('..' + path.sep) && relativeSnapshots !== '..' && !path.isAbsolute(relativeSnapshots))) throw httpError(403, 'Không thể truy cập trực tiếp kho snapshot');
+    const relativeUploads = path.relative(uploadRoot, target);
+    if (relativeUploads === '' || (!relativeUploads.startsWith('..' + path.sep) && relativeUploads !== '..' && !path.isAbsolute(relativeUploads))) throw httpError(403, 'Không thể truy cập vùng upload tạm');
     return target;
   };
   const fail = (res: Response, error: any) => {
@@ -145,6 +152,16 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
   const ensureMissing = async (target: string) => {
     try { await fsp.access(target); throw httpError(409, 'Đích đã tồn tại'); }
     catch (error: any) { if (error.status || error.code !== 'ENOENT') throw error; }
+  };
+  const uploadPaths = (id: string) => {
+    if (!/^[a-f0-9]{32}$/.test(id)) throw httpError(400, 'Mã upload không hợp lệ');
+    return { data: path.join(uploadRoot, `${id}.data`), metadata: path.join(uploadRoot, `${id}.json`) };
+  };
+  const readUpload = async (req: Request, id: string) => {
+    const paths = uploadPaths(id);
+    const metadata = JSON.parse(await fsp.readFile(paths.metadata, 'utf8')) as UploadMetadata;
+    if (metadata.id !== id || metadata.owner !== uploadOwner(req)) throw httpError(403, 'Không có quyền truy cập phiên upload này');
+    return { metadata, paths };
   };
   const itemDetails = async (itemPath: string) => {
     const linkStat = await fsp.lstat(itemPath);
@@ -245,7 +262,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
       const target = resolveInsideRoot(req.query.path);
       await mustBeDirectory(target);
       const entries = await fsp.readdir(target, { withFileTypes: true });
-      const files = (await Promise.all(entries.filter(entry => ![trashRoot, snapshotRoot].includes(path.join(target, entry.name))).map(entry => itemDetails(path.join(target, entry.name))))).sort((a, b) => Number(b.isDirectory) - Number(a.isDirectory) || a.name.localeCompare(b.name));
+      const files = (await Promise.all(entries.filter(entry => ![trashRoot, snapshotRoot, uploadRoot].includes(path.join(target, entry.name))).map(entry => itemDetails(path.join(target, entry.name))))).sort((a, b) => Number(b.isDirectory) - Number(a.isDirectory) || a.name.localeCompare(b.name));
       return res.json({ success: true, currentPath: relative(target), parentPath: target === root ? null : relative(path.dirname(target)), platform: process.platform, files });
     } catch (error) { return fail(res, error); }
   });
@@ -437,12 +454,54 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
     } catch (error) { return fail(res, error); }
   });
 
-  router.post('/upload', raw({ type: 'application/octet-stream', limit: MAX_UPLOAD_SIZE }), async (req: any, res) => {
+  router.post('/upload', async (req, res) => {
     try {
-      const name = decodeURIComponent(String(req.headers['x-file-name'] || '')); const dirPath = decodeURIComponent(String(req.headers['x-directory'] || ''));
+      const { name, dirPath, size } = req.body;
       if (!validName(name)) throw httpError(400, 'Tên tệp upload không hợp lệ');
-      const target = path.join(resolveInsideRoot(dirPath), name); await fsp.writeFile(target, req.body, { flag: 'wx' }); await log(`Đã upload tệp: ${relative(target)}`, clientIp(req));
+      if (!Number.isSafeInteger(size) || size < 0 || size > maxUploadSize) throw httpError(413, `Tệp vượt giới hạn ${Math.floor(maxUploadSize / 1024 / 1024)}MB`);
+      const directory = resolveInsideRoot(dirPath); await mustBeDirectory(directory);
+      const target = path.join(directory, name); await ensureMissing(target); await fsp.mkdir(uploadRoot, { recursive: true });
+      const id = crypto.randomBytes(16).toString('hex'); const paths = uploadPaths(id);
+      const metadata: UploadMetadata = { id, targetPath: relative(target), size, owner: uploadOwner(req), createdAt: new Date().toISOString() };
+      await fsp.writeFile(paths.data, Buffer.alloc(0), { flag: 'wx' });
+      try { await fsp.writeFile(paths.metadata, JSON.stringify(metadata), { flag: 'wx' }); }
+      catch (error) { await fsp.rm(paths.data, { force: true }); throw error; }
+      return res.status(201).json({ success: true, uploadId: id, chunkSize: MAX_UPLOAD_CHUNK_SIZE });
+    } catch (error) { return fail(res, error); }
+  });
+
+  router.put('/upload/:id', raw({ type: 'application/octet-stream', limit: MAX_UPLOAD_CHUNK_SIZE }), async (req: any, res) => {
+    try {
+      const { metadata, paths } = await readUpload(req, req.params.id);
+      const offset = Number(req.headers['x-upload-offset']);
+      if (!Number.isSafeInteger(offset) || offset < 0) throw httpError(400, 'Offset upload không hợp lệ');
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) throw httpError(400, 'Chunk upload trống');
+      const stat = await fsp.stat(paths.data);
+      if (stat.size !== offset) throw httpError(409, `Offset upload không khớp, máy chủ đang ở byte ${stat.size}`);
+      if (offset + req.body.length > metadata.size) throw httpError(400, 'Chunk vượt quá dung lượng tệp đã khai báo');
+      await fsp.appendFile(paths.data, req.body);
+      return res.json({ success: true, received: offset + req.body.length });
+    } catch (error) { return fail(res, error); }
+  });
+
+  router.post('/upload/:id/complete', async (req, res) => {
+    try {
+      const { metadata, paths } = await readUpload(req, req.params.id);
+      const stat = await fsp.stat(paths.data);
+      if (stat.size !== metadata.size) throw httpError(409, `Upload chưa hoàn tất (${stat.size}/${metadata.size} byte)`);
+      const target = resolveInsideRoot(metadata.targetPath); await ensureMissing(target);
+      await fsp.link(paths.data, target);
+      await Promise.all([fsp.rm(paths.data, { force: true }), fsp.rm(paths.metadata, { force: true })]);
+      await log(`Đã upload tệp: ${relative(target)}`, clientIp(req));
       return res.status(201).json({ success: true, path: relative(target) });
+    } catch (error) { return fail(res, error); }
+  });
+
+  router.delete('/upload/:id', async (req, res) => {
+    try {
+      const { paths } = await readUpload(req, req.params.id);
+      await Promise.all([fsp.rm(paths.data, { force: true }), fsp.rm(paths.metadata, { force: true })]);
+      return res.json({ success: true });
     } catch (error) { return fail(res, error); }
   });
 

@@ -227,7 +227,8 @@ server {
     listen 443 ssl http2;
     server_name api-terminal.example.com;
 
-    client_max_body_size 30m;
+    # Upload được chia thành chunk 8 MiB; giữ giới hạn request lớn hơn chunk.
+    client_max_body_size 10m;
 
     location / {
         proxy_pass http://127.0.0.1:3001;
@@ -518,7 +519,7 @@ Backend cung cấp hai endpoint không yêu cầu đăng nhập cho hệ thống
 - Khi nâng cấp từ bản JSON, backend import `terminal_database.json` trong một transaction rồi đổi tên file cũ thành `terminal_database.json.migrated-*.bak`. Chỉ xóa backup sau khi đã kiểm tra dữ liệu SQLite.
 - SQLite chạy ở WAL mode. Khi sao lưu thủ công, dừng service trước khi sao chép hoặc dùng công cụ backup SQLite; không chỉ sao chép file `.sqlite` trong lúc service đang ghi vì dữ liệu mới có thể còn trong file `-wal`.
 - `TERMINAL_PASSWORD` chỉ dùng lúc khởi tạo database; đổi biến này không đổi mật khẩu hiện tại.
-- Upload hiện giới hạn 25 MB trong backend. Nginx phải có `client_max_body_size` không thấp hơn giới hạn này.
+- Upload được chia thành các request 8 MiB để hỗ trợ file lớn qua reverse proxy. Tổng dung lượng mỗi file mặc định tối đa 10 GB và có thể đổi bằng `UPLOAD_MAX_FILE_MB`; Nginx phải có `client_max_body_size` lớn hơn 8 MiB.
 - Editor văn bản giới hạn 2 MB; media và tài liệu dùng endpoint streaming riêng.
 - Chạy backend bằng root chỉ khi thực sự cần quản lý toàn hệ thống.
 

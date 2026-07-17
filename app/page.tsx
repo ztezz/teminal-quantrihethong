@@ -1223,43 +1223,51 @@ export default function Home() {
         ]),
       ),
     );
-    const uploadOne = (file: globalThis.File): Promise<void> => new Promise((resolve, reject) => {
+    const uploadOne = async (file: globalThis.File): Promise<void> => {
       const key = `${file.name}-${file.size}-${file.lastModified}`;
-      const xhr = new XMLHttpRequest();
-      xhr.open("POST", `${API_URL}/api/files/upload`);
-      xhr.withCredentials = true;
-      xhr.setRequestHeader("Content-Type", "application/octet-stream");
-      xhr.setRequestHeader("X-File-Name", encodeURIComponent(file.name));
-      xhr.setRequestHeader("X-Directory", encodeURIComponent(directory));
-      xhr.upload.onprogress = (event) => {
-        if (event.lengthComputable)
-          setUploadProgress((progress) => ({
-            ...progress,
-            [key]: Math.round((event.loaded / event.total) * 100),
-          }));
-      };
-      xhr.onerror = () => reject(new Error(`Upload ${file.name} thất bại`));
-      xhr.onload = async () => {
-        try {
-          if (xhr.status === 428) {
-            if (!(await requestStepUp())) throw new Error(`Upload ${file.name} đã bị hủy`);
-            await uploadOne(file);
-            resolve();
-            return;
-          }
-          if (xhr.status >= 400) {
-            let message = `Upload ${file.name} thất bại`;
-            try { message = JSON.parse(xhr.responseText).error || message; } catch {}
-            throw new Error(message);
-          }
-          setUploadProgress((progress) => ({ ...progress, [key]: 100 }));
-          resolve();
-        } catch (error) {
-          reject(error);
+      const initialized = await requestFileApi("/api/files/upload", {
+        method: "POST",
+        body: JSON.stringify({ name: file.name, dirPath: directory, size: file.size }),
+      });
+      const uploadId = String(initialized.uploadId);
+      const chunkSize = Number(initialized.chunkSize);
+      if (!uploadId || !Number.isSafeInteger(chunkSize) || chunkSize <= 0)
+        throw new Error("Máy chủ trả về cấu hình upload không hợp lệ");
+
+      try {
+        for (let offset = 0; offset < file.size; offset += chunkSize) {
+          const chunk = file.slice(offset, Math.min(offset + chunkSize, file.size));
+          await new Promise<void>((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open("PUT", `${API_URL}/api/files/upload/${uploadId}`);
+            xhr.withCredentials = true;
+            xhr.setRequestHeader("Content-Type", "application/octet-stream");
+            xhr.setRequestHeader("X-Upload-Offset", String(offset));
+            xhr.upload.onprogress = (event) => {
+              if (!event.lengthComputable) return;
+              const uploaded = Math.min(file.size, offset + event.loaded);
+              setUploadProgress((progress) => ({
+                ...progress,
+                [key]: file.size ? Math.round((uploaded / file.size) * 100) : 100,
+              }));
+            };
+            xhr.onerror = () => reject(new Error(`Mất kết nối khi upload ${file.name}`));
+            xhr.onload = () => {
+              if (xhr.status < 400) return resolve();
+              let message = `Upload ${file.name} thất bại (HTTP ${xhr.status})`;
+              try { message = JSON.parse(xhr.responseText).error || message; } catch {}
+              reject(new Error(message));
+            };
+            xhr.send(chunk);
+          });
         }
-      };
-      xhr.send(file);
-    });
+        await requestFileApi(`/api/files/upload/${uploadId}/complete`, { method: "POST" });
+        setUploadProgress((progress) => ({ ...progress, [key]: 100 }));
+      } catch (error) {
+        await requestFileApi(`/api/files/upload/${uploadId}`, { method: "DELETE" }).catch(() => undefined);
+        throw error;
+      }
+    };
 
     const results = await Promise.allSettled(files.map(uploadOne));
     setUploadProgress({});

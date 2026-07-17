@@ -107,6 +107,54 @@ test('viewer can list and read files but cannot mutate them', async () => {
   } finally { await context.close(); }
 });
 
+test('uploads a file in chunks and publishes it only after completion', async () => {
+  const context = await fixture();
+  try {
+    const initialized = await context.request('/upload', {
+      method: 'POST',
+      body: JSON.stringify({ dirPath: '', name: 'large.bin', size: 11 })
+    });
+    assert.equal(initialized.status, 201);
+    assert.equal(fs.existsSync(path.join(context.root, 'large.bin')), false);
+
+    const uploadId = initialized.body.uploadId;
+    const first = await context.request(`/upload/${uploadId}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/octet-stream', 'x-upload-offset': '0' },
+      body: Buffer.from('hello ')
+    });
+    assert.equal(first.status, 200);
+    assert.equal(first.body.received, 6);
+
+    const second = await context.request(`/upload/${uploadId}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/octet-stream', 'x-upload-offset': '6' },
+      body: Buffer.from('world')
+    });
+    assert.equal(second.status, 200);
+
+    const completed = await context.request(`/upload/${uploadId}/complete`, { method: 'POST' });
+    assert.equal(completed.status, 201);
+    assert.equal(fs.readFileSync(path.join(context.root, 'large.bin'), 'utf8'), 'hello world');
+  } finally { await context.close(); }
+});
+
+test('rejects an upload chunk with the wrong offset', async () => {
+  const context = await fixture();
+  try {
+    const initialized = await context.request('/upload', {
+      method: 'POST',
+      body: JSON.stringify({ dirPath: '', name: 'offset.bin', size: 4 })
+    });
+    const response = await context.request(`/upload/${initialized.body.uploadId}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/octet-stream', 'x-upload-offset': '2' },
+      body: Buffer.from('data')
+    });
+    assert.equal(response.status, 409);
+  } finally { await context.close(); }
+});
+
 test('media preview permits framing only from the configured frontend origin', async () => {
   const context = await fixture();
   try {
