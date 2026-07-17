@@ -37,6 +37,7 @@ export function useMetricsPolling(enabled: boolean) {
 
 export function useOverviewPolling(enabled: boolean) {
   const [data, setData] = useState<OverviewData | null>(null);
+  const [history, setHistory] = useState<Array<{ timestamp: string; cpu: number; memory: number }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const refresh = useVisibilityPolling({
@@ -45,6 +46,10 @@ export function useOverviewPolling(enabled: boolean) {
     request: (signal) => apiClient.request<OverviewData>("/api/overview", { signal }),
     onData: (payload) => {
       setData(payload);
+      setHistory((current) => {
+        if (current.at(-1)?.timestamp === payload.generatedAt) return current;
+        return [...current, { timestamp: payload.generatedAt, cpu: payload.host.cpu, memory: payload.host.memory.percent }].slice(-24);
+      });
       setError(null);
       setLoading(false);
     },
@@ -53,5 +58,5 @@ export function useOverviewPolling(enabled: boolean) {
       setLoading(false);
     },
   });
-  return { data, loading, error, refresh };
+  return { data, history, loading, error, refresh };
 }

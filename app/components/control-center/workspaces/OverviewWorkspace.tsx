@@ -54,8 +54,44 @@ function Distribution({ values }: { values: Record<string, number> }) {
   return <div className="space-y-3">{entries.slice(0, 5).map(([label, count]) => <div key={label} className="grid grid-cols-[46px_1fr_auto] items-center gap-3"><span className="font-mono text-[10px] text-slate-400">{label}</span><div className="metric-track h-1.5 overflow-hidden rounded-full"><motion.div initial={{ width: 0 }} animate={{ width: `${count / total * 100}%` }} className="h-full rounded-full bg-sky-400" /></div><span className="font-mono text-[10px] tabular-nums text-slate-500">{number.format(count)}</span></div>)}</div>;
 }
 
+function ResourceTrend({ history }: { history: Array<{ timestamp: string; cpu: number; memory: number }> }) {
+  const width = 800;
+  const height = 220;
+  const padding = { top: 18, right: 18, bottom: 30, left: 38 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const x = (index: number) => padding.left + (history.length <= 1 ? plotWidth : index / (history.length - 1) * plotWidth);
+  const y = (value: number) => padding.top + (1 - Math.min(100, Math.max(0, value)) / 100) * plotHeight;
+  const points = (key: "cpu" | "memory") => history.map((point, index) => `${x(index)},${y(point[key])}`).join(" ");
+  const area = (key: "cpu" | "memory") => history.length ? `${padding.left},${padding.top + plotHeight} ${points(key)} ${x(history.length - 1)},${padding.top + plotHeight}` : "";
+  const firstTime = history[0] ? new Date(history[0].timestamp).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" }) : "--:--";
+  const lastTime = history.at(-1) ? new Date(history.at(-1)!.timestamp).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" }) : "--:--";
+
+  return (
+    <div className="overview-panel overflow-hidden">
+      <div className="overview-panel-heading">
+        <div><p className="app-kicker">Resource history</p><h3>Xu hướng tài nguyên</h3></div>
+        <div className="overview-chart-legend"><span className="is-cpu"><i />CPU <strong>{history.at(-1)?.cpu ?? 0}%</strong></span><span className="is-memory"><i />RAM <strong>{history.at(-1)?.memory ?? 0}%</strong></span></div>
+      </div>
+      <div className="overview-chart-wrap">
+        <svg className="overview-line-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Biểu đồ đường CPU và RAM trong khoảng 6 phút gần nhất">
+          <defs>
+            <linearGradient id="overview-cpu-area" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#38bdf8" stopOpacity=".2" /><stop offset="1" stopColor="#38bdf8" stopOpacity="0" /></linearGradient>
+            <linearGradient id="overview-memory-area" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#a78bfa" stopOpacity=".12" /><stop offset="1" stopColor="#a78bfa" stopOpacity="0" /></linearGradient>
+          </defs>
+          {[0, 25, 50, 75, 100].map(value => <g key={value}><line x1={padding.left} y1={y(value)} x2={width - padding.right} y2={y(value)} className="overview-chart-grid" /><text x={padding.left - 9} y={y(value) + 3} textAnchor="end" className="overview-chart-axis">{value}</text></g>)}
+          {history.length > 0 && <><polygon points={area("memory")} fill="url(#overview-memory-area)" /><polygon points={area("cpu")} fill="url(#overview-cpu-area)" /><motion.polyline initial={{ pathLength: 0 }} animate={{ pathLength: 1 }} points={points("memory")} className="overview-chart-line is-memory" /><motion.polyline initial={{ pathLength: 0 }} animate={{ pathLength: 1 }} points={points("cpu")} className="overview-chart-line is-cpu" />
+            {history.map((point, index) => <g key={point.timestamp}><circle cx={x(index)} cy={y(point.cpu)} r="3" className="overview-chart-point is-cpu"><title>{new Date(point.timestamp).toLocaleTimeString("vi-VN")} - CPU {point.cpu}%</title></circle><circle cx={x(index)} cy={y(point.memory)} r="3" className="overview-chart-point is-memory"><title>{new Date(point.timestamp).toLocaleTimeString("vi-VN")} - RAM {point.memory}%</title></circle></g>)}</>}
+          <text x={padding.left} y={height - 7} className="overview-chart-axis">{firstTime}</text><text x={width - padding.right} y={height - 7} textAnchor="end" className="overview-chart-axis">{lastTime}</text>
+        </svg>
+        {history.length < 2 && <div className="overview-chart-collecting"><Activity className="animate-pulse" /><p>Đang thu thập dữ liệu...</p><span>Điểm tiếp theo sau tối đa 15 giây</span></div>}
+      </div>
+    </div>
+  );
+}
+
 export function OverviewWorkspace({ onOpenJobs }: { onOpenJobs: () => void }) {
-  const { data, loading, error, refresh } = useOverviewPolling(true);
+  const { data, history, loading, error, refresh } = useOverviewPolling(true);
   const failedServices = data?.system.services.failed ?? 0;
   const issueCount = data ? Number(data.host.cpu >= 90) + Number(data.host.memory.percent >= 90) + Number(data.host.disk.percent >= 90) + data.databases.unhealthy + failedServices + data.audit.critical : 0;
   const health = issueCount ? { label: `${issueCount} cảnh báo cần chú ý`, detail: "Kiểm tra tài nguyên và sự kiện bên dưới", className: "is-warning", icon: AlertTriangle } : { label: "Hệ thống hoạt động ổn định", detail: "Tất cả lớp vận hành đang trong ngưỡng an toàn", className: "is-healthy", icon: ShieldCheck };
@@ -88,6 +124,8 @@ export function OverviewWorkspace({ onOpenJobs }: { onOpenJobs: () => void }) {
             <ResourceGauge label="Memory usage" value={data.host.memory.percent} detail={`${number.format(data.host.memory.usedMB)} / ${number.format(data.host.memory.totalMB)} MB`} icon={MemoryStick} tone="violet" />
             <ResourceGauge label="Disk capacity" value={data.host.disk.percent} detail={`${data.host.disk.usedGB} / ${data.host.disk.totalGB} GB`} icon={HardDrive} tone={data.host.disk.percent >= 85 ? "amber" : "emerald"} />
           </section>
+
+          <ResourceTrend history={history} />
 
           <section className="grid gap-4 xl:grid-cols-[1.5fr_0.8fr]">
             <div className="overview-panel overflow-hidden">
