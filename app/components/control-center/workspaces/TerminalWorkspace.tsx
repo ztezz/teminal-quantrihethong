@@ -67,6 +67,9 @@ export function TerminalWorkspace({
               <option value="top" className="text-white">
                 top (Giám sát quy trình)
               </option>
+              <option value="nano" className="text-white">
+                nano (Mở trình chỉnh sửa)
+              </option>
               <option value="df -h" className="text-white">
                 df -h (Xem dung lượng đĩa)
               </option>
@@ -133,8 +136,8 @@ export function TerminalWorkspace({
       </div>
       <div className="mt-4 flex flex-col sm:flex-row items-start sm:items-center justify-between text-[11px] text-slate-500 font-mono px-1 gap-2">
         <span className="text-emerald-500/80 font-semibold">
-          [HỆ THỐNG] Chuột phải: sao chép vùng chọn hoặc dán |
-          Ctrl+Shift+C / Ctrl+Shift+V
+          [TTY TƯƠNG TÁC] top: P CPU, M RAM, q thoát | nano: Ctrl+O lưu,
+          Ctrl+X thoát | Clipboard: Ctrl+Shift+C / Ctrl+Shift+V
         </span>
         <div className="flex items-center gap-3 flex-wrap">
           <label

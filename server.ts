@@ -981,16 +981,18 @@ async function startServer() {
     }
 
     try {
+      const requestedCols = Number(socket.handshake.auth?.cols);
+      const requestedRows = Number(socket.handshake.auth?.rows);
       shell = pty.spawn(shellExec, args, {
         name: 'xterm-256color',
-        cols: 80,
-        rows: 24,
+        cols: Number.isInteger(requestedCols) ? Math.max(2, Math.min(requestedCols, 500)) : 80,
+        rows: Number.isInteger(requestedRows) ? Math.max(1, Math.min(requestedRows, 200)) : 24,
         cwd: terminalCwd,
         env: {
           ...process.env,
           TERM: 'xterm-256color',
           COLORTERM: 'truecolor',
-          LANG: 'en_US.UTF-8'
+          LANG: process.env.TERMINAL_LANG || process.env.LANG || 'C.UTF-8'
         }
       });
     } catch (err: any) {
@@ -1032,9 +1034,11 @@ async function startServer() {
       shell?.write(data);
     });
 
-    socket.on('resize', ({ cols, rows }: { cols: number; rows: number }) => {
+    socket.on('resize', (payload: unknown) => {
+      if (!payload || typeof payload !== 'object') return;
+      const { cols, rows } = payload as { cols?: unknown; rows?: unknown };
       if (!shell || !Number.isInteger(cols) || !Number.isInteger(rows)) return;
-      shell.resize(Math.max(2, Math.min(cols, 500)), Math.max(1, Math.min(rows, 200)));
+      shell.resize(Math.max(2, Math.min(cols as number, 500)), Math.max(1, Math.min(rows as number, 200)));
     });
 
     // Handle disconnect (CRITICAL security & cleanup step!)

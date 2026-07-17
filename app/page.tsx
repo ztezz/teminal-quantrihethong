@@ -2568,6 +2568,8 @@ export default function Home() {
         auth: {
           ticket: ticketData.ticket,
           cwd: pendingTerminalCwdRef.current || undefined,
+          cols: term.cols,
+          rows: term.rows,
         },
         reconnectionDelay: 2000,
         reconnectionDelayMax: 5000,
@@ -2621,13 +2623,13 @@ export default function Home() {
       // Stream data from server to terminal
       socket.on("output", (data: string) => {
         if (term) {
-          if (autoScrollRef.current) {
+          if (term.buffer.active.type === "alternate") {
             term.write(data);
-            term.scrollToBottom();
+          } else if (autoScrollRef.current) {
+            term.write(data, () => term.scrollToBottom());
           } else {
             const previousViewportY = term.buffer.active.viewportY;
-            term.write(data);
-            term.scrollToLine(previousViewportY);
+            term.write(data, () => term.scrollToLine(previousViewportY));
           }
         }
       });
@@ -2694,7 +2696,15 @@ export default function Home() {
     if (xtermInstance.current) {
       xtermInstance.current.options.fontSize = fontSize;
       xtermInstance.current.options.theme = getTerminalColors(theme);
-      fitTimer = window.setTimeout(() => fitAddonRef.current?.fit(), 50);
+      fitTimer = window.setTimeout(() => {
+        fitAddonRef.current?.fit();
+        if (socketInstance.current?.connected && xtermInstance.current) {
+          socketInstance.current.emit("resize", {
+            cols: xtermInstance.current.cols,
+            rows: xtermInstance.current.rows,
+          });
+        }
+      }, 50);
     }
     if (!isSettingsLoadedRef.current) {
       return () => { if (fitTimer) window.clearTimeout(fitTimer); };
@@ -2714,6 +2724,12 @@ export default function Home() {
       const editing = target?.matches(
         'input, textarea, select, [contenteditable="true"]',
       );
+      const terminalHasFocus = Boolean(
+        activeTab === "terminal" &&
+          target &&
+          terminalRef.current?.contains(target),
+      );
+      if (terminalHasFocus) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         setPaletteOpen((open) => !open);
