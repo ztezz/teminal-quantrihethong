@@ -210,17 +210,6 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
             )}
           </div>
           <div className="flex flex-wrap gap-2">
-            <input
-              id="file-upload-input"
-              ref={uploadInputRef}
-              type="file"
-              multiple
-              className="hidden"
-              onChange={(event) => {
-                uploadFiles(Array.from(event.target.files || []));
-                event.target.value = "";
-              }}
-            />
             <button
               onClick={() => loadFiles(parentPath)}
               disabled={!parentPath || currentPath === parentPath}
@@ -300,13 +289,34 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
           </div>
         )}
         {Object.keys(uploadProgress).length > 0 && (
-          <div className="space-y-1 rounded border border-emerald-500/20 bg-emerald-500/5 p-3 text-[11px] font-mono">
+          <div className="space-y-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-4 font-mono shadow-lg shadow-emerald-950/20">
+            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-emerald-400">
+              <Upload className="h-4 w-4 animate-pulse" />
+              Đang tải lên {Object.keys(uploadProgress).length} tệp
+            </div>
             {Object.entries(uploadProgress).map(([name, progress]) => (
-              <div key={name} className="flex gap-3">
-                <span className="flex-1 truncate">
-                  {name.split("-").slice(0, -2).join("-")}
-                </span>
-                <span>{progress}%</span>
+              <div key={name} className="space-y-1.5">
+                <div className="flex gap-3 text-xs">
+                  <span className="flex-1 truncate text-slate-200">
+                    {name.split("-").slice(0, -2).join("-")}
+                  </span>
+                  <span className="min-w-10 text-right font-bold tabular-nums text-emerald-400">
+                    {progress}%
+                  </span>
+                </div>
+                <div
+                  role="progressbar"
+                  aria-label={`Tiến độ tải lên ${name.split("-").slice(0, -2).join("-")}`}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={progress}
+                  className="h-2 overflow-hidden rounded-full bg-black/50"
+                >
+                  <div
+                    className="h-full rounded-full bg-emerald-500 transition-[width] duration-200"
+                    style={{ width: `${progress}%` }}
+                  />
+                </div>
               </div>
             ))}
           </div>

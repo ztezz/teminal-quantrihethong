@@ -1215,6 +1215,14 @@ export default function Home() {
     setFileLoading(true);
     setFileError(null);
     const directory = currentPath;
+    setUploadProgress(
+      Object.fromEntries(
+        files.map((file) => [
+          `${file.name}-${file.size}-${file.lastModified}`,
+          0,
+        ]),
+      ),
+    );
     const uploadOne = (file: globalThis.File): Promise<void> => new Promise((resolve, reject) => {
       const key = `${file.name}-${file.size}-${file.lastModified}`;
       const xhr = new XMLHttpRequest();
@@ -1244,6 +1252,7 @@ export default function Home() {
             try { message = JSON.parse(xhr.responseText).error || message; } catch {}
             throw new Error(message);
           }
+          setUploadProgress((progress) => ({ ...progress, [key]: 100 }));
           resolve();
         } catch (error) {
           reject(error);
@@ -2862,10 +2871,8 @@ export default function Home() {
       keywords: "upload",
       allowed: currentUser?.role !== "viewer",
       run: () => {
+        uploadInputRef.current?.click();
         navigateWorkspace("files");
-        requestAnimationFrame(() =>
-          document.getElementById("file-upload-input")?.click(),
-        );
       },
     },
   ].filter(
@@ -2910,6 +2917,17 @@ export default function Home() {
             animate={{ opacity: 1 }}
             className="app-shell flex flex-col w-full h-screen overflow-hidden"
           >
+            <input
+              id="file-upload-input"
+              ref={uploadInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(event) => {
+                uploadFiles(Array.from(event.target.files || []));
+                event.target.value = "";
+              }}
+            />
             <Header
               socketStatus={displayedSocketStatus}
               onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
