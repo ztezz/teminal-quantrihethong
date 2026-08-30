@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, useState } from "react";
+import { ChangeEvent, useEffect, useState } from "react";
 import { Check, Clipboard, Download, FileUp, KeyRound, LockKeyhole, RotateCcw, Send, ShieldCheck, Timer, Upload } from "lucide-react";
 import { apiClient } from "@/lib/client/api";
 
@@ -20,10 +20,15 @@ export default function QuickSharePage() {
   const [progress, setProgress] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [resumeSession, setResumeSession] = useState<UploadSession | null>(() => {
-    if (typeof window === "undefined") return null;
-    try { return JSON.parse(localStorage.getItem(UPLOAD_SESSION_KEY) || "null") as UploadSession | null; } catch { return null; }
-  });
+  const [resumeSession, setResumeSession] = useState<UploadSession | null>(null);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try { setResumeSession(JSON.parse(localStorage.getItem(UPLOAD_SESSION_KEY) || "null") as UploadSession | null); }
+      catch { localStorage.removeItem(UPLOAD_SESSION_KEY); }
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   function selectFile(event: ChangeEvent<HTMLInputElement>) {
     setFile(event.target.files?.[0] || null); setStatus(""); setChecksum(""); setProgress(null); setCode("");
