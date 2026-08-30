@@ -40,8 +40,12 @@ const JOB_DATA_DIR = path.resolve(process.env.JOB_DATA_DIR || path.join(process.
 const QUICK_SHARE_DIR = path.resolve(process.env.QUICK_SHARE_DIR || path.join(os.tmpdir(), 'terminal-quick-share'));
 const quickShareMaxFileMb = Number(process.env.QUICK_SHARE_MAX_FILE_MB || 2048);
 const quickShareTtlMinutes = Number(process.env.QUICK_SHARE_TTL_MINUTES || 1440);
+const quickShareTotalGb = Number(process.env.QUICK_SHARE_MAX_TOTAL_GB || 20);
+const quickSharePerIpGb = Number(process.env.QUICK_SHARE_MAX_PER_IP_GB || 4);
 const QUICK_SHARE_MAX_SIZE = (Number.isFinite(quickShareMaxFileMb) ? Math.min(2048, Math.max(1, quickShareMaxFileMb)) : 2048) * 1024 * 1024;
 const QUICK_SHARE_TTL_MS = (Number.isFinite(quickShareTtlMinutes) ? Math.min(1440, Math.max(1, quickShareTtlMinutes)) : 1440) * 60_000;
+const QUICK_SHARE_MAX_TOTAL_SIZE = (Number.isFinite(quickShareTotalGb) ? Math.min(200, Math.max(1, quickShareTotalGb)) : 20) * 1024 * 1024 * 1024;
+const QUICK_SHARE_MAX_PER_IP_SIZE = (Number.isFinite(quickSharePerIpGb) ? Math.min(20, Math.max(1, quickSharePerIpGb)) : 4) * 1024 * 1024 * 1024;
 const SESSION_COOKIE = 'terminal_session';
 const STEP_UP_COOKIE = 'terminal_step_up';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -126,7 +130,8 @@ const previewTickets = new Map<string, { path: string; expiresAt: number; maxExp
 const socketTickets = new Map<string, { expiresAt: number; userId: string; sessionHash: string }>();
 const loginChallenges = new Map<string, { expiresAt: number; ip: string; userAgent: string; userId: string }>();
 const quickShareAttempts = new Map<string, { count: number; resetAt: number }>();
-type QuickShare = { code: string; name: string; size: number; offset: number; createdAt: string; expiresAt: number; ready: boolean };
+const quickShareDownloadAttempts = new Map<string, { count: number; resetAt: number }>();
+type QuickShare = { code: string; name: string; size: number; offset: number; createdAt: string; expiresAt: number; ready: boolean; uploadTokenHash: string; ipHash: string; checksum?: string };
 function createTicket<T extends { expiresAt: number }>(store: Map<string, T>, value: T): string {
   const now = Date.now();
   for (const [key, entry] of store) if (entry.expiresAt <= now) store.delete(key);
@@ -149,7 +154,7 @@ function consumeSocketTicket(ticket: string): { userId: string; sessionHash: str
   return entry && entry.expiresAt > Date.now() ? { userId: entry.userId, sessionHash: entry.sessionHash } : null;
 }
 
-function quickShareCode(value: unknown): value is string { return typeof value === 'string' && /^[A-HJ-NP-Z2-9]{12}$/.test(value); }
+function quickShareCode(value: unknown): value is string { return typeof value === 'string' && /^\d{4}$/.test(value); }
 function quickSharePaths(code: string) {
   if (!quickShareCode(code)) throw Object.assign(new Error('Mã truyền file không hợp lệ'), { status: 400 });
   return { data: path.join(QUICK_SHARE_DIR, `${code}.data`), metadata: path.join(QUICK_SHARE_DIR, `${code}.json`) };
@@ -163,9 +168,39 @@ async function readQuickShare(code: string): Promise<{ share: QuickShare; data: 
   }
   return { share, ...paths };
 }
+function quickShareToken(req: express.Request) { return typeof req.headers['x-quick-share-token'] === 'string' ? req.headers['x-quick-share-token'] : ''; }
+function ownsQuickShare(req: express.Request, share: QuickShare) {
+  const token = quickShareToken(req); const hash = crypto.createHash('sha256').update(token).digest('hex');
+  return Boolean(token) && hash.length === share.uploadTokenHash.length && crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(share.uploadTokenHash));
+}
+async function quickShareUsage() {
+  const entries = await fs.promises.readdir(QUICK_SHARE_DIR).catch(() => []);
+  const usage = { total: 0, byIp: new Map<string, number>() };
+  await Promise.all(entries.filter(name => name.endsWith('.json')).map(async name => {
+    try {
+      const share = JSON.parse(await fs.promises.readFile(path.join(QUICK_SHARE_DIR, name), 'utf8')) as QuickShare;
+      if (share.expiresAt > Date.now() && Number.isSafeInteger(share.size) && share.size > 0 && typeof share.ipHash === 'string') {
+        usage.total += share.size; usage.byIp.set(share.ipHash, (usage.byIp.get(share.ipHash) || 0) + share.size);
+      }
+    } catch { /* Pruning handles malformed temporary metadata. */ }
+  }));
+  return usage;
+}
+function sha256File(filePath: string) {
+  return new Promise<string>((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    fs.createReadStream(filePath).on('data', chunk => hash.update(chunk)).on('end', () => resolve(hash.digest('hex'))).on('error', reject);
+  });
+}
 function allowQuickShareUpload(ip: string) {
   const now = Date.now(); const current = quickShareAttempts.get(ip);
   if (!current || current.resetAt <= now) { quickShareAttempts.set(ip, { count: 1, resetAt: now + 15 * 60_000 }); return true; }
+  if (current.count >= 10) return false;
+  current.count++; return true;
+}
+function allowQuickShareDownload(ip: string) {
+  const now = Date.now(); const current = quickShareDownloadAttempts.get(ip);
+  if (!current || current.resetAt <= now) { quickShareDownloadAttempts.set(ip, { count: 1, resetAt: now + 15 * 60_000 }); return true; }
   if (current.count >= 10) return false;
   current.count++; return true;
 }
@@ -601,23 +636,29 @@ async function startServer() {
       if (!name || name.length > 255 || /[\\/\0]/.test(name)) return res.status(400).json({ success: false, error: 'Tên file không hợp lệ' });
       if (!Number.isSafeInteger(size) || size < 1 || size > QUICK_SHARE_MAX_SIZE) return res.status(400).json({ success: false, error: `File phải có dung lượng từ 1 byte đến ${QUICK_SHARE_MAX_SIZE / 1024 / 1024}MB` });
       await fs.promises.mkdir(QUICK_SHARE_DIR, { recursive: true });
+      const ipHash = crypto.createHash('sha256').update(requestInfo(req).ip).digest('hex');
+      const usage = await quickShareUsage();
+      if (usage.total + size > QUICK_SHARE_MAX_TOTAL_SIZE) return res.status(507).json({ success: false, error: 'Kho truyền file đang đầy. Vui lòng thử lại sau.' });
+      if ((usage.byIp.get(ipHash) || 0) + size > QUICK_SHARE_MAX_PER_IP_SIZE) return res.status(429).json({ success: false, error: 'Đã đạt hạn mức dung lượng truyền file của IP này.' });
       let code = '';
       for (let attempt = 0; attempt < 5; attempt++) {
-        code = Array.from(crypto.randomBytes(12), byte => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[byte % 32]).join('');
+        code = crypto.randomInt(10_000).toString().padStart(4, '0');
         try { await fs.promises.access(quickSharePaths(code).metadata); } catch { break; }
         code = '';
       }
       if (!code) throw Object.assign(new Error('Không thể tạo mã truyền file, vui lòng thử lại'), { status: 503 });
       const paths = quickSharePaths(code); const now = Date.now();
-      const share: QuickShare = { code, name, size, offset: 0, createdAt: new Date(now).toISOString(), expiresAt: now + QUICK_SHARE_TTL_MS, ready: false };
+      const uploadToken = crypto.randomBytes(32).toString('base64url');
+      const share: QuickShare = { code, name, size, offset: 0, createdAt: new Date(now).toISOString(), expiresAt: now + QUICK_SHARE_TTL_MS, ready: false, uploadTokenHash: crypto.createHash('sha256').update(uploadToken).digest('hex'), ipHash };
       await fs.promises.writeFile(paths.metadata, JSON.stringify(share), { flag: 'wx', mode: 0o600 });
-      return res.status(201).json({ success: true, code, chunkSize: 8 * 1024 * 1024, expiresAt: share.expiresAt });
+      return res.status(201).json({ success: true, code, uploadToken, chunkSize: 8 * 1024 * 1024, expiresAt: share.expiresAt });
     } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message }); }
   });
 
   expressApp.put('/api/quick-share/:code', express.raw({ type: 'application/octet-stream', limit: '8mb' }), async (req, res) => {
     try {
       const { share, data, metadata } = await readQuickShare(req.params.code);
+      if (!ownsQuickShare(req, share)) return res.status(403).json({ success: false, error: 'Token upload không hợp lệ' });
       if (share.ready) return res.status(409).json({ success: false, error: 'File đã hoàn tất upload' });
       const offset = Number(req.headers['x-upload-offset']);
       if (!Number.isSafeInteger(offset) || offset !== share.offset || !Buffer.isBuffer(req.body) || !req.body.length || share.offset + req.body.length > share.size) return res.status(409).json({ success: false, error: 'Dữ liệu upload hoặc vị trí không hợp lệ' });
@@ -629,16 +670,26 @@ async function startServer() {
 
   expressApp.post('/api/quick-share/:code/complete', async (req, res) => {
     try {
-      const { share, metadata } = await readQuickShare(req.params.code);
+      const { share, data, metadata } = await readQuickShare(req.params.code);
+      if (!ownsQuickShare(req, share)) return res.status(403).json({ success: false, error: 'Token upload không hợp lệ' });
       if (share.offset !== share.size) return res.status(409).json({ success: false, error: 'File chưa được tải lên đầy đủ' });
-      share.ready = true; await fs.promises.writeFile(metadata, JSON.stringify(share), { mode: 0o600 });
+      share.checksum = await sha256File(data); share.ready = true; await fs.promises.writeFile(metadata, JSON.stringify(share), { mode: 0o600 });
       audit({ category: 'quick_share', action: 'upload_complete', event: 'Public quick-share upload completed', ip: requestInfo(req).ip, metadata: { size: share.size } });
-      return res.json({ success: true, code: share.code, expiresAt: share.expiresAt });
+      return res.json({ success: true, code: share.code, checksum: share.checksum, expiresAt: share.expiresAt });
+    } catch (error: any) { return res.status(error.status || (error.code === 'ENOENT' ? 404 : 500)).json({ success: false, error: error.message }); }
+  });
+
+  expressApp.get('/api/quick-share/:code/upload', async (req, res) => {
+    try {
+      const { share } = await readQuickShare(req.params.code);
+      if (!ownsQuickShare(req, share)) return res.status(403).json({ success: false, error: 'Token upload không hợp lệ' });
+      return res.json({ success: true, offset: share.offset, size: share.size, ready: share.ready, expiresAt: share.expiresAt });
     } catch (error: any) { return res.status(error.status || (error.code === 'ENOENT' ? 404 : 500)).json({ success: false, error: error.message }); }
   });
 
   expressApp.get('/api/quick-share/:code', async (req, res) => {
     try {
+      if (!allowQuickShareDownload(requestInfo(req).ip)) return res.status(429).json({ success: false, error: 'Đã đạt giới hạn thử mã. Vui lòng thử lại sau 15 phút.' });
       const { share, data, metadata } = await readQuickShare(req.params.code);
       if (!share.ready || share.offset !== share.size) return res.status(404).json({ success: false, error: 'File chưa sẵn sàng hoặc đã được nhận' });
       const sending = `${data}.${crypto.randomUUID()}.sending`;
@@ -647,6 +698,7 @@ async function startServer() {
       res.setHeader('Content-Type', 'application/octet-stream');
       res.setHeader('Content-Length', share.size);
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(share.name)}`);
+      if (share.checksum) res.setHeader('X-Checksum-SHA256', share.checksum);
       return fs.createReadStream(sending).on('error', error => res.destroy(error)).on('close', () => void fs.promises.rm(sending, { force: true })).pipe(res);
     } catch (error: any) { return res.status(error.status || (error.code === 'ENOENT' ? 404 : 500)).json({ success: false, error: error.message }); }
   });
