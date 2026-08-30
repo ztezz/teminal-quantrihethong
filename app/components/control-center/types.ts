@@ -80,6 +80,7 @@ export interface Note {
   content: string;
   createdAt: string;
   updatedAt: string;
+  category?: string;
   table?: { columns: string[]; rows: string[][] };
 }
 
