@@ -17,6 +17,7 @@
 - Quản lý systemd service, journal logs và Linux processes.
 - Nhật ký đăng nhập và thao tác quản trị.
 - Sổ ghi chú riêng theo tài khoản, mã hóa AES-256-GCM khi lưu (dùng cho mật khẩu và việc cần nhớ).
+- Truyền file nhanh tại `/share` không cần đăng nhập: mã 12 ký tự, tối đa 2 GB, hết hạn sau 24 giờ và xóa sau lần tải đầu tiên.
 - Trình chỉnh sửa tệp văn bản với kiểm tra xung đột khi lưu.
 - Xem trước video, âm thanh, hình ảnh và PDF.
 - Chuyển tài liệu Office sang PDF để xem bằng LibreOffice.
@@ -119,6 +120,9 @@ Mở `http://localhost:3000`.
 | `FILE_MANAGER_ROOT` | Backend | Thư mục gốc hiển thị trong File Manager. Dùng `/` để quản lý toàn máy chủ. |
 | `FILE_MANAGER_TRASH_DIR` | Backend | Nơi lưu thùng rác, phải có quyền ghi. |
 | `FILE_MANAGER_SNAPSHOT_DIR` | Backend | Kho snapshot nội bộ, không đặt trong thư mục được web server phục vụ. |
+| `QUICK_SHARE_DIR` | Backend | Thư mục tạm riêng cho truyền file công khai, mặc định là `terminal-quick-share` trong thư mục tạm hệ điều hành. Không đặt trong File Manager hoặc thư mục web server phục vụ. |
+| `QUICK_SHARE_MAX_FILE_MB` | Backend | Dung lượng tối đa của file truyền nhanh, mặc định và tối đa `2048` (2 GB). |
+| `QUICK_SHARE_TTL_MINUTES` | Backend | Thời gian tồn tại của file truyền nhanh, mặc định và tối đa `1440` (24 giờ). |
 | `SNAPSHOT_MAX_FILE_MB` | Backend | Dung lượng tối đa mỗi file được snapshot, mặc định `100`. |
 | `SNAPSHOT_MAX_TOTAL_MB` | Backend | Tổng quota snapshot, mặc định `2048`; tự xóa bản cũ nhất khi vượt quota. |
 | `LIBREOFFICE_PATH` | Backend | Binary LibreOffice, thường là `/usr/bin/libreoffice`. |

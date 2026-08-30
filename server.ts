@@ -37,6 +37,11 @@ const SQLITE_MANAGER_ROOT = path.resolve(process.env.SQLITE_MANAGER_ROOT || FILE
 const SQLITE_BROWSER_ROOT = path.resolve(process.env.SQLITE_BROWSER_ROOT || path.parse(process.cwd()).root);
 const SQLITE_BACKUP_DIR = path.resolve(process.env.SQLITE_BACKUP_DIR || path.join(SQLITE_MANAGER_ROOT, '.terminal-sqlite-backups'));
 const JOB_DATA_DIR = path.resolve(process.env.JOB_DATA_DIR || path.join(process.cwd(), '.terminal-jobs'));
+const QUICK_SHARE_DIR = path.resolve(process.env.QUICK_SHARE_DIR || path.join(os.tmpdir(), 'terminal-quick-share'));
+const quickShareMaxFileMb = Number(process.env.QUICK_SHARE_MAX_FILE_MB || 2048);
+const quickShareTtlMinutes = Number(process.env.QUICK_SHARE_TTL_MINUTES || 1440);
+const QUICK_SHARE_MAX_SIZE = (Number.isFinite(quickShareMaxFileMb) ? Math.min(2048, Math.max(1, quickShareMaxFileMb)) : 2048) * 1024 * 1024;
+const QUICK_SHARE_TTL_MS = (Number.isFinite(quickShareTtlMinutes) ? Math.min(1440, Math.max(1, quickShareTtlMinutes)) : 1440) * 60_000;
 const SESSION_COOKIE = 'terminal_session';
 const STEP_UP_COOKIE = 'terminal_step_up';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -120,6 +125,8 @@ function hasStepUp(req: express.Request): boolean {
 const previewTickets = new Map<string, { path: string; expiresAt: number; maxExpiresAt: number; remainingUses: number }>();
 const socketTickets = new Map<string, { expiresAt: number; userId: string; sessionHash: string }>();
 const loginChallenges = new Map<string, { expiresAt: number; ip: string; userAgent: string; userId: string }>();
+const quickShareAttempts = new Map<string, { count: number; resetAt: number }>();
+type QuickShare = { code: string; name: string; size: number; offset: number; createdAt: string; expiresAt: number; ready: boolean };
 function createTicket<T extends { expiresAt: number }>(store: Map<string, T>, value: T): string {
   const now = Date.now();
   for (const [key, entry] of store) if (entry.expiresAt <= now) store.delete(key);
@@ -140,6 +147,27 @@ function consumeSocketTicket(ticket: string): { userId: string; sessionHash: str
   const entry = socketTickets.get(ticket);
   socketTickets.delete(ticket);
   return entry && entry.expiresAt > Date.now() ? { userId: entry.userId, sessionHash: entry.sessionHash } : null;
+}
+
+function quickShareCode(value: unknown): value is string { return typeof value === 'string' && /^[A-HJ-NP-Z2-9]{12}$/.test(value); }
+function quickSharePaths(code: string) {
+  if (!quickShareCode(code)) throw Object.assign(new Error('Mã truyền file không hợp lệ'), { status: 400 });
+  return { data: path.join(QUICK_SHARE_DIR, `${code}.data`), metadata: path.join(QUICK_SHARE_DIR, `${code}.json`) };
+}
+async function readQuickShare(code: string): Promise<{ share: QuickShare; data: string; metadata: string }> {
+  const paths = quickSharePaths(code);
+  const share = JSON.parse(await fs.promises.readFile(paths.metadata, 'utf8')) as QuickShare;
+  if (share.code !== code || !Number.isSafeInteger(share.size) || share.size < 1 || share.expiresAt <= Date.now()) {
+    await fs.promises.rm(paths.data, { force: true }); await fs.promises.rm(paths.metadata, { force: true });
+    throw Object.assign(new Error('Mã đã hết hạn hoặc không tồn tại'), { status: 404 });
+  }
+  return { share, ...paths };
+}
+function allowQuickShareUpload(ip: string) {
+  const now = Date.now(); const current = quickShareAttempts.get(ip);
+  if (!current || current.resetAt <= now) { quickShareAttempts.set(ip, { count: 1, resetAt: now + 15 * 60_000 }); return true; }
+  if (current.count >= 10) return false;
+  current.count++; return true;
 }
 
 async function verifyPassword(password: string, user?: StoredUser): Promise<boolean> {
@@ -388,6 +416,23 @@ async function startServer() {
     throw err;
   }
 
+  const pruneQuickShares = async () => {
+    const entries = await fs.promises.readdir(QUICK_SHARE_DIR).catch(() => []);
+    await Promise.all(entries.filter(name => name.endsWith('.json')).map(async name => {
+      try {
+        const metadataPath = path.join(QUICK_SHARE_DIR, name);
+        const share = JSON.parse(await fs.promises.readFile(metadataPath, 'utf8')) as QuickShare;
+        if (share.expiresAt <= Date.now()) {
+          const code = name.slice(0, -5);
+          if (quickShareCode(code)) { const paths = quickSharePaths(code); await fs.promises.rm(paths.data, { force: true }); await fs.promises.rm(paths.metadata, { force: true }); }
+        }
+      } catch { /* Ignore malformed or concurrently removed temporary entries. */ }
+    }));
+  };
+  void pruneQuickShares();
+  const quickSharePruneTimer = setInterval(() => void pruneQuickShares(), 60_000);
+  quickSharePruneTimer.unref();
+
   const numberConfig = (name: string, fallback: number) => {
     const raw = process.env[name]?.trim();
     if (!raw) return fallback;
@@ -545,6 +590,65 @@ async function startServer() {
       return res.json({ success: true, user: { username: context.user.username, role: context.user.role } });
     }
     return res.status(401).json({ success: false, error: 'Invalid or expired session token' });
+  });
+
+  // Public, short-lived transfer channel. It is deliberately isolated from File Manager.
+  expressApp.post('/api/quick-share', async (req, res) => {
+    try {
+      if (!allowQuickShareUpload(requestInfo(req).ip)) return res.status(429).json({ success: false, error: 'Đã đạt giới hạn 10 file trong 15 phút. Vui lòng thử lại sau.' });
+      const name = typeof req.body?.name === 'string' ? req.body.name : '';
+      const size = Number(req.body?.size);
+      if (!name || name.length > 255 || /[\\/\0]/.test(name)) return res.status(400).json({ success: false, error: 'Tên file không hợp lệ' });
+      if (!Number.isSafeInteger(size) || size < 1 || size > QUICK_SHARE_MAX_SIZE) return res.status(400).json({ success: false, error: `File phải có dung lượng từ 1 byte đến ${QUICK_SHARE_MAX_SIZE / 1024 / 1024}MB` });
+      await fs.promises.mkdir(QUICK_SHARE_DIR, { recursive: true });
+      let code = '';
+      for (let attempt = 0; attempt < 5; attempt++) {
+        code = Array.from(crypto.randomBytes(12), byte => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[byte % 32]).join('');
+        try { await fs.promises.access(quickSharePaths(code).metadata); } catch { break; }
+        code = '';
+      }
+      if (!code) throw Object.assign(new Error('Không thể tạo mã truyền file, vui lòng thử lại'), { status: 503 });
+      const paths = quickSharePaths(code); const now = Date.now();
+      const share: QuickShare = { code, name, size, offset: 0, createdAt: new Date(now).toISOString(), expiresAt: now + QUICK_SHARE_TTL_MS, ready: false };
+      await fs.promises.writeFile(paths.metadata, JSON.stringify(share), { flag: 'wx', mode: 0o600 });
+      return res.status(201).json({ success: true, code, chunkSize: 8 * 1024 * 1024, expiresAt: share.expiresAt });
+    } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message }); }
+  });
+
+  expressApp.put('/api/quick-share/:code', express.raw({ type: 'application/octet-stream', limit: '8mb' }), async (req, res) => {
+    try {
+      const { share, data, metadata } = await readQuickShare(req.params.code);
+      if (share.ready) return res.status(409).json({ success: false, error: 'File đã hoàn tất upload' });
+      const offset = Number(req.headers['x-upload-offset']);
+      if (!Number.isSafeInteger(offset) || offset !== share.offset || !Buffer.isBuffer(req.body) || !req.body.length || share.offset + req.body.length > share.size) return res.status(409).json({ success: false, error: 'Dữ liệu upload hoặc vị trí không hợp lệ' });
+      await fs.promises.appendFile(data, req.body, { mode: 0o600 });
+      share.offset += req.body.length; await fs.promises.writeFile(metadata, JSON.stringify(share), { mode: 0o600 });
+      return res.json({ success: true, offset: share.offset });
+    } catch (error: any) { return res.status(error.status || (error.code === 'ENOENT' ? 404 : 500)).json({ success: false, error: error.message }); }
+  });
+
+  expressApp.post('/api/quick-share/:code/complete', async (req, res) => {
+    try {
+      const { share, metadata } = await readQuickShare(req.params.code);
+      if (share.offset !== share.size) return res.status(409).json({ success: false, error: 'File chưa được tải lên đầy đủ' });
+      share.ready = true; await fs.promises.writeFile(metadata, JSON.stringify(share), { mode: 0o600 });
+      audit({ category: 'quick_share', action: 'upload_complete', event: 'Public quick-share upload completed', ip: requestInfo(req).ip, metadata: { size: share.size } });
+      return res.json({ success: true, code: share.code, expiresAt: share.expiresAt });
+    } catch (error: any) { return res.status(error.status || (error.code === 'ENOENT' ? 404 : 500)).json({ success: false, error: error.message }); }
+  });
+
+  expressApp.get('/api/quick-share/:code', async (req, res) => {
+    try {
+      const { share, data, metadata } = await readQuickShare(req.params.code);
+      if (!share.ready || share.offset !== share.size) return res.status(404).json({ success: false, error: 'File chưa sẵn sàng hoặc đã được nhận' });
+      const sending = `${data}.${crypto.randomUUID()}.sending`;
+      await fs.promises.rename(data, sending); await fs.promises.rm(metadata, { force: true });
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Length', share.size);
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(share.name)}`);
+      return fs.createReadStream(sending).on('error', error => res.destroy(error)).on('close', () => void fs.promises.rm(sending, { force: true })).pipe(res);
+    } catch (error: any) { return res.status(error.status || (error.code === 'ENOENT' ? 404 : 500)).json({ success: false, error: error.message }); }
   });
 
   // Notes are private to their owner. Both title and content are encrypted at rest.
@@ -1126,6 +1230,7 @@ async function startServer() {
     fallback.unref();
     shutdownPromise = (async () => {
       clearInterval(auditPruneTimer);
+      clearInterval(quickSharePruneTimer);
       terminalRegistry.disconnectAll('server shutdown');
       const listenerClosed = new Promise<void>((resolve, reject) => httpServer.close(error => error && (error as NodeJS.ErrnoException).code !== 'ERR_SERVER_NOT_RUNNING' ? reject(error) : resolve()));
       const results = await Promise.allSettled([
