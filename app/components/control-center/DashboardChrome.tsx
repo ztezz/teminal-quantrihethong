@@ -4,6 +4,7 @@ import {
   Database,
   Folder,
   History,
+  NotebookPen,
   ListTodo,
   LayoutDashboard,
   Menu,
@@ -89,6 +90,7 @@ const navigation: Array<{ tab: ActiveTab; label: string; restricted?: boolean; i
   { tab: "jobs", label: "Tác Vụ", restricted: true, icon: ListTodo },
   { tab: "logs", label: "Nhật Ký Bảo Mật", restricted: true, icon: History },
   { tab: "files", label: "Quản Lý Tệp Tin", icon: Folder },
+  { tab: "notes", label: "Sổ Ghi Chú", icon: NotebookPen },
   { tab: "settings", label: "Cấu Hình", icon: Settings },
 ];
 

@@ -71,7 +71,16 @@ export type ActiveTab =
   | "settings"
   | "files"
   | "system"
-  | "sqlite";
+  | "sqlite"
+  | "notes";
+
+export interface Note {
+  id: string;
+  title: string;
+  content: string;
+  createdAt: string;
+  updatedAt: string;
+}
 
 export interface OverviewData {
   success: true;

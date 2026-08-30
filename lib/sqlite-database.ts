@@ -8,6 +8,7 @@ export type StoredSession = { tokenHash: string; userId: string; createdAt: numb
 export type AuditLevel = 'info' | 'warning' | 'critical';
 export type AuditResult = 'success' | 'failure';
 export type AuditEntry = { id: number; category: string; action: string; event: string; level: AuditLevel; result: AuditResult; ip: string; sessionId?: string; metadata?: Record<string, unknown>; timestamp: string; previousHash: string; hash: string };
+export type StoredNote = { id: string; userId: string; title: string; content: string; createdAt: string; updatedAt: string };
 
 type LegacyData = {
   settings?: Record<string, string>;
@@ -71,6 +72,11 @@ export class SqliteDatabase {
         timestamp TEXT NOT NULL, previous_hash TEXT NOT NULL, hash TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS audit_logs_timestamp_idx ON audit_logs(timestamp DESC);
+      CREATE TABLE IF NOT EXISTS notes (
+        id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        title TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS notes_user_updated_idx ON notes(user_id, updated_at DESC);
     `);
   }
 
@@ -236,4 +242,15 @@ export class SqliteDatabase {
   saveUser(user: StoredUser) { this.database.prepare('INSERT INTO users (id, username, password_hash, legacy_salt, role, enabled, created_at, totp_secret, recovery_codes, pending_totp_secret) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET username=excluded.username,password_hash=excluded.password_hash,legacy_salt=excluded.legacy_salt,role=excluded.role,enabled=excluded.enabled,created_at=excluded.created_at,totp_secret=excluded.totp_secret,recovery_codes=excluded.recovery_codes,pending_totp_secret=excluded.pending_totp_secret').run(user.id, user.username, user.passwordHash, user.legacySalt ?? null, user.role, user.enabled ? 1 : 0, user.createdAt, user.totpSecret ?? null, user.recoveryCodes ? JSON.stringify(user.recoveryCodes) : null, user.pendingTotpSecret ?? null); }
   deleteUser(id: string) { this.database.prepare('DELETE FROM users WHERE id = ?').run(id); }
   clearUserSessions(userId: string) { this.database.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId); }
+  getNotes(userId: string) {
+    return (this.database.prepare('SELECT * FROM notes WHERE user_id = ? ORDER BY updated_at DESC').all(userId) as Record<string, unknown>[]).map(row => ({ id: String(row.id), userId: String(row.user_id), title: String(row.title), content: String(row.content), createdAt: String(row.created_at), updatedAt: String(row.updated_at) }));
+  }
+  getNote(id: string, userId: string) {
+    const row = this.database.prepare('SELECT * FROM notes WHERE id = ? AND user_id = ?').get(id, userId) as Record<string, unknown> | undefined;
+    return row ? { id: String(row.id), userId: String(row.user_id), title: String(row.title), content: String(row.content), createdAt: String(row.created_at), updatedAt: String(row.updated_at) } : undefined;
+  }
+  saveNote(note: StoredNote) {
+    this.database.prepare('INSERT INTO notes (id, user_id, title, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title=excluded.title, content=excluded.content, updated_at=excluded.updated_at WHERE notes.user_id=excluded.user_id').run(note.id, note.userId, note.title, note.content, note.createdAt, note.updatedAt);
+  }
+  deleteNote(id: string, userId: string) { return Number(this.database.prepare('DELETE FROM notes WHERE id = ? AND user_id = ?').run(id, userId).changes); }
 }

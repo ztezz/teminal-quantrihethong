@@ -16,6 +16,7 @@
 - Xem CPU, RAM và dung lượng ổ đĩa.
 - Quản lý systemd service, journal logs và Linux processes.
 - Nhật ký đăng nhập và thao tác quản trị.
+- Sổ ghi chú riêng theo tài khoản, mã hóa AES-256-GCM khi lưu (dùng cho mật khẩu và việc cần nhớ).
 - Trình chỉnh sửa tệp văn bản với kiểm tra xung đột khi lưu.
 - Xem trước video, âm thanh, hình ảnh và PDF.
 - Chuyển tài liệu Office sang PDF để xem bằng LibreOffice.
