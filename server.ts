@@ -707,7 +707,7 @@ async function startServer() {
   expressApp.get('/api/notes', (req, res) => {
     const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
     try {
-      const notes = db.getNotes(context.user.id).map(note => ({ id: note.id, title: decryptSecret(note.title), content: decryptSecret(note.content), createdAt: note.createdAt, updatedAt: note.updatedAt }));
+      const notes = db.getNotes(context.user.id).map(note => noteOutput(note));
       return res.json({ success: true, notes });
     } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message }); }
   });
@@ -716,18 +716,27 @@ async function startServer() {
     const input = body && typeof body === 'object' ? body as Record<string, unknown> : {};
     const title = typeof input.title === 'string' ? input.title.trim() : '';
     const content = typeof input.content === 'string' ? input.content : '';
+    const table = input.table && typeof input.table === 'object' ? input.table as { columns?: unknown; rows?: unknown } : undefined;
+    const columns = table && Array.isArray(table.columns) ? table.columns.map(value => String(value).slice(0, 80)) : [];
+    const rows = table && Array.isArray(table.rows) ? table.rows.slice(0, 100).map(row => Array.isArray(row) ? row.slice(0, 12).map(value => String(value).slice(0, 200)) : []) : [];
+    if (columns.length > 12 || rows.some(row => row.length !== columns.length)) throw Object.assign(new Error('Bảng ghi chú không hợp lệ'), { status: 400 });
     if (title.length > 160 || content.length > 20_000) throw Object.assign(new Error('Ghi chú vượt quá giới hạn cho phép'), { status: 400 });
-    if (!title && !content) throw Object.assign(new Error('Ghi chú không được để trống'), { status: 400 });
-    return { title, content };
+    if (!title && !content && !columns.length) throw Object.assign(new Error('Ghi chú không được để trống'), { status: 400 });
+    return { title, content, table: columns.length ? { columns, rows } : undefined };
+  }
+  function noteOutput(note: { id: string; title: string; content: string; createdAt: string; updatedAt: string }) {
+    const title = decryptSecret(note.title); const decrypted = decryptSecret(note.content);
+    try { const payload = JSON.parse(decrypted) as { content?: unknown; table?: unknown }; return { id: note.id, title, content: typeof payload.content === 'string' ? payload.content : '', table: payload.table, createdAt: note.createdAt, updatedAt: note.updatedAt }; }
+    catch { return { id: note.id, title, content: decrypted, createdAt: note.createdAt, updatedAt: note.updatedAt }; }
   }
 
   expressApp.post('/api/notes', (req, res) => {
     const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
     try {
-      const { title, content } = noteInput(req.body); const now = new Date().toISOString(); const id = crypto.randomUUID();
-      db.saveNote({ id, userId: context.user.id, title: encryptSecret(title), content: encryptSecret(content), createdAt: now, updatedAt: now });
+      const { title, content, table } = noteInput(req.body); const now = new Date().toISOString(); const id = crypto.randomUUID();
+      db.saveNote({ id, userId: context.user.id, title: encryptSecret(title), content: encryptSecret(JSON.stringify({ content, table })), createdAt: now, updatedAt: now });
       auditRequest(req, { category: 'notes', action: 'create', event: 'Encrypted note created' });
-      return res.status(201).json({ success: true, note: { id, title, content, createdAt: now, updatedAt: now } });
+      return res.status(201).json({ success: true, note: { id, title, content, table, createdAt: now, updatedAt: now } });
     } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message }); }
   });
 
@@ -735,10 +744,10 @@ async function startServer() {
     const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
     try {
       const existing = db.getNote(req.params.id, context.user.id); if (!existing) return res.status(404).json({ success: false, error: 'Không tìm thấy ghi chú' });
-      const { title, content } = noteInput(req.body); const updatedAt = new Date().toISOString();
-      db.saveNote({ id: existing.id, userId: existing.userId, title: encryptSecret(title), content: encryptSecret(content), createdAt: existing.createdAt, updatedAt });
+      const { title, content, table } = noteInput(req.body); const updatedAt = new Date().toISOString();
+      db.saveNote({ id: existing.id, userId: existing.userId, title: encryptSecret(title), content: encryptSecret(JSON.stringify({ content, table })), createdAt: existing.createdAt, updatedAt });
       auditRequest(req, { category: 'notes', action: 'update', event: 'Encrypted note updated' });
-      return res.json({ success: true, note: { id: existing.id, title, content, createdAt: existing.createdAt, updatedAt } });
+      return res.json({ success: true, note: { id: existing.id, title, content, table, createdAt: existing.createdAt, updatedAt } });
     } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message }); }
   });
 
