@@ -85,6 +85,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
   const trashRoot = path.resolve(trashDir || path.join(process.cwd(), '.terminal-trash'));
   const snapshotRoot = path.resolve(snapshotDir || path.join(process.cwd(), '.terminal-snapshots'));
   const uploadRoot = path.join(root, '.terminal-uploads');
+  const reservedUploadTargets = new Map<string, string>();
   const canonicalRoot = fs.realpathSync(root);
   const maxSnapshotFileSize = Number(process.env.SNAPSHOT_MAX_FILE_MB || 100) * 1024 * 1024;
   const maxSnapshotTotalSize = Number(process.env.SNAPSHOT_MAX_TOTAL_MB || 2048) * 1024 * 1024;
@@ -156,6 +157,10 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
   const uploadPaths = (id: string) => {
     if (!/^[a-f0-9]{32}$/.test(id)) throw httpError(400, 'Mã upload không hợp lệ');
     return { data: path.join(uploadRoot, `${id}.data`), metadata: path.join(uploadRoot, `${id}.json`) };
+  };
+  const releaseUploadTarget = (metadata: UploadMetadata) => {
+    const target = resolveInsideRoot(metadata.targetPath);
+    if (reservedUploadTargets.get(target) === metadata.id) reservedUploadTargets.delete(target);
   };
   const readUpload = async (req: Request, id: string) => {
     const paths = uploadPaths(id);
@@ -460,12 +465,15 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
       if (!validName(name)) throw httpError(400, 'Tên tệp upload không hợp lệ');
       if (!Number.isSafeInteger(size) || size < 0 || size > maxUploadSize) throw httpError(413, `Tệp vượt giới hạn ${Math.floor(maxUploadSize / 1024 / 1024)}MB`);
       const directory = resolveInsideRoot(dirPath); await mustBeDirectory(directory);
-      const target = path.join(directory, name); await ensureMissing(target); await fsp.mkdir(uploadRoot, { recursive: true });
+      const target = path.join(directory, name); await ensureMissing(target);
+      if (reservedUploadTargets.has(target)) throw httpError(409, 'Đã có một phiên upload khác dùng tên tệp này. Hãy chờ hoàn tất hoặc đổi tên tệp.');
+      await fsp.mkdir(uploadRoot, { recursive: true });
       const id = crypto.randomBytes(16).toString('hex'); const paths = uploadPaths(id);
       const metadata: UploadMetadata = { id, targetPath: relative(target), size, owner: uploadOwner(req), createdAt: new Date().toISOString() };
+      reservedUploadTargets.set(target, id);
       await fsp.writeFile(paths.data, Buffer.alloc(0), { flag: 'wx' });
       try { await fsp.writeFile(paths.metadata, JSON.stringify(metadata), { flag: 'wx' }); }
-      catch (error) { await fsp.rm(paths.data, { force: true }); throw error; }
+      catch (error) { releaseUploadTarget(metadata); await fsp.rm(paths.data, { force: true }); throw error; }
       return res.status(201).json({ success: true, uploadId: id, chunkSize: MAX_UPLOAD_CHUNK_SIZE });
     } catch (error) { return fail(res, error); }
   });
@@ -489,9 +497,11 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
       const { metadata, paths } = await readUpload(req, req.params.id);
       const stat = await fsp.stat(paths.data);
       if (stat.size !== metadata.size) throw httpError(409, `Upload chưa hoàn tất (${stat.size}/${metadata.size} byte)`);
-      const target = resolveInsideRoot(metadata.targetPath); await ensureMissing(target);
+      const target = resolveInsideRoot(metadata.targetPath);
+      await ensureMissing(target);
       await fsp.link(paths.data, target);
       await Promise.all([fsp.rm(paths.data, { force: true }), fsp.rm(paths.metadata, { force: true })]);
+      releaseUploadTarget(metadata);
       await log(`Đã upload tệp: ${relative(target)}`, clientIp(req));
       return res.status(201).json({ success: true, path: relative(target) });
     } catch (error) { return fail(res, error); }
@@ -499,8 +509,9 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
 
   router.delete('/upload/:id', async (req, res) => {
     try {
-      const { paths } = await readUpload(req, req.params.id);
+      const { metadata, paths } = await readUpload(req, req.params.id);
       await Promise.all([fsp.rm(paths.data, { force: true }), fsp.rm(paths.metadata, { force: true })]);
+      releaseUploadTarget(metadata);
       return res.json({ success: true });
     } catch (error) { return fail(res, error); }
   });

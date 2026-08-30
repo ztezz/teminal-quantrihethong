@@ -37,7 +37,7 @@ const SQLITE_MANAGER_ROOT = path.resolve(process.env.SQLITE_MANAGER_ROOT || FILE
 const SQLITE_BROWSER_ROOT = path.resolve(process.env.SQLITE_BROWSER_ROOT || path.parse(process.cwd()).root);
 const SQLITE_BACKUP_DIR = path.resolve(process.env.SQLITE_BACKUP_DIR || path.join(SQLITE_MANAGER_ROOT, '.terminal-sqlite-backups'));
 const JOB_DATA_DIR = path.resolve(process.env.JOB_DATA_DIR || path.join(process.cwd(), '.terminal-jobs'));
-const QUICK_SHARE_DIR = path.resolve(process.env.QUICK_SHARE_DIR || path.join(os.tmpdir(), 'terminal-quick-share'));
+let QUICK_SHARE_DIR = path.resolve(process.env.QUICK_SHARE_DIR || path.join(os.tmpdir(), 'terminal-quick-share'));
 const quickShareMaxFileMb = Number(process.env.QUICK_SHARE_MAX_FILE_MB || 2048);
 const quickShareTtlMinutes = Number(process.env.QUICK_SHARE_TTL_MINUTES || 1440);
 const quickShareTotalGb = Number(process.env.QUICK_SHARE_MAX_TOTAL_GB || 20);
@@ -451,6 +451,9 @@ async function startServer() {
     throw err;
   }
 
+  const quickShareDirectory = await db.get('SELECT value FROM settings WHERE key = ?', 'quick_share_dir');
+  if (quickShareDirectory?.value) QUICK_SHARE_DIR = path.resolve(quickShareDirectory.value);
+
   const pruneQuickShares = async () => {
     const entries = await fs.promises.readdir(QUICK_SHARE_DIR).catch(() => []);
     await Promise.all(entries.filter(name => name.endsWith('.json')).map(async name => {
@@ -708,7 +711,9 @@ async function startServer() {
     const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
     try {
       const notes = db.getNotes(context.user.id).map(note => noteOutput(note));
-      return res.json({ success: true, notes });
+      const legacyBooks = Array.from(new Set(notes.map(note => note.notebook || 'Sổ cá nhân')));
+      for (const name of legacyBooks) db.ensureNoteBook(context.user.id, name, new Date().toISOString());
+      return res.json({ success: true, notes, notebooks: db.getNoteBooks(context.user.id).map(book => ({ id: book.id, name: book.name, createdAt: book.createdAt })) });
     } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message }); }
   });
 
@@ -716,28 +721,28 @@ async function startServer() {
     const input = body && typeof body === 'object' ? body as Record<string, unknown> : {};
     const title = typeof input.title === 'string' ? input.title.trim() : '';
     const content = typeof input.content === 'string' ? input.content : '';
-    const category = typeof input.category === 'string' ? input.category.trim().slice(0, 48) : '';
+    const notebook = typeof input.notebook === 'string' ? input.notebook.trim().slice(0, 48) : '';
     const table = input.table && typeof input.table === 'object' ? input.table as { columns?: unknown; rows?: unknown } : undefined;
     const columns = table && Array.isArray(table.columns) ? table.columns.map(value => String(value).slice(0, 80)) : [];
     const rows = table && Array.isArray(table.rows) ? table.rows.slice(0, 100).map(row => Array.isArray(row) ? row.slice(0, 12).map(value => String(value).slice(0, 200)) : []) : [];
     if (columns.length > 12 || rows.some(row => row.length !== columns.length)) throw Object.assign(new Error('Bảng ghi chú không hợp lệ'), { status: 400 });
     if (title.length > 160 || content.length > 20_000) throw Object.assign(new Error('Ghi chú vượt quá giới hạn cho phép'), { status: 400 });
     if (!title && !content && !columns.length) throw Object.assign(new Error('Ghi chú không được để trống'), { status: 400 });
-    return { title, content, category, table: columns.length ? { columns, rows } : undefined };
+    return { title, content, notebook, table: columns.length ? { columns, rows } : undefined };
   }
   function noteOutput(note: { id: string; title: string; content: string; createdAt: string; updatedAt: string }) {
     const title = decryptSecret(note.title); const decrypted = decryptSecret(note.content);
-    try { const payload = JSON.parse(decrypted) as { content?: unknown; category?: unknown; table?: unknown }; return { id: note.id, title, content: typeof payload.content === 'string' ? payload.content : '', category: typeof payload.category === 'string' ? payload.category : '', table: payload.table, createdAt: note.createdAt, updatedAt: note.updatedAt }; }
+    try { const payload = JSON.parse(decrypted) as { content?: unknown; category?: unknown; notebook?: unknown; table?: unknown }; return { id: note.id, title, content: typeof payload.content === 'string' ? payload.content : '', notebook: typeof payload.notebook === 'string' ? payload.notebook : typeof payload.category === 'string' ? payload.category : 'Sổ cá nhân', table: payload.table, createdAt: note.createdAt, updatedAt: note.updatedAt }; }
     catch { return { id: note.id, title, content: decrypted, createdAt: note.createdAt, updatedAt: note.updatedAt }; }
   }
 
   expressApp.post('/api/notes', (req, res) => {
     const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
     try {
-      const { title, content, category, table } = noteInput(req.body); const now = new Date().toISOString(); const id = crypto.randomUUID();
-      db.saveNote({ id, userId: context.user.id, title: encryptSecret(title), content: encryptSecret(JSON.stringify({ content, category, table })), createdAt: now, updatedAt: now });
+      const { title, content, notebook, table } = noteInput(req.body); const now = new Date().toISOString(); const id = crypto.randomUUID(); const book = notebook || 'Sổ cá nhân';
+      db.ensureNoteBook(context.user.id, book, now); db.saveNote({ id, userId: context.user.id, title: encryptSecret(title), content: encryptSecret(JSON.stringify({ content, notebook: book, table })), createdAt: now, updatedAt: now });
       auditRequest(req, { category: 'notes', action: 'create', event: 'Encrypted note created' });
-      return res.status(201).json({ success: true, note: { id, title, content, category, table, createdAt: now, updatedAt: now } });
+      return res.status(201).json({ success: true, note: { id, title, content, notebook: book, table, createdAt: now, updatedAt: now } });
     } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message }); }
   });
 
@@ -745,11 +750,19 @@ async function startServer() {
     const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
     try {
       const existing = db.getNote(req.params.id, context.user.id); if (!existing) return res.status(404).json({ success: false, error: 'Không tìm thấy ghi chú' });
-      const { title, content, category, table } = noteInput(req.body); const updatedAt = new Date().toISOString();
-      db.saveNote({ id: existing.id, userId: existing.userId, title: encryptSecret(title), content: encryptSecret(JSON.stringify({ content, category, table })), createdAt: existing.createdAt, updatedAt });
+      const { title, content, notebook, table } = noteInput(req.body); const updatedAt = new Date().toISOString(); const book = notebook || 'Sổ cá nhân';
+      db.ensureNoteBook(context.user.id, book, updatedAt); db.saveNote({ id: existing.id, userId: existing.userId, title: encryptSecret(title), content: encryptSecret(JSON.stringify({ content, notebook: book, table })), createdAt: existing.createdAt, updatedAt });
       auditRequest(req, { category: 'notes', action: 'update', event: 'Encrypted note updated' });
-      return res.json({ success: true, note: { id: existing.id, title, content, category, table, createdAt: existing.createdAt, updatedAt } });
+      return res.json({ success: true, note: { id: existing.id, title, content, notebook: book, table, createdAt: existing.createdAt, updatedAt } });
     } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message }); }
+  });
+
+  expressApp.post('/api/notebooks', (req, res) => {
+    const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, 48) : '';
+    if (!name) return res.status(400).json({ success: false, error: 'Tên sổ không được để trống' });
+    try { const book = { id: crypto.randomUUID(), userId: context.user.id, name, createdAt: new Date().toISOString() }; db.saveNoteBook(book); return res.status(201).json({ success: true, notebook: { id: book.id, name, createdAt: book.createdAt } }); }
+    catch (error: any) { return res.status(error.code === 'ERR_SQLITE_CONSTRAINT_UNIQUE' ? 409 : 500).json({ success: false, error: error.code === 'ERR_SQLITE_CONSTRAINT_UNIQUE' ? 'Tên sổ đã tồn tại' : error.message }); }
   });
 
   expressApp.delete('/api/notes/:id', (req, res) => {
@@ -829,6 +842,28 @@ async function startServer() {
     } catch (error: any) {
       return res.status(500).json({ success: false, error: error.message });
     }
+  });
+
+  expressApp.get('/api/settings/quick-share', async (req, res) => {
+    if (!requireRole(req, res, 'root')) return;
+    try { await fs.promises.mkdir(QUICK_SHARE_DIR, { recursive: true, mode: 0o700 }); return res.json({ success: true, directory: QUICK_SHARE_DIR, maxFileMb: QUICK_SHARE_MAX_SIZE / 1024 / 1024, ttlMinutes: QUICK_SHARE_TTL_MS / 60_000 }); }
+    catch (error: any) { return res.status(500).json({ success: false, error: error.message }); }
+  });
+
+  expressApp.post('/api/settings/quick-share', async (req, res) => {
+    if (!requireRole(req, res, 'root')) return;
+    const requested = typeof req.body?.directory === 'string' ? req.body.directory.trim() : '';
+    if (!requested || !path.isAbsolute(requested)) return res.status(400).json({ success: false, error: 'Đường dẫn phải là đường dẫn tuyệt đối trên máy chủ' });
+    const directory = path.resolve(requested);
+    try {
+      await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
+      const stat = await fs.promises.stat(directory); if (!stat.isDirectory()) return res.status(400).json({ success: false, error: 'Đường dẫn không phải thư mục' });
+      await fs.promises.access(directory, fs.constants.R_OK | fs.constants.W_OK);
+      QUICK_SHARE_DIR = directory;
+      await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'quick_share_dir', directory);
+      auditRequest(req, { category: 'quick_share', action: 'storage_directory', event: 'Quick-share storage directory changed', level: 'critical', metadata: { directory } });
+      return res.json({ success: true, directory });
+    } catch (error: any) { return res.status(400).json({ success: false, error: `Không thể dùng thư mục này: ${error.message}` }); }
   });
 
   // Change password endpoint

@@ -6,6 +6,7 @@ import {
   Check,
   Copy,
   Database,
+  HardDrive,
   Monitor,
   RefreshCw,
   Smartphone,
@@ -13,6 +14,7 @@ import {
 } from "lucide-react";
 import { applyUiPreferences, getUiPreferences, saveUiPreferences, type UiPreferences } from "@/lib/client/preferences";
 import { notificationPermission, requestNotificationPermission, type NotificationPermissionResult } from "@/lib/client/notifications";
+import { apiClient } from "@/lib/client/api";
 import type { ManagedUser, SecuritySession, UserRole } from "../types";
 
 type SaveStatus = "idle" | "saving" | "saved" | "error";
@@ -143,6 +145,20 @@ export function SettingsWorkspace({ data, actions }: SettingsWorkspaceProps) {
     copyRecoveryCodes,
     resetUserPassword,
   } = actions;
+  const [quickShareDirectory, setQuickShareDirectory] = useState("");
+  const [quickShareDraft, setQuickShareDraft] = useState("");
+  const [quickShareMessage, setQuickShareMessage] = useState("");
+  const [quickShareLoading, setQuickShareLoading] = useState(false);
+  useEffect(() => {
+    if (currentRole !== "root") return;
+    void apiClient.request<{ directory: string }>("/api/settings/quick-share").then(({ directory }) => { setQuickShareDirectory(directory); setQuickShareDraft(directory); }).catch((error: Error) => setQuickShareMessage(error.message));
+  }, [currentRole]);
+  async function saveQuickShareDirectory() {
+    setQuickShareLoading(true); setQuickShareMessage("");
+    try { const { directory } = await apiClient.request<{ directory: string }>("/api/settings/quick-share", { method: "POST", body: { directory: quickShareDraft } }); setQuickShareDirectory(directory); setQuickShareDraft(directory); setQuickShareMessage("Đã áp dụng thư mục lưu truyền file nhanh."); }
+    catch (error) { setQuickShareMessage(error instanceof Error ? error.message : "Không thể lưu cấu hình."); }
+    finally { setQuickShareLoading(false); }
+  }
   return (
     <motion.div
       key="settings-tab"
@@ -152,6 +168,7 @@ export function SettingsWorkspace({ data, actions }: SettingsWorkspaceProps) {
       className="workspace-screen w-full h-full p-4 sm:p-8 overflow-y-auto"
     >
       <div className="max-w-3xl mx-auto space-y-8">
+        {currentUser?.role === "root" && <div className="app-panel p-4 sm:p-6 space-y-4"><div className="flex items-start gap-3"><span className="rounded-lg border border-sky-400/20 bg-sky-400/10 p-2 text-sky-300"><HardDrive className="h-4 w-4" /></span><div><h3 className="text-base font-bold text-white uppercase tracking-wider">Kho Truyền File Nhanh</h3><p className="mt-1 text-xs text-slate-500">Chọn thư mục trên máy chủ để lưu file tại trang <code>/share</code>. Thay đổi có hiệu lực ngay.</p></div></div><label className="block text-xs text-slate-400">Đường dẫn lưu trữ<input value={quickShareDraft} onChange={(event) => setQuickShareDraft(event.target.value)} placeholder="/var/lib/nodeshell/quick-share" className="mt-2 w-full rounded border border-white/10 bg-black px-3 py-2.5 font-mono text-sm text-slate-200" /></label><div className="flex flex-wrap items-center gap-3"><button type="button" disabled={quickShareLoading || !quickShareDraft.trim()} onClick={() => void saveQuickShareDirectory()} className="rounded bg-sky-500 px-4 py-2 text-xs font-semibold text-white hover:bg-sky-400 disabled:opacity-40">{quickShareLoading ? "Đang kiểm tra..." : "Lưu đường dẫn"}</button>{quickShareDirectory && <span className="font-mono text-[10px] text-slate-600">Đang dùng: {quickShareDirectory}</span>}</div>{quickShareMessage && <p className={`rounded border px-3 py-2 text-xs ${quickShareMessage.startsWith("Đã") ? "border-emerald-500/20 bg-emerald-500/5 text-emerald-300" : "border-rose-500/20 bg-rose-500/5 text-rose-300"}`}>{quickShareMessage}</p>}</div>}
         <div className="app-panel p-4 sm:p-6 space-y-5">
           <div>
             <h3 className="text-base font-bold text-white uppercase tracking-wider mb-1">Trải Nghiệm Giao Diện</h3>

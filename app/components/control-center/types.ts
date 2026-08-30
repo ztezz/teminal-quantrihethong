@@ -80,9 +80,11 @@ export interface Note {
   content: string;
   createdAt: string;
   updatedAt: string;
-  category?: string;
+  notebook?: string;
   table?: { columns: string[]; rows: string[][] };
 }
+
+export interface Notebook { id: string; name: string; createdAt: string; }
 
 export interface OverviewData {
   success: true;

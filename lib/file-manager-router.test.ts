@@ -155,6 +155,19 @@ test('rejects an upload chunk with the wrong offset', async () => {
   } finally { await context.close(); }
 });
 
+test('reserves upload destinations to prevent a completion-time name collision', async () => {
+  const context = await fixture();
+  try {
+    const first = await context.request('/upload', { method: 'POST', body: JSON.stringify({ dirPath: '', name: 'same-name.bin', size: 1 }) });
+    assert.equal(first.status, 201);
+    const duplicate = await context.request('/upload', { method: 'POST', body: JSON.stringify({ dirPath: '', name: 'same-name.bin', size: 1 }) });
+    assert.equal(duplicate.status, 409);
+    await context.request(`/upload/${first.body.uploadId}`, { method: 'DELETE' });
+    const retry = await context.request('/upload', { method: 'POST', body: JSON.stringify({ dirPath: '', name: 'same-name.bin', size: 1 }) });
+    assert.equal(retry.status, 201);
+  } finally { await context.close(); }
+});
+
 test('media preview permits framing only from the configured frontend origin', async () => {
   const context = await fixture();
   try {

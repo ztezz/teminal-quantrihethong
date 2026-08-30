@@ -9,6 +9,7 @@ export type AuditLevel = 'info' | 'warning' | 'critical';
 export type AuditResult = 'success' | 'failure';
 export type AuditEntry = { id: number; category: string; action: string; event: string; level: AuditLevel; result: AuditResult; ip: string; sessionId?: string; metadata?: Record<string, unknown>; timestamp: string; previousHash: string; hash: string };
 export type StoredNote = { id: string; userId: string; title: string; content: string; createdAt: string; updatedAt: string };
+export type StoredNotebook = { id: string; userId: string; name: string; createdAt: string };
 
 type LegacyData = {
   settings?: Record<string, string>;
@@ -77,6 +78,11 @@ export class SqliteDatabase {
         title TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS notes_user_updated_idx ON notes(user_id, updated_at DESC);
+      CREATE TABLE IF NOT EXISTS note_books (
+        id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL COLLATE NOCASE, created_at TEXT NOT NULL, UNIQUE(user_id, name)
+      );
+      CREATE INDEX IF NOT EXISTS note_books_user_idx ON note_books(user_id, created_at);
     `);
   }
 
@@ -253,4 +259,7 @@ export class SqliteDatabase {
     this.database.prepare('INSERT INTO notes (id, user_id, title, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title=excluded.title, content=excluded.content, updated_at=excluded.updated_at WHERE notes.user_id=excluded.user_id').run(note.id, note.userId, note.title, note.content, note.createdAt, note.updatedAt);
   }
   deleteNote(id: string, userId: string) { return Number(this.database.prepare('DELETE FROM notes WHERE id = ? AND user_id = ?').run(id, userId).changes); }
+  getNoteBooks(userId: string) { return (this.database.prepare('SELECT * FROM note_books WHERE user_id = ? ORDER BY created_at, name').all(userId) as Record<string, unknown>[]).map(row => ({ id: String(row.id), userId: String(row.user_id), name: String(row.name), createdAt: String(row.created_at) })); }
+  saveNoteBook(book: StoredNotebook) { this.database.prepare('INSERT INTO note_books (id, user_id, name, created_at) VALUES (?, ?, ?, ?)').run(book.id, book.userId, book.name, book.createdAt); }
+  ensureNoteBook(userId: string, name: string, createdAt: string) { this.database.prepare('INSERT OR IGNORE INTO note_books (id, user_id, name, created_at) VALUES (?, ?, ?, ?)').run(crypto.randomUUID(), userId, name, createdAt); }
 }
