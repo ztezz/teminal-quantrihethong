@@ -1,26 +1,32 @@
 "use client";
 
 import { ChangeEvent, useState } from "react";
-import { Download, FileUp, KeyRound, LockKeyhole, Send, Timer, Upload } from "lucide-react";
+import { Check, Clipboard, Download, FileUp, KeyRound, LockKeyhole, RotateCcw, Send, ShieldCheck, Timer, Upload } from "lucide-react";
 import { apiClient } from "@/lib/client/api";
 
 type UploadSession = { code: string; uploadToken: string; name: string; size: number };
 const UPLOAD_SESSION_KEY = "nodeshell_quick_share_upload";
 
+function fileSize(bytes: number) {
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(bytes >= 1024 * 1024 * 1024 ? 0 : 1)} ${bytes >= 1024 * 1024 * 1024 ? "GB" : "MB"}`;
+}
+
 export default function QuickSharePage() {
   const [file, setFile] = useState<File | null>(null);
   const [code, setCode] = useState("");
   const [status, setStatus] = useState("");
+  const [checksum, setChecksum] = useState("");
   const [progress, setProgress] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [resumeSession, setResumeSession] = useState<UploadSession | null>(() => {
     if (typeof window === "undefined") return null;
     try { return JSON.parse(localStorage.getItem(UPLOAD_SESSION_KEY) || "null") as UploadSession | null; } catch { return null; }
   });
 
   function selectFile(event: ChangeEvent<HTMLInputElement>) {
-    const selected = event.target.files?.[0] || null;
-    setFile(selected); setStatus(""); setProgress(null); setCode("");
+    setFile(event.target.files?.[0] || null); setStatus(""); setChecksum(""); setProgress(null); setCode("");
   }
 
   async function upload(session: UploadSession, startOffset: number) {
@@ -29,11 +35,11 @@ export default function QuickSharePage() {
     try {
       for (let offset = startOffset; offset < file.size;) {
         const chunk = await file.slice(offset, offset + 8 * 1024 * 1024).arrayBuffer();
-        const result = await apiClient.request<{ success: true; offset: number }>(`/api/quick-share/${session.code}`, { method: "PUT", headers: { "content-type": "application/octet-stream", "x-upload-offset": String(offset), "x-quick-share-token": session.uploadToken }, body: chunk });
+        const result = await apiClient.request<{ offset: number }>(`/api/quick-share/${session.code}`, { method: "PUT", headers: { "content-type": "application/octet-stream", "x-upload-offset": String(offset), "x-quick-share-token": session.uploadToken }, body: chunk });
         offset = result.offset; setProgress(Math.round(offset / file.size * 100));
       }
-      const completed = await apiClient.request<{ success: true; checksum: string }>(`/api/quick-share/${session.code}/complete`, { method: "POST", headers: { "x-quick-share-token": session.uploadToken } });
-      localStorage.removeItem(UPLOAD_SESSION_KEY); setResumeSession(null); setCode(session.code); setStatus(`File đã sẵn sàng. SHA-256: ${completed.checksum}`);
+      const completed = await apiClient.request<{ checksum: string }>(`/api/quick-share/${session.code}/complete`, { method: "POST", headers: { "x-quick-share-token": session.uploadToken } });
+      localStorage.removeItem(UPLOAD_SESSION_KEY); setResumeSession(null); setCode(session.code); setChecksum(completed.checksum); setStatus("File đã sẵn sàng để nhận.");
     } catch (error) { setStatus(error instanceof Error ? error.message : "Không thể gửi file."); setProgress(null); }
     finally { setBusy(false); }
   }
@@ -42,10 +48,9 @@ export default function QuickSharePage() {
     if (!file) return;
     setStatus("Đang tạo kênh truyền file...");
     try {
-      const initialized = await apiClient.request<{ success: true; code: string; uploadToken: string }>("/api/quick-share", { method: "POST", body: { name: file.name, size: file.size } });
+      const initialized = await apiClient.request<{ code: string; uploadToken: string }>("/api/quick-share", { method: "POST", body: { name: file.name, size: file.size } });
       const session = { code: initialized.code, uploadToken: initialized.uploadToken, name: file.name, size: file.size };
-      localStorage.setItem(UPLOAD_SESSION_KEY, JSON.stringify(session)); setResumeSession(session);
-      await upload(session, 0);
+      localStorage.setItem(UPLOAD_SESSION_KEY, JSON.stringify(session)); setResumeSession(session); await upload(session, 0);
     } catch (error) { setStatus(error instanceof Error ? error.message : "Không thể tạo kênh truyền file."); }
   }
 
@@ -53,20 +58,34 @@ export default function QuickSharePage() {
     if (!file || !resumeSession) return;
     if (file.name !== resumeSession.name || file.size !== resumeSession.size) return setStatus("Chọn đúng file cũ để tiếp tục upload.");
     try {
-      setStatus("Đang kiểm tra phiên upload...");
-      const state = await apiClient.request<{ success: true; offset: number; ready: boolean }>(`/api/quick-share/${resumeSession.code}/upload`, { headers: { "x-quick-share-token": resumeSession.uploadToken } });
+      setStatus("Đang khôi phục phiên upload...");
+      const state = await apiClient.request<{ offset: number; ready: boolean }>(`/api/quick-share/${resumeSession.code}/upload`, { headers: { "x-quick-share-token": resumeSession.uploadToken } });
       if (state.ready) return setStatus("File này đã hoàn tất upload.");
       await upload(resumeSession, state.offset);
     } catch (error) { setStatus(error instanceof Error ? error.message : "Không thể tiếp tục upload."); }
   }
 
   function normalizeCode(value: string) { setCode(value.replace(/\D/g, "").slice(0, 4)); }
-  function receive() { if (code.length === 4) window.location.assign(`${apiClient.baseUrl}/api/quick-share/${code}`); else setStatus("Nhập mã truyền file gồm 4 chữ số."); }
+  function receive() { if (code.length === 4) window.location.assign(`${apiClient.baseUrl}/api/quick-share/${code}`); else setStatus("Nhập đủ 4 chữ số để nhận file."); }
+  async function copyCode() { await navigator.clipboard.writeText(code); setCopied(true); window.setTimeout(() => setCopied(false), 1800); }
 
-  return <main className="min-h-screen bg-[#070b14] px-4 py-8 text-slate-200 sm:px-6 sm:py-14"><div className="mx-auto max-w-4xl">
-    <header className="mb-10 text-center"><div className="mx-auto mb-5 flex h-12 w-12 items-center justify-center rounded-2xl border border-sky-400/30 bg-sky-400/10 text-sky-300"><Send className="h-5 w-5" /></div><p className="text-[10px] font-bold uppercase tracking-[0.2em] text-sky-400">NodeShell Quick Share</p><h1 className="mt-3 text-3xl font-semibold tracking-tight text-white sm:text-4xl">Truyền file không cần đăng nhập</h1><p className="mx-auto mt-3 max-w-xl text-sm leading-6 text-slate-500">Gửi file bằng một mã ngắn. File tự hết hạn sau 24 giờ và bị xóa ngay sau lần tải xuống đầu tiên.</p></header>
-    <section className="grid gap-5 md:grid-cols-2"><div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 shadow-xl shadow-black/20 sm:p-7"><div className="flex items-center gap-3"><span className="rounded-lg bg-sky-400/10 p-2 text-sky-300"><FileUp className="h-5 w-5" /></span><div><h2 className="font-semibold text-white">Gửi file</h2><p className="text-xs text-slate-500">Tối đa 2 GB</p></div></div><label className="mt-7 flex min-h-36 cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed border-white/15 bg-black/15 px-4 text-center transition hover:border-sky-400/50 hover:bg-sky-400/5"><Upload className="h-5 w-5 text-slate-500" /><span className="mt-3 text-xs font-medium text-slate-300">{file ? file.name : "Chọn file để gửi"}</span><span className="mt-1 text-[10px] text-slate-600">{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB` : "Không cần tài khoản"}</span><input type="file" onChange={selectFile} className="sr-only" disabled={busy} /></label>{progress !== null && <div className="mt-4"><div className="mb-1 flex justify-between text-[10px] text-slate-500"><span>Đang tải lên</span><span>{progress}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full bg-sky-400 transition-all" style={{ width: `${progress}%` }} /></div></div>}<button type="button" disabled={!file || busy} onClick={() => void send()} className="mt-5 flex w-full items-center justify-center gap-2 rounded-lg bg-sky-400 px-4 py-3 text-xs font-bold text-slate-950 transition hover:bg-sky-300 disabled:cursor-not-allowed disabled:opacity-40"><Upload className="h-4 w-4" />{busy ? "Đang truyền..." : "Tạo mã gửi file"}</button>{resumeSession && <button type="button" disabled={!file || busy} onClick={() => void resume()} className="mt-2 w-full rounded-lg border border-sky-400/25 px-4 py-2 text-xs font-semibold text-sky-200 transition hover:bg-sky-400/10 disabled:opacity-40">Tiếp tục upload dở ({resumeSession.code})</button>}</div>
-      <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 shadow-xl shadow-black/20 sm:p-7"><div className="flex items-center gap-3"><span className="rounded-lg bg-emerald-400/10 p-2 text-emerald-300"><Download className="h-5 w-5" /></span><div><h2 className="font-semibold text-white">Nhận file</h2><p className="text-xs text-slate-500">Tải một lần duy nhất</p></div></div><div className="mt-7"><label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Mã truyền file</label><div className="relative mt-2"><KeyRound className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-500" /><input inputMode="numeric" value={code} onChange={(event) => normalizeCode(event.target.value)} placeholder="VD: 1234" className="w-full rounded-lg border border-white/10 bg-black/20 py-3 pl-10 pr-3 font-mono text-sm tracking-[0.25em] text-white outline-none placeholder:tracking-normal placeholder:text-slate-700 focus:border-emerald-400/50" /></div></div><button type="button" onClick={receive} className="mt-5 flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-400 px-4 py-3 text-xs font-bold text-slate-950 transition hover:bg-emerald-300"><Download className="h-4 w-4" />Nhận và tải file</button><div className="mt-8 space-y-3 border-t border-white/10 pt-5 text-[11px] leading-5 text-slate-500"><p className="flex gap-2"><Timer className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300" />Mã và file hết hạn sau 24 giờ.</p><p className="flex gap-2"><LockKeyhole className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-300" />Không có thư mục công khai và không thể duyệt file trên máy chủ.</p></div></div></section>
-    {status && <p role="status" className={`mx-auto mt-5 max-w-2xl rounded-lg border px-4 py-3 text-center text-xs ${code ? "border-emerald-400/20 bg-emerald-400/5 text-emerald-200" : "border-white/10 bg-white/[0.03] text-slate-400"}`}>{status}{code && <strong className="ml-2 font-mono tracking-[0.16em] text-white">{code}</strong>}</p>}
+  return <main className="quick-share-shell"><div className="quick-share-orb is-one" /><div className="quick-share-orb is-two" /><div className="quick-share-wrap">
+    <header className="quick-share-hero"><div className="quick-share-mark"><Send /></div><div><p>NODE SHELL / QUICK SHARE</p><h1>Gửi file. Nhận bằng <em>4 số.</em></h1><span>Không cần tài khoản, không có thư mục công khai.</span></div><div className="quick-share-hero-meta"><b><Timer />24 giờ</b><b><ShieldCheck />Tối đa 2 GB</b></div></header>
+    <section className="quick-share-grid">
+      <article className="quick-share-card is-send"><div className="quick-share-card-heading"><span className="quick-share-step">01</span><div><p>GỬI FILE</p><h2>Đặt file vào kênh</h2></div><FileUp /></div>
+        <label className={`quick-share-drop ${file ? "has-file" : ""}`}><input type="file" onChange={selectFile} disabled={busy} /><Upload /><strong>{file?.name || "Chọn một file để bắt đầu"}</strong><span>{file ? `${fileSize(file.size)} · sẵn sàng truyền` : "Bấm để duyệt file từ thiết bị"}</span></label>
+        {progress !== null && <div className="quick-share-progress"><div><span>{busy ? "Đang truyền an toàn" : "Tiến độ upload"}</span><strong>{progress}%</strong></div><i><b style={{ width: `${progress}%` }} /></i></div>}
+        <button type="button" disabled={!file || busy} onClick={() => void send()} className="quick-share-primary"><Upload />{busy ? "Đang truyền file..." : "Tạo mã gửi file"}</button>
+        {resumeSession && <button type="button" disabled={!file || busy} onClick={() => void resume()} className="quick-share-resume"><RotateCcw />Tiếp tục phiên dở <span>{resumeSession.code}</span></button>}
+        <small className="quick-share-caption">Upload gián đoạn có thể tiếp tục trên thiết bị này bằng đúng file đã chọn.</small>
+      </article>
+      <article className="quick-share-card is-receive"><div className="quick-share-card-heading"><span className="quick-share-step">02</span><div><p>NHẬN FILE</p><h2>Nhập mã bạn nhận được</h2></div><Download /></div>
+        <div className="quick-share-code-input"><label htmlFor="receive-code">MÃ NHẬN FILE</label><div><KeyRound /><input id="receive-code" inputMode="numeric" autoComplete="one-time-code" value={code} onChange={(event) => normalizeCode(event.target.value)} placeholder="0000" /></div><span>File sẽ bị xóa sau lượt tải đầu tiên.</span></div>
+        <button type="button" onClick={receive} className="quick-share-download"><Download />Nhận và tải file</button>
+        <div className="quick-share-rules"><p><Timer />Mã hết hạn sau 24 giờ.</p><p><LockKeyhole />Không thể tìm hoặc duyệt file trên máy chủ.</p></div>
+      </article>
+    </section>
+    {code && checksum && <section className="quick-share-ready"><div><p>FILE ĐÃ SẴN SÀNG</p><strong>Mã nhận file</strong><span>{status}</span></div><div className="quick-share-code-display">{code.split("").map((digit, index) => <i key={index}>{digit}</i>)}</div><button type="button" onClick={() => void copyCode()}>{copied ? <Check /> : <Clipboard />}{copied ? "Đã sao chép" : "Sao chép mã"}</button><footer><span>SHA-256</span><code>{checksum}</code></footer></section>}
+    {status && !(code && checksum) && <p role="status" className="quick-share-status">{status}</p>}
   </div></main>;
 }
