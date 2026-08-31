@@ -140,6 +140,60 @@ Mở `http://localhost:3000`.
 
 ## Chạy Backend Trên VPS
 
+## Chỉnh Sửa Word Và Excel Với OnlyOffice
+
+OnlyOffice Document Server cho phép mở và chỉnh sửa trực tiếp các tệp `.docx`, `.xlsx`, `.pptx`, `.odt`, `.ods` và `.odp` từ Quản lý tệp. Backend cấp URL tài liệu ngắn hạn, xác thực callback bằng JWT và tạo snapshot trước khi nhận bản đã sửa.
+
+Tạo secret dùng chung, tối thiểu 32 ký tự:
+
+```bash
+openssl rand -base64 48
+```
+
+Tạo file `.env.onlyoffice` cạnh `docker-compose.onlyoffice.yml`:
+
+```env
+ONLYOFFICE_JWT_SECRET='dat-cung-gia-tri-voi-backend'
+```
+
+Khởi động Document Server:
+
+```bash
+docker compose --env-file .env.onlyoffice -f docker-compose.onlyoffice.yml up -d
+```
+
+Đặt các biến sau trong `.env` của backend:
+
+```env
+# URL người dùng truy cập được tới Document Server, không có dấu / cuối.
+ONLYOFFICE_DOCUMENT_SERVER_URL=https://office.example.com
+# URL công khai Document Server dùng để tải tài liệu và gọi callback, không có dấu / cuối.
+ONLYOFFICE_PUBLIC_API_URL=https://api-terminal.example.com
+# Phải trùng ONLYOFFICE_JWT_SECRET trong .env.onlyoffice.
+ONLYOFFICE_JWT_SECRET='dat-cung-gia-tri-voi-backend'
+```
+
+Nginx cần chuyển `office.example.com` đến `127.0.0.1:8082`, hỗ trợ WebSocket và giới hạn truy cập HTTPS:
+
+```nginx
+server {
+  listen 443 ssl http2;
+  server_name office.example.com;
+  # ssl_certificate và ssl_certificate_key ở đây
+  location / {
+    proxy_pass http://127.0.0.1:8082;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+  }
+}
+```
+
+Document Server phải gọi được `ONLYOFFICE_PUBLIC_API_URL` từ container. Không dùng URL loopback hoặc hostname chỉ có trên máy host. Sau khi cấu hình, mở một tệp Office trong Quản lý tệp để chỉnh sửa; OnlyOffice tự gọi callback khi lưu.
+
 Cấu hình production mẫu:
 
 ```env

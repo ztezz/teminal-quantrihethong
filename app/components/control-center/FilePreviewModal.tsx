@@ -8,6 +8,7 @@ import { getFileIcon } from "./FileIcon";
 import { CodeEditor } from "./CodeEditor";
 import { SpreadsheetEditor } from "./SpreadsheetEditor";
 import { PdfViewer } from "./PdfViewer";
+import { OnlyOfficeEditor } from "./OnlyOfficeEditor";
 import { VideoPlayer } from "./VideoPlayer";
 import type { ConfirmOptions, UserRole } from "./types";
 
@@ -103,11 +104,12 @@ export function FilePreviewModal({ role, filePath, fileContent, editorOriginal, 
           <button type="button" onClick={() => void close()} aria-label="Đóng xem trước" className="ml-0 inline-flex h-9 w-9 items-center justify-center rounded border border-white/10 text-slate-400 hover:bg-white/5 hover:text-white"><X className="h-4 w-4" /></button>
         </div>
         <div className="min-h-0 flex-1 overflow-auto">
-          {kind === "spreadsheet" ? <SpreadsheetEditor value={fileContent || ""} readOnly={!editing} onChange={onContentChange} />
+          {kind === "office" ? <OnlyOfficeEditor filePath={filePath} />
+            : kind === "spreadsheet" ? <SpreadsheetEditor value={fileContent || ""} readOnly={!editing} onChange={onContentChange} />
             : kind === "video" ? <VideoPlayer key={`${filePath}-${previewTicket}`} src={mediaUrl} fileName={fileName} />
             : kind === "audio" ? <div className="flex h-full min-h-64 items-center justify-center bg-gradient-to-br from-slate-950 via-purple-950/40 to-black p-8"><audio key={filePath} src={mediaUrl} controls preload="metadata" className="w-full max-w-2xl">Trình duyệt không hỗ trợ âm thanh.</audio></div>
               : kind === "image" ? <ImagePreview src={mediaUrl} alt={`Xem trước ${fileName}`} fileName={fileName} />
-                : kind === "pdf" || kind === "office" ? <PdfViewer key={`${filePath}-${previewTicket}`} fileName={fileName} src={`${API_URL}/api/files/${kind === "office" ? "office-preview" : "media"}?path=${encodeURIComponent(filePath)}&ticket=${encodeURIComponent(previewTicket || "")}`} />
+                : kind === "pdf" ? <PdfViewer key={`${filePath}-${previewTicket}`} fileName={fileName} src={`${API_URL}/api/files/media?path=${encodeURIComponent(filePath)}&ticket=${encodeURIComponent(previewTicket || "")}`} />
                   : <div className="h-full bg-black p-2 sm:p-4"><CodeEditor value={fileContent || ""} fileName={filePath} readOnly={!editing} dirty={fileContent !== editorOriginal} onChange={onContentChange} onSave={onSave} /></div>}
         </div>
       </div>

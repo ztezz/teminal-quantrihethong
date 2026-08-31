@@ -55,6 +55,12 @@ const COMPROMISED_PASSWORD_HASH = 'b2a92f363ad27b41f5a5080674cd20c400940abbe6cfe
 const execFileAsync = promisify(execFile);
 const DB_FILE = path.resolve(process.env.DATABASE_PATH || path.join(process.cwd(), 'terminal_database.sqlite'));
 const LEGACY_DB_FILE = path.resolve(process.env.LEGACY_DATABASE_PATH || path.join(path.dirname(DB_FILE), 'terminal_database.json'));
+const onlyOfficeDocumentServerUrl = (process.env.ONLYOFFICE_DOCUMENT_SERVER_URL || '').replace(/\/$/, '');
+const onlyOfficePublicApiUrl = (process.env.ONLYOFFICE_PUBLIC_API_URL || '').replace(/\/$/, '');
+const onlyOfficeJwtSecret = process.env.ONLYOFFICE_JWT_SECRET || '';
+const onlyOffice = onlyOfficeDocumentServerUrl && onlyOfficePublicApiUrl && onlyOfficeJwtSecret.length >= 32
+  ? { documentServerUrl: onlyOfficeDocumentServerUrl, publicApiUrl: onlyOfficePublicApiUrl, jwtSecret: onlyOfficeJwtSecret }
+  : undefined;
 let db: SqliteDatabase;
 
 // Helper: check session via persistent database
@@ -1085,7 +1091,8 @@ async function startServer() {
     rootDir: FILE_MANAGER_ROOT,
     trashDir: FILE_MANAGER_TRASH_DIR,
     snapshotDir: FILE_MANAGER_SNAPSHOT_DIR,
-    previewFrameAncestor: runtimeConfig.frontendOrigin || "'self'"
+    previewFrameAncestor: runtimeConfig.frontendOrigin || "'self'",
+    onlyOffice
   }));
 
   expressApp.use('/api/sqlite', createSqliteManagerRouter({

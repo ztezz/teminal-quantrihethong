@@ -53,6 +53,7 @@ type Options = {
   trashDir?: string;
   snapshotDir?: string;
   previewFrameAncestor?: string;
+  onlyOffice?: { documentServerUrl: string; publicApiUrl: string; jwtSecret: string };
 };
 
 type TrashMetadata = { originalPath: string; deletedAt: string };
@@ -79,7 +80,7 @@ function modeInfo(mode: number) {
   };
 }
 
-export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, consumePreviewTicket, log, rootDir, trashDir, snapshotDir, previewFrameAncestor = "'self'" }: Options) {
+export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, consumePreviewTicket, log, rootDir, trashDir, snapshotDir, previewFrameAncestor = "'self'", onlyOffice }: Options) {
   const router = Router();
   const root = path.resolve(rootDir || process.cwd());
   const trashRoot = path.resolve(trashDir || path.join(process.cwd(), '.terminal-trash'));
@@ -94,6 +95,25 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
   const configuredMaxUploadSize = Number(process.env.UPLOAD_MAX_FILE_MB || 10240) * 1024 * 1024;
   const maxUploadSize = Number.isSafeInteger(configuredMaxUploadSize) && configuredMaxUploadSize > 0 ? configuredMaxUploadSize : 10 * 1024 * 1024 * 1024;
   let activeOfficeConversions = 0;
+  const officeSessions = new Map<string, { path: string; expiresAt: number }>();
+  const base64Url = (value: Buffer | string) => Buffer.from(value).toString('base64url');
+  const signJwt = (payload: Record<string, unknown>) => {
+    const header = base64Url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+    const body = base64Url(JSON.stringify(payload));
+    const signature = crypto.createHmac('sha256', onlyOffice!.jwtSecret).update(`${header}.${body}`).digest('base64url');
+    return `${header}.${body}.${signature}`;
+  };
+  const verifyJwt = (token: unknown) => {
+    if (typeof token !== 'string') return null;
+    const [header, body, signature] = token.split('.');
+    if (!header || !body || !signature) return null;
+    const expected = crypto.createHmac('sha256', onlyOffice!.jwtSecret).update(`${header}.${body}`).digest('base64url');
+    if (signature.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
+    try {
+      const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as Record<string, unknown>;
+      return typeof payload.exp === 'number' && payload.exp * 1000 > Date.now() ? payload : null;
+    } catch { return null; }
+  };
 
   const cookieToken = (req: Request) => {
     const encodedToken = String(req.headers.cookie || '').split(';').map(cookie => cookie.trim().split('=')).find(([name]) => name === 'terminal_session')?.slice(1).join('=') || '';
@@ -311,6 +331,67 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
       if (buffer.subarray(0, 512).includes(0)) return res.json({ success: true, isBinary: true, size: stat.size, mtime: stat.mtime.toISOString() });
       return res.json({ success: true, isBinary: false, content: buffer.toString('utf8'), size: stat.size, mtime: stat.mtime.toISOString() });
     } catch (error) { return fail(res, error); }
+  });
+
+  router.post('/onlyoffice/session', async (req, res) => {
+    try {
+      if (!onlyOffice) throw httpError(501, 'OnlyOffice chưa được cấu hình trên backend');
+      if (!authenticate(req)) throw httpError(401, 'Unauthorized');
+      const requestedPath = typeof req.body?.path === 'string' ? req.body.path : '';
+      const target = resolveInsideRoot(requestedPath); const stat = await fsp.stat(target);
+      const extension = path.extname(target).toLowerCase();
+      if (!stat.isFile() || !OFFICE_EXTENSIONS.has(extension)) throw httpError(415, 'Chỉ hỗ trợ tài liệu Office');
+      const id = crypto.randomBytes(32).toString('base64url'); const expiresAt = Date.now() + 60 * 60_000;
+      officeSessions.set(id, { path: relative(target), expiresAt });
+      for (const [key, session] of officeSessions) if (session.expiresAt <= Date.now()) officeSessions.delete(key);
+      const canEdit = sessionRole(cookieToken(req)) !== 'viewer';
+      const expiresInSeconds = Math.floor(expiresAt / 1000);
+      const documentUrl = `${onlyOffice.publicApiUrl}/api/files/onlyoffice/document/${encodeURIComponent(id)}`;
+      const callbackUrl = `${onlyOffice.publicApiUrl}/api/files/onlyoffice/callback/${encodeURIComponent(id)}`;
+      const documentType = ['.xls', '.xlsx', '.ods'].includes(extension) ? 'cell' : ['.ppt', '.pptx', '.odp'].includes(extension) ? 'slide' : 'word';
+      const token = signJwt({ document: { fileType: extension.slice(1), key: id, title: path.basename(target), url: documentUrl }, editorConfig: { callbackUrl, mode: canEdit ? 'edit' : 'view', user: { id: crypto.createHash('sha256').update(cookieToken(req)).digest('hex').slice(0, 16), name: 'Operator' } }, exp: expiresInSeconds });
+      return res.json({ success: true, documentServerUrl: onlyOffice.documentServerUrl, config: { document: { fileType: extension.slice(1), key: id, title: path.basename(target), url: documentUrl }, documentType, editorConfig: { callbackUrl, mode: canEdit ? 'edit' : 'view', user: { id: 'operator', name: 'Operator' } }, token } });
+    } catch (error) { return fail(res, error); }
+  });
+
+  router.get('/onlyoffice/document/:id', async (req, res) => {
+    try {
+      const session = officeSessions.get(req.params.id);
+      if (!session || session.expiresAt <= Date.now()) throw httpError(404, 'Phiên chỉnh sửa đã hết hạn');
+      const target = resolveInsideRoot(session.path); const stat = await fsp.stat(target);
+      if (!stat.isFile()) throw httpError(404, 'Không tìm thấy tài liệu');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Length', stat.size);
+      return fs.createReadStream(target).on('error', error => res.destroy(error)).pipe(res);
+    } catch (error) { return fail(res, error); }
+  });
+
+  router.post('/onlyoffice/callback/:id', async (req, res) => {
+    let temp: string | undefined;
+    try {
+      if (!onlyOffice) throw httpError(501, 'OnlyOffice chưa được cấu hình trên backend');
+      const session = officeSessions.get(req.params.id);
+      const payload = req.body as { status?: unknown; url?: unknown; token?: unknown };
+      if (!session || session.expiresAt <= Date.now() || !verifyJwt(payload.token)) throw httpError(403, 'Callback OnlyOffice không hợp lệ');
+      const status = Number(payload.status);
+      if (status === 2 || status === 6) {
+        if (typeof payload.url !== 'string') throw httpError(400, 'OnlyOffice không trả về URL tài liệu');
+        const savedDocumentUrl = new URL(payload.url);
+        if (!['http:', 'https:'].includes(savedDocumentUrl.protocol) || savedDocumentUrl.origin !== new URL(onlyOffice.documentServerUrl).origin) throw httpError(400, 'URL tài liệu OnlyOffice không hợp lệ');
+        const response = await fetch(savedDocumentUrl);
+        if (!response.ok || !response.body) throw httpError(502, 'Không thể tải bản tài liệu đã sửa từ OnlyOffice');
+        const target = resolveInsideRoot(session.path); const stat = await fsp.stat(target);
+        await createSnapshot(target, 'before_onlyoffice_write');
+        temp = path.join(path.dirname(target), `.${path.basename(target)}.${crypto.randomUUID()}.tmp`);
+        const handle = await fsp.open(temp, 'wx', stat.mode);
+        const stream = fs.createWriteStream('', { fd: handle.fd, autoClose: true });
+        await pipeline(response.body as unknown as NodeJS.ReadableStream, stream);
+        await fsp.rename(temp, target); temp = undefined;
+        await log(`Đã lưu tài liệu OnlyOffice: ${session.path}`, clientIp(req), { action: 'onlyoffice_write' });
+      }
+      return res.json({ error: 0 });
+    } catch { if (temp) await fsp.rm(temp, { force: true }).catch(() => undefined); return res.json({ error: 1 }); }
   });
 
   router.get('/media', async (req, res) => {

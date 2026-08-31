@@ -1423,7 +1423,7 @@ export default function Home() {
           setFileContent(data.content);
           setEditorOriginal(data.content);
           setFileMtime(data.mtime);
-          setIsEditingFile(edit);
+          setIsEditingFile(edit || (previewKind(filePath) === "spreadsheet" && currentUser?.role !== "viewer"));
         }
       } else {
         setFileError(data.error || "Không thể mở tệp tin");
