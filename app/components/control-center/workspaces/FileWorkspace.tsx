@@ -272,6 +272,18 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
               <FilePlus className="w-3.5 h-3.5" />
               <span>Tệp tin mới</span>
             </button>
+            <button
+              onClick={() => {
+                setNewFileName("bang-tinh.csv");
+                setShowCreateFile(true);
+                setShowCreateFolder(false);
+              }}
+              disabled={currentUser?.role === "viewer"}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-xs font-semibold text-white rounded transition cursor-pointer"
+            >
+              <Database className="w-3.5 h-3.5" />
+              <span>Bảng tính mới</span>
+            </button>
           </div>
         </div>
 
@@ -365,7 +377,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
                 type="text"
                 value={newFileName}
                 onChange={(e) => setNewFileName(e.target.value)}
-                placeholder="Nhập tên tệp (ví dụ: script.sh, notes.txt)..."
+                placeholder="Nhập tên tệp (ví dụ: script.sh, bang-tinh.csv)..."
                 className="w-full px-3 py-2 bg-black border border-white/10 rounded text-sm text-white focus:outline-none focus:border-blue-500 font-mono"
               />
             </div>
@@ -374,7 +386,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
                 onClick={createNewFile}
                 className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-xs font-semibold text-white rounded transition cursor-pointer"
               >
-                Tạo tệp
+                Tạo và mở tệp
               </button>
               <button
                 onClick={() => setShowCreateFile(false)}

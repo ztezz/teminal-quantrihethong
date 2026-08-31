@@ -43,6 +43,7 @@ export function previewKind(filePath: string): PreviewKind {
   if (["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "svg", "ico"].includes(ext))
     return "image";
   if (ext === "pdf") return "pdf";
+  if (ext === "csv") return "spreadsheet";
   if (["doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp"].includes(ext))
     return "office";
   return "text";

@@ -6,6 +6,7 @@ import { AlertCircle, Download, Edit, History, Save, X } from "lucide-react";
 import { API_URL, previewKind } from "./helpers";
 import { getFileIcon } from "./FileIcon";
 import { CodeEditor } from "./CodeEditor";
+import { SpreadsheetEditor } from "./SpreadsheetEditor";
 import { PdfViewer } from "./PdfViewer";
 import { VideoPlayer } from "./VideoPlayer";
 import type { ConfirmOptions, UserRole } from "./types";
@@ -65,6 +66,7 @@ function ImagePreview({ src, alt, fileName }: { src: string; alt: string; fileNa
 
 export function FilePreviewModal({ role, filePath, fileContent, editorOriginal, editing, previewTicket, onContentChange, onEditingChange, onSave, onReload, onSnapshots, onClose, onConfirm }: FilePreviewModalProps) {
   const kind = previewKind(filePath);
+  const editable = kind === "text" || kind === "spreadsheet";
   const dirty = editing && fileContent !== editorOriginal;
   const fileName = filePath.replace(/\\/g, "/").split("/").pop() || filePath;
   const mediaUrl = `${API_URL}/api/files/media?path=${encodeURIComponent(filePath)}&ticket=${encodeURIComponent(previewTicket || "")}`;
@@ -94,14 +96,15 @@ export function FilePreviewModal({ role, filePath, fileContent, editorOriginal, 
         <div className="flex flex-wrap items-center gap-3 border-b border-white/10 bg-[#0d131e] px-3 py-3 sm:px-5">
           <span className="text-sky-400">{getFileIcon(filePath)}</span>
           <div className="min-w-0 flex-1"><h3 id="file-preview-title" className="truncate text-sm font-semibold text-white" title={filePath}>{fileName}</h3><p className="truncate text-[10px] font-mono text-slate-500" title={filePath}>{filePath}</p></div>
-          <span className="rounded border border-sky-500/20 bg-sky-500/10 px-2 py-1 text-[9px] font-bold uppercase text-sky-300">{kind === "text" ? editing ? dirty ? "Chưa lưu" : "Đang sửa" : "Chỉ xem" : kind}</span>
+          <span className="rounded border border-sky-500/20 bg-sky-500/10 px-2 py-1 text-[9px] font-bold uppercase text-sky-300">{editable ? editing ? dirty ? "Chưa lưu" : "Đang sửa" : "Chỉ xem" : kind}</span>
           <button type="button" onClick={onSnapshots} className="inline-flex items-center gap-1.5 rounded border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"><History className="h-3.5 w-3.5" />Lịch sử</button>
-          {kind === "text" && editing && <><button type="button" onClick={onSave} disabled={!dirty} className="inline-flex items-center gap-1.5 rounded bg-emerald-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-35"><Save className="h-3.5 w-3.5" />Lưu</button><button type="button" onClick={() => { onEditingChange(false); onReload(); }} className="rounded border border-white/10 px-3 py-2 text-xs text-slate-300">Hủy</button></>}
-          {kind === "text" && !editing && role !== "viewer" && <button type="button" onClick={() => onEditingChange(true)} className="inline-flex items-center gap-1.5 rounded bg-blue-600 px-3 py-2 text-xs font-semibold text-white"><Edit className="h-3.5 w-3.5" />Chỉnh sửa</button>}
+          {editable && editing && <><button type="button" onClick={onSave} disabled={!dirty} className="inline-flex items-center gap-1.5 rounded bg-emerald-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-35"><Save className="h-3.5 w-3.5" />Lưu</button><button type="button" onClick={() => { onEditingChange(false); onReload(); }} className="rounded border border-white/10 px-3 py-2 text-xs text-slate-300">Hủy</button></>}
+          {editable && !editing && role !== "viewer" && <button type="button" onClick={() => onEditingChange(true)} className="inline-flex items-center gap-1.5 rounded bg-blue-600 px-3 py-2 text-xs font-semibold text-white"><Edit className="h-3.5 w-3.5" />Chỉnh sửa</button>}
           <button type="button" onClick={() => void close()} aria-label="Đóng xem trước" className="ml-0 inline-flex h-9 w-9 items-center justify-center rounded border border-white/10 text-slate-400 hover:bg-white/5 hover:text-white"><X className="h-4 w-4" /></button>
         </div>
         <div className="min-h-0 flex-1 overflow-auto">
-          {kind === "video" ? <VideoPlayer key={`${filePath}-${previewTicket}`} src={mediaUrl} fileName={fileName} />
+          {kind === "spreadsheet" ? <SpreadsheetEditor value={fileContent || ""} readOnly={!editing} onChange={onContentChange} />
+            : kind === "video" ? <VideoPlayer key={`${filePath}-${previewTicket}`} src={mediaUrl} fileName={fileName} />
             : kind === "audio" ? <div className="flex h-full min-h-64 items-center justify-center bg-gradient-to-br from-slate-950 via-purple-950/40 to-black p-8"><audio key={filePath} src={mediaUrl} controls preload="metadata" className="w-full max-w-2xl">Trình duyệt không hỗ trợ âm thanh.</audio></div>
               : kind === "image" ? <ImagePreview src={mediaUrl} alt={`Xem trước ${fileName}`} fileName={fileName} />
                 : kind === "pdf" || kind === "office" ? <PdfViewer key={`${filePath}-${previewTicket}`} fileName={fileName} src={`${API_URL}/api/files/${kind === "office" ? "office-preview" : "media"}?path=${encodeURIComponent(filePath)}&ticket=${encodeURIComponent(previewTicket || "")}`} />

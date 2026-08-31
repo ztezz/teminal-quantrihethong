@@ -1389,8 +1389,8 @@ export default function Home() {
     setFileLoading(true);
     setFileError(null);
     try {
-      if (previewKind(filePath) !== "text") {
-        if (edit) throw new Error("Chỉ có thể chỉnh sửa tệp văn bản");
+      if (!["text", "spreadsheet"].includes(previewKind(filePath))) {
+        if (edit) throw new Error("Chỉ có thể chỉnh sửa tệp văn bản hoặc bảng tính CSV");
         const ticketData = await requestFileApi("/api/auth/preview-ticket", {
           method: "POST",
           body: JSON.stringify({ path: filePath }),
@@ -1558,7 +1558,7 @@ export default function Home() {
         setNewFileName("");
         setShowCreateFile(false);
         await loadFiles(currentPath);
-        await openFile(data.path);
+        await openFile(data.path, previewKind(data.path) === "spreadsheet");
       } else {
         setFileError(data.error || "Lỗi tạo tệp mới");
       }

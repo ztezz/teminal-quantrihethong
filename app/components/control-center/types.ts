@@ -262,4 +262,5 @@ export type PreviewKind =
   | "image"
   | "pdf"
   | "office"
+  | "spreadsheet"
   | "text";
