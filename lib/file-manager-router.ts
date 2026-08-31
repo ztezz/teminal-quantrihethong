@@ -219,12 +219,28 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
   const trashOne = async (userPath: unknown) => {
     const target = resolveInsideRoot(userPath);
     if (target === root) throw httpError(400, 'Không thể xóa thư mục gốc');
-    await fsp.lstat(target);
+    const targetStat = await fsp.lstat(target);
     await fsp.mkdir(trashRoot, { recursive: true });
+    // Mounted network filesystems cannot reliably be moved into a local trash directory.
+    if (targetStat.dev !== (await fsp.stat(trashRoot)).dev) {
+      await fsp.rm(target, { recursive: true, force: false });
+      return { path: relative(target), permanentlyDeleted: true };
+    }
+    try {
+      await createSnapshot(target, 'before_trash');
+    } catch (error: any) {
+      void log(`Không thể tạo snapshot trước khi xóa: ${relative(target)}`, 'system', { action: 'snapshot_create', level: 'warning', result: 'failure', metadata: { error: error.message } });
+    }
     const id = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-${path.basename(target)}`;
-    await safeMove(target, path.join(trashRoot, id));
+    try {
+      await fsp.rename(target, path.join(trashRoot, id));
+    } catch (error: any) {
+      if (error?.code !== 'EXDEV') throw error;
+      await fsp.rm(target, { recursive: true, force: false });
+      return { path: relative(target), permanentlyDeleted: true };
+    }
     await fsp.writeFile(path.join(trashRoot, `${id}.json`), JSON.stringify({ originalPath: relative(target), deletedAt: new Date().toISOString() } satisfies TrashMetadata));
-    return { id, path: relative(target) };
+    return { id, path: relative(target), permanentlyDeleted: false };
   };
   const restoreOne = async (id: unknown) => {
     if (!validName(id)) throw httpError(400, 'Mục thùng rác không hợp lệ');
@@ -777,14 +793,14 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
   });
 
   router.delete('/', async (req, res) => {
-    try { const target = resolveInsideRoot(req.query.path); await createSnapshot(target, 'before_trash'); const result = await trashOne(req.query.path); await log(`Đã chuyển vào thùng rác: ${result.path}`, clientIp(req)); return res.json({ success: true, message: 'Đã chuyển vào thùng rác', ...result }); }
+    try { const result = await trashOne(req.query.path); const message = result.permanentlyDeleted ? 'Đã xóa trực tiếp khỏi ổ đĩa mạng' : 'Đã chuyển vào thùng rác'; await log(`${message}: ${result.path}`, clientIp(req)); return res.json({ success: true, message, ...result }); }
     catch (error) { return fail(res, error); }
   });
 
   router.post('/trash', async (req, res) => {
     try {
-      const results = await runItems(pathsFrom(req.body), async value => { await createSnapshot(resolveInsideRoot(value), 'before_bulk_trash'); return trashOne(value); }); await log(`Đã chuyển hàng loạt ${results.filter(item => item.success).length} mục vào thùng rác`, clientIp(req));
-      return res.status(results.some(item => !item.success) ? 207 : 200).json({ success: results.every(item => item.success), results });
+      const results = await runItems(pathsFrom(req.body), trashOne); const directlyDeleted = results.filter(item => item.success && (item as { permanentlyDeleted?: boolean }).permanentlyDeleted).length; const trashed = results.filter(item => item.success).length - directlyDeleted; const message = `Đã xóa trực tiếp ${directlyDeleted} mục và chuyển ${trashed} mục vào thùng rác`; await log(message, clientIp(req));
+      return res.status(results.some(item => !item.success) ? 207 : 200).json({ success: results.every(item => item.success), message, directlyDeleted, trashed, results });
     } catch (error) { return fail(res, error); }
   });
 

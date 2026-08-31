@@ -1174,9 +1174,9 @@ export default function Home() {
     if (
       !paths.length ||
       !(await askConfirm({
-        message: `Chuyển ${paths.length} mục vào thùng rác?`,
+        message: `Xóa ${paths.length} mục? Mục trên ổ đĩa mạng sẽ bị xóa vĩnh viễn và không thể khôi phục từ thùng rác.`,
         danger: true,
-        confirmLabel: "Chuyển vào thùng rác",
+        confirmLabel: "Xóa",
       }))
     )
       return;
@@ -1187,6 +1187,7 @@ export default function Home() {
       });
       if (data.results?.some((item: any) => !item.success))
         setFileError("Một số mục không thể chuyển vào thùng rác.");
+      else notify("success", data.message || "Đã xử lý các mục đã chọn.");
       setSelectedPaths([]);
       await loadFiles(currentPath, null, "none");
     } catch (error: any) {
@@ -1476,7 +1477,7 @@ export default function Home() {
       filePath.replace(/\\/g, "/").split("/").pop() || "tệp/thư mục";
     if (
       !(await askConfirm({
-        message: `Bạn có chắc chắn muốn xóa "${itemName}" không?`,
+        message: `Bạn có chắc chắn muốn xóa "${itemName}" không? Nếu mục nằm trên ổ đĩa mạng, mục sẽ bị xóa vĩnh viễn.`,
         danger: true,
         confirmLabel: "Xóa",
       }))
@@ -1494,6 +1495,7 @@ export default function Home() {
       );
       const data = await res.json();
       if (data.success) {
+        notify("success", data.message || "Đã xóa tệp/thư mục.");
         await loadFiles(currentPath);
         if (viewingFile === filePath) {
           setViewingFile(null);

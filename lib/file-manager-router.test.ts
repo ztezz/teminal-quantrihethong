@@ -9,10 +9,10 @@ import { createFileManagerRouter } from './file-manager-router';
 
 type Role = 'viewer' | 'operator' | 'admin' | 'root';
 
-async function fixture() {
+async function fixture(trashDir?: string) {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'file-manager-router-'));
   const root = path.join(temporaryDirectory, 'root');
-  const trash = path.join(temporaryDirectory, 'trash');
+  const trash = trashDir || path.join(temporaryDirectory, 'trash');
   const snapshots = path.join(temporaryDirectory, 'snapshots');
   fs.mkdirSync(root);
   let role: Role = 'root';
@@ -55,6 +55,7 @@ async function fixture() {
   return {
     root,
     trash,
+    snapshots,
     request,
     setRole: (value: Role) => { role = value; },
     close: async () => {
@@ -246,6 +247,34 @@ test('supports create, write, move, and trash flow', async () => {
     assert.equal(fs.existsSync(path.join(context.root, 'documents', 'final.txt')), false);
     assert.equal(fs.existsSync(path.join(context.trash, trashed.body.id)), true);
   } finally { await context.close(); }
+});
+
+test('permanently deletes files when the trash directory is on another filesystem', async t => {
+  if (process.platform === 'win32') {
+    t.skip('The test requires a separate mounted filesystem');
+    return;
+  }
+  if (!fs.existsSync('/dev/shm')) {
+    t.skip('No separate mounted filesystem is available');
+    return;
+  }
+  const networkTrash = fs.mkdtempSync('/dev/shm/terminal-file-manager-trash-');
+  const context = await fixture(networkTrash);
+  try {
+    if (fs.statSync(context.root).dev === fs.statSync('/dev/shm').dev) {
+      t.skip('No separate mounted filesystem is available');
+      return;
+    }
+    fs.writeFileSync(path.join(context.root, 'remote-file.txt'), 'remote content');
+    const response = await context.request('/?path=remote-file.txt', { method: 'DELETE' });
+    assert.equal(response.status, 200);
+    assert.equal(response.body.permanentlyDeleted, true);
+    assert.equal(fs.existsSync(path.join(context.root, 'remote-file.txt')), false);
+    assert.equal(fs.existsSync(context.snapshots), false);
+  } finally {
+    await context.close();
+    fs.rmSync(networkTrash, { recursive: true, force: true });
+  }
 });
 
 test('archive creation rejects a destination inside its source', async () => {
