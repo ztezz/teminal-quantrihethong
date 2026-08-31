@@ -394,7 +394,7 @@ Quyền được kiểm tra tại backend. Việc ẩn nút trên frontend chỉ
 
 Backend yêu cầu xác nhận lại mật khẩu và mã 2FA trước các thao tác nhạy cảm:
 
-- Xóa một hoặc nhiều tệp/thư mục. Mục trên filesystem khác với thùng rác, thường là ổ mạng/FUSE, sẽ bị xóa vĩnh viễn.
+- Xóa tệp/thư mục chỉ yêu cầu hộp xác nhận trên giao diện, không yêu cầu nhập lại mật khẩu/2FA. Mục trên filesystem khác với thùng rác, thường là ổ mạng/FUSE, sẽ bị xóa vĩnh viễn.
 - Ghi, move, upload, archive hoặc xóa trong `/etc`, `/boot`, `/usr`, `/root`, `/var`, `/bin`, `/sbin`, `/lib`.
 - Thay đổi `chmod` hoặc `chown`.
 - Khôi phục, xóa vĩnh viễn hoặc dọn thùng rác.

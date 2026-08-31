@@ -266,22 +266,17 @@ test('supports create, write, move, and trash flow', async () => {
   } finally { await context.close(); }
 });
 
-test('requires step-up authorization for single and bulk deletion', async () => {
+test('allows confirmed file deletion without step-up authorization', async () => {
   const context = await fixture();
   try {
     fs.writeFileSync(path.join(context.root, 'single.txt'), 'single');
     fs.writeFileSync(path.join(context.root, 'bulk.txt'), 'bulk');
     context.setStepUp(false);
 
-    const single = await context.request('/?path=single.txt', { method: 'DELETE' });
-    assert.equal(single.status, 428);
-    assert.equal(single.body.code, 'STEP_UP_REQUIRED');
-    assert.equal(fs.existsSync(path.join(context.root, 'single.txt')), true);
-
-    const bulk = await context.request('/trash', { method: 'POST', body: JSON.stringify({ paths: ['bulk.txt'] }) });
-    assert.equal(bulk.status, 428);
-    assert.equal(bulk.body.code, 'STEP_UP_REQUIRED');
-    assert.equal(fs.existsSync(path.join(context.root, 'bulk.txt')), true);
+    assert.equal((await context.deletePath('single.txt')).status, 200);
+    assert.equal((await context.deletePath('bulk.txt')).status, 200);
+    assert.equal(fs.existsSync(path.join(context.root, 'single.txt')), false);
+    assert.equal(fs.existsSync(path.join(context.root, 'bulk.txt')), false);
   } finally { await context.close(); }
 });
 

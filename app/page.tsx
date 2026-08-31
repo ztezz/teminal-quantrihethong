@@ -1207,11 +1207,9 @@ export default function Home() {
     if (!paths.length) return;
     try {
       const policy = await requestFileApi("/api/files/delete-plan", { method: "POST", body: JSON.stringify({ paths }) });
-      const requiresText = policy.permanent > 0 && (policy.totalEntries >= 1000 || policy.totalBytes >= 10 * 1024 * 1024 * 1024 || policy.plans?.some((item: any) => item.permanentlyDeleted && item.isDirectory));
       if (!(await askConfirm({
         message: `Xóa ${paths.length} mục (${policy.totalEntries.toLocaleString("vi-VN")} tệp/thư mục, ${(policy.totalBytes / 1024 / 1024 / 1024).toFixed(2)} GB)? ${policy.permanent} mục sẽ bị xóa vĩnh viễn, ${policy.trashed} mục sẽ được chuyển vào thùng rác.${policy.truncated ? " Kế hoạch đã chạm giới hạn quét." : ""}`,
         danger: true,
-        requiredText: requiresText ? "DELETE" : undefined,
         confirmLabel: "Xóa",
       }))) return;
       const policyTokens = Object.fromEntries(policy.plans.filter((item: any) => item.success).map((item: any) => [item.path, item.policyToken]));
@@ -1522,7 +1520,6 @@ export default function Home() {
     if (!(await askConfirm({
         message: policy.permanent ? `Xóa vĩnh viễn "${itemName}" (${plan?.entries?.toLocaleString("vi-VN")} mục, ${((plan?.bytes || 0) / 1024 / 1024 / 1024).toFixed(2)} GB)? Mục này không thể khôi phục từ thùng rác.` : `Chuyển "${itemName}" vào thùng rác?`,
         danger: true,
-        requiredText: policy.permanent && plan?.isDirectory ? "DELETE" : undefined,
         confirmLabel: "Xóa",
       }))) return;
     setFileLoading(true);

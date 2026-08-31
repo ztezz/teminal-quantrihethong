@@ -181,7 +181,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
   const dangerousRequest = (req: Request) => {
     if ((req.method === 'POST' && req.path === '/snapshots/restore') || (req.method === 'DELETE' && req.path === '/snapshots')) return true;
     if (req.method === 'PATCH' && req.path === '/metadata') return true;
-    if ((req.method === 'DELETE' && req.path === '/') || (req.method === 'POST' && req.path === '/trash')) return true;
+    if ((req.method === 'DELETE' && req.path === '/') || (req.method === 'POST' && ['/trash', '/delete-policy', '/delete-plan'].includes(req.path))) return false;
     if ((req.method === 'DELETE' && (req.path === '/trash' || req.path === '/trash/empty')) || (req.method === 'POST' && req.path === '/trash/restore')) return true;
     const values = [req.query.path, req.body?.path, req.body?.filePath, req.body?.dirPath, req.body?.sourcePath, req.body?.destinationDir, req.body?.destinationPath, req.body?.archivePath, req.body?.targetPath, req.body?.paths, req.body?.ids, req.headers['x-directory']];
     return values.flatMap(value => Array.isArray(value) ? value : [value]).some(sensitivePath);
