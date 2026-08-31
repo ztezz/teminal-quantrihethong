@@ -441,7 +441,8 @@ async function startServer() {
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-File-Name, X-Directory, X-Upload-Offset, X-Quick-Share-Token');
       res.setHeader('Access-Control-Expose-Headers', 'X-Request-ID');
       if (req.method === 'OPTIONS') return res.sendStatus(204);
-      if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && req.headers.origin !== allowedOrigin) return res.status(403).json({ success: false, error: 'Invalid request origin' });
+      const isOnlyOfficeCallback = req.path.startsWith('/api/files/onlyoffice/callback/');
+      if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && req.headers.origin !== allowedOrigin && !isOnlyOfficeCallback) return res.status(403).json({ success: false, error: 'Invalid request origin' });
       nextMiddleware();
     });
   }

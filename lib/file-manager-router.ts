@@ -258,6 +258,9 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
   };
 
   router.use((req, res, next) => {
+    const isOnlyOfficeServerRequest = req.path.startsWith('/onlyoffice/document/') || req.path.startsWith('/onlyoffice/callback/');
+    if (isOnlyOfficeServerRequest) return next();
+
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
       res.once('finish', () => {
         if (res.statusCode >= 400) void log(`File operation failed: ${req.method} ${req.path}`, clientIp(req), { action: `${req.method.toLowerCase()}_${req.path.replace(/\W+/g, '_')}`, level: res.statusCode >= 500 ? 'critical' : 'warning', result: 'failure', metadata: { status: res.statusCode } });
