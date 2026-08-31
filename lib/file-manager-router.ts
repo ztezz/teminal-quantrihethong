@@ -201,13 +201,28 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
     if (!Array.isArray(value) || !value.length || value.length > MAX_BULK_ITEMS) throw httpError(400, `Danh sách phải có từ 1 đến ${MAX_BULK_ITEMS} mục`);
     return value;
   };
+  const safeMove = async (source: string, destination: string) => {
+    try {
+      await fsp.rename(source, destination);
+      return;
+    } catch (error: any) {
+      if (error?.code !== 'EXDEV') throw error;
+    }
+    try {
+      await fsp.cp(source, destination, { recursive: true, errorOnExist: true, force: false });
+    } catch (copyError) {
+      await fsp.rm(destination, { recursive: true, force: true }).catch(() => undefined);
+      throw copyError;
+    }
+    await fsp.rm(source, { recursive: true, force: true });
+  };
   const trashOne = async (userPath: unknown) => {
     const target = resolveInsideRoot(userPath);
     if (target === root) throw httpError(400, 'Không thể xóa thư mục gốc');
     await fsp.lstat(target);
     await fsp.mkdir(trashRoot, { recursive: true });
     const id = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-${path.basename(target)}`;
-    await fsp.rename(target, path.join(trashRoot, id));
+    await safeMove(target, path.join(trashRoot, id));
     await fsp.writeFile(path.join(trashRoot, `${id}.json`), JSON.stringify({ originalPath: relative(target), deletedAt: new Date().toISOString() } satisfies TrashMetadata));
     return { id, path: relative(target) };
   };
@@ -219,7 +234,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
     const target = resolveInsideRoot(metadata.originalPath);
     await ensureMissing(target);
     await fsp.mkdir(path.dirname(target), { recursive: true });
-    await fsp.rename(trashed, target);
+    await safeMove(trashed, target);
     await fsp.unlink(metadataFile);
     return { id, path: metadata.originalPath };
   };
@@ -583,8 +598,8 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
       if (stat.size !== metadata.size) throw httpError(409, `Upload chưa hoàn tất (${stat.size}/${metadata.size} byte)`);
       const target = resolveInsideRoot(metadata.targetPath);
       await ensureMissing(target);
-      await fsp.link(paths.data, target);
-      await Promise.all([fsp.rm(paths.data, { force: true }), fsp.rm(paths.metadata, { force: true })]);
+      await safeMove(paths.data, target);
+      await fsp.rm(paths.metadata, { force: true });
       releaseUploadTarget(metadata);
       await log(`Đã upload tệp: ${relative(target)}`, clientIp(req));
       return res.status(201).json({ success: true, path: relative(target) });
@@ -604,7 +619,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
     try {
       const { sourcePath, destinationDir, newName } = req.body; const source = resolveInsideRoot(sourcePath); const destination = resolveInsideRoot(destinationDir); await mustBeDirectory(destination);
       const name = newName || path.basename(source); if (!validName(name)) throw httpError(400, 'Tên mới không hợp lệ');
-      const target = path.join(destination, name); await ensureMissing(target); await createSnapshot(source, 'before_move'); await fsp.rename(source, target); await log(`Đã di chuyển/đổi tên: ${relative(source)} -> ${relative(target)}`, clientIp(req));
+      const target = path.join(destination, name); await ensureMissing(target); await createSnapshot(source, 'before_move'); await safeMove(source, target); await log(`Đã di chuyển/đổi tên: ${relative(source)} -> ${relative(target)}`, clientIp(req));
       return res.json({ success: true, path: relative(target) });
     } catch (error) { return fail(res, error); }
   });
@@ -617,7 +632,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
         const source = resolveInsideRoot(value); if (source === root) throw httpError(400, 'Không thể chuyển thư mục gốc');
         const target = path.join(destination, path.basename(source)); if (target === source || target.startsWith(source + path.sep)) throw httpError(400, 'Đích không thể nằm trong nguồn');
         await ensureMissing(target);
-        if (operation === 'copy') await fsp.cp(source, target, { recursive: true, errorOnExist: true }); else { await createSnapshot(source, 'before_bulk_move'); await fsp.rename(source, target); }
+        if (operation === 'copy') await fsp.cp(source, target, { recursive: true, errorOnExist: true }); else { await createSnapshot(source, 'before_bulk_move'); await safeMove(source, target); }
         return { sourcePath: relative(source), path: relative(target) };
       });
       await log(`Đã ${operation === 'copy' ? 'sao chép' : 'di chuyển'} hàng loạt ${results.filter(item => item.success).length} mục`, clientIp(req));
