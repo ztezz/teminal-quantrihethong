@@ -56,6 +56,7 @@ import type {
   FileBookmark,
   FileMetadata,
   FileSnapshot,
+  LostFoundItem,
   ManagedUser,
   SecuritySession,
   SqliteBackup,
@@ -69,6 +70,7 @@ import type {
   ToastItem,
   ToastKind,
   TrashItem,
+  TrashUsage,
   UserRole,
 } from "./components/control-center/types";
 import "@xterm/xterm/css/xterm.css";
@@ -376,11 +378,14 @@ export default function Home() {
   const [recursiveSearch, setRecursiveSearch] = useState(false);
   const [searchResults, setSearchResults] = useState<any[] | null>(null);
   const [searchTruncated, setSearchTruncated] = useState(false);
+  const [fileMounts, setFileMounts] = useState<Array<{ path: string; available: boolean; readable: boolean; latencyMs: number; error?: string }>>([]);
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>(
     {},
   );
   const [metadata, setMetadata] = useState<FileMetadata | null>(null);
   const [trashItems, setTrashItems] = useState<TrashItem[]>([]);
+  const [trashUsage, setTrashUsage] = useState<TrashUsage | null>(null);
+  const [lostFoundItems, setLostFoundItems] = useState<LostFoundItem[]>([]);
   const [selectedTrashIds, setSelectedTrashIds] = useState<string[]>([]);
   const [showTrash, setShowTrash] = useState(false);
   const [showSnapshots, setShowSnapshots] = useState(false);
@@ -435,6 +440,7 @@ export default function Home() {
         if (requestId !== fileListRequestRef.current) return;
         if (data.success) {
           setFilesList(data.files);
+          setFileMounts(data.mounts || []);
           setCurrentPath(data.currentPath);
           setPathInput(data.currentPath);
           setParentPath(data.parentPath);
@@ -1180,7 +1186,7 @@ export default function Home() {
         const data = await requestFileApi(`/api/files/delete-jobs/${encodeURIComponent(jobId)}`);
         const job = data.job;
         setActiveDeleteJob({ id: jobId, state: job.state, progress: job.progress, message: job.message });
-        if (["pending", "running"].includes(job.state)) {
+        if (["pending", "running", "stopping"].includes(job.state)) {
           replaceToast(toast, "loading", `${job.message} (${job.progress}%)`);
           continue;
         }
@@ -1318,11 +1324,27 @@ export default function Home() {
     try {
       const data = await requestFileApi("/api/files/trash");
       setTrashItems(data.items || []);
+      setTrashUsage(data.usage || null);
+      setLostFoundItems(data.lostFound || []);
       setSelectedTrashIds([]);
       setShowTrash(true);
     } catch (error: any) {
       setFileError(error.message);
     }
+  };
+  const lostFoundAction = async (action: "download" | "restore" | "delete", item: LostFoundItem) => {
+    try {
+      const endpoint = `/api/files/trash/lost-found/${encodeURIComponent(item.id)}`;
+      if (action === "download") {
+        const response = await fetch(`${API_URL}${endpoint}/download`, { credentials: "include" }); if (!response.ok) throw new Error("Không thể tải lost-found");
+        const link = document.createElement("a"); link.href = URL.createObjectURL(await response.blob()); link.download = item.name; link.click(); URL.revokeObjectURL(link.href); return;
+      }
+      if (action === "restore") {
+        const destination = window.prompt("Đường dẫn khôi phục trong File Manager", `${currentPath ? `${currentPath}/` : ""}${item.name}`); if (!destination) return;
+        await requestFileApi(`${endpoint}/restore`, { method: "POST", body: JSON.stringify({ path: destination }) });
+      } else await requestFileApi(endpoint, { method: "DELETE" });
+      await openTrash(); await loadFiles(currentPath, null, "none");
+    } catch (error: any) { setFileError(error.message); }
   };
 
   const trashAction = async (
@@ -3271,6 +3293,7 @@ export default function Home() {
                           searchTruncated,
                           uploadProgress,
                           previewTicket,
+                          mounts: fileMounts,
                           activeDeleteJob,
                         }}
                         actions={{
@@ -3339,6 +3362,9 @@ export default function Home() {
                       trash={{
                         open: showTrash,
                         items: trashItems,
+                        usage: trashUsage,
+                        lostFound: lostFoundItems,
+                        role: currentUser?.role,
                         selectedIds: selectedTrashIds,
                         onToggle: (id) =>
                           setSelectedTrashIds((ids) =>
@@ -3369,6 +3395,9 @@ export default function Home() {
                           )
                             trashAction("empty");
                         },
+                        onLostFoundDownload: (id) => { const item = lostFoundItems.find(value => value.id === id); if (item) void lostFoundAction("download", item); },
+                        onLostFoundRestore: (item) => void lostFoundAction("restore", item),
+                        onLostFoundDelete: async (id) => { const item = lostFoundItems.find(value => value.id === id); if (item && await askConfirm({ message: `Xóa vĩnh viễn lost-found "${item.name}"?`, danger: true, confirmLabel: "Xóa" })) void lostFoundAction("delete", item); },
                       }}
                       snapshots={{
                         open: showSnapshots,

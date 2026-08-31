@@ -6,8 +6,8 @@ import { backup, DatabaseSync } from 'node:sqlite';
 const fsp = fs.promises;
 const SQLITE_EXTENSIONS = new Set(['.sqlite', '.sqlite3', '.db']);
 
-export type JobType = 'sqlite_backup' | 'sqlite_integrity' | 'sqlite_vacuum' | 'file_delete';
-export type JobState = 'pending' | 'running' | 'success' | 'failure' | 'cancelled';
+export type JobType = 'sqlite_backup' | 'sqlite_integrity' | 'sqlite_vacuum';
+export type JobState = 'pending' | 'running' | 'stopping' | 'timed_out' | 'success' | 'failure' | 'cancelled';
 export type JobSource = 'api' | 'schedule';
 export type JobLog = { timestamp: string; message: string };
 export type Job = {
@@ -214,7 +214,7 @@ export class JobManager {
     const job = value as Partial<Job>;
     return typeof job.id === 'string' && typeof job.path === 'string' && typeof job.createdAt === 'string'
       && ['sqlite_backup', 'sqlite_integrity', 'sqlite_vacuum'].includes(String(job.type))
-      && ['pending', 'running', 'success', 'failure', 'cancelled'].includes(String(job.state))
+      && ['pending', 'running', 'stopping', 'timed_out', 'success', 'failure', 'cancelled'].includes(String(job.state))
       && Array.isArray(job.logs);
   }
 

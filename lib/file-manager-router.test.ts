@@ -367,6 +367,19 @@ test('reconciles orphaned trash metadata and data', async () => {
   } finally { await context.close(); }
 });
 
+test('emptying trash preserves lost-found data', async () => {
+  const context = await fixture();
+  try {
+    fs.mkdirSync(path.join(context.trash, '.lost-found'), { recursive: true });
+    fs.writeFileSync(path.join(context.trash, '.lost-found', 'orphan.txt'), 'keep me');
+    fs.writeFileSync(path.join(context.root, 'trash-me.txt'), 'trash');
+    await context.deletePath('trash-me.txt');
+    const emptied = await context.request('/trash/empty', { method: 'DELETE' });
+    assert.equal(emptied.status, 200);
+    assert.equal(fs.readFileSync(path.join(context.trash, '.lost-found', 'orphan.txt'), 'utf8'), 'keep me');
+  } finally { await context.close(); }
+});
+
 test('runs direct directory deletion as a background job', async () => {
   const context = await fixture(undefined, ['network-drive']);
   try {

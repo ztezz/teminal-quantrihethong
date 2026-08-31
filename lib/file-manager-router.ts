@@ -46,6 +46,7 @@ const OFFICE_EXTENSIONS = new Set(['.doc', '.docx', '.xls', '.xlsx', '.ppt', '.p
 type Options = {
   hasSession: (token: string) => boolean;
   sessionRole: (token: string) => 'viewer' | 'operator' | 'admin' | 'root' | null;
+  sessionUserId?: (token: string) => string | null;
   hasStepUp: (req: Request) => boolean;
   consumePreviewTicket: (ticket: string, filePath: string) => boolean;
   log: (event: string, ip: string, details?: { action?: string; level?: 'info' | 'warning' | 'critical'; result?: 'success' | 'failure'; metadata?: Record<string, unknown> }) => Promise<unknown>;
@@ -74,7 +75,7 @@ type DeletionMode = 'trash' | 'configured_direct' | 'cross_device' | 'exdev_fall
 type DeleteJob = {
   id: string;
   owner: string;
-  state: 'pending' | 'running' | 'success' | 'failure' | 'cancelled';
+  state: 'pending' | 'running' | 'stopping' | 'timed_out' | 'success' | 'failure' | 'cancelled';
   progress: number;
   completed: number;
   total: number;
@@ -85,6 +86,7 @@ type DeleteJob = {
   cancelRequested: boolean;
   paths: unknown[];
   idempotencyKey?: string;
+  timedOut?: boolean;
 };
 
 function clientIp(req: Request) {
@@ -107,7 +109,7 @@ function modeInfo(mode: number) {
   };
 }
 
-export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, consumePreviewTicket, log, rootDir, trashDir, snapshotDir, directDeletePaths = [], deleteJobStore, deletionMetrics, alert, previewFrameAncestor = "'self'", onlyOffice }: Options) {
+export function createFileManagerRouter({ hasSession, sessionRole, sessionUserId, hasStepUp, consumePreviewTicket, log, rootDir, trashDir, snapshotDir, directDeletePaths = [], deleteJobStore, deletionMetrics, alert, previewFrameAncestor = "'self'", onlyOffice }: Options) {
   const router = Router();
   const root = path.resolve(rootDir || process.cwd());
   const trashRoot = path.resolve(trashDir || path.join(process.cwd(), '.terminal-trash'));
@@ -138,6 +140,8 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
   const deleteJobTimeoutMs = Math.max(1, Number(process.env.FILE_DELETE_JOB_TIMEOUT_MINUTES || 60)) * 60_000;
   const deleteItemTimeoutMs = Math.max(1, Number(process.env.FILE_DELETE_ITEM_TIMEOUT_SECONDS || 120)) * 1000;
   const protectDirectDeleteRoots = process.env.FILE_MANAGER_PROTECT_DIRECT_DELETE_ROOTS !== 'false';
+  const trashRetentionDays = Math.max(0, Number(process.env.FILE_TRASH_RETENTION_DAYS || 30));
+  const trashMaxTotalBytes = Math.max(0, Number(process.env.FILE_TRASH_MAX_TOTAL_GB || 100)) * 1024 * 1024 * 1024;
   let activeOfficeConversions = 0;
   const officeSessions = new Map<string, { path: string; expiresAt: number }>();
   const deleteJobs = new Map<string, DeleteJob>();
@@ -170,6 +174,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
   };
   const authenticate = (req: Request) => { const token = cookieToken(req); return Boolean(token && hasSession(token)); };
   const uploadOwner = (req: Request) => crypto.createHash('sha256').update(cookieToken(req)).digest('hex');
+  const deletionOwner = (req: Request) => sessionUserId?.(cookieToken(req)) || uploadOwner(req);
   const relative = (absolutePath: string) => path.relative(root, absolutePath).split(path.sep).join('/');
   const httpError = (status: number, message: string) => Object.assign(new Error(message), { status });
   const sensitivePath = (value: unknown) => {
@@ -380,6 +385,30 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
     reconcilePromise = reconcileTrashOnce().finally(() => { reconcilePromise = null; });
     return reconcilePromise;
   };
+  const pathUsage = async (start: string) => {
+    const stack = [start]; let entries = 0; let bytes = 0;
+    while (stack.length && entries < maxDeleteEntries) {
+      const current = stack.pop()!; const stat = await fsp.lstat(current); entries++; bytes += stat.size;
+      if (stat.isDirectory() && !stat.isSymbolicLink()) for (const name of await fsp.readdir(current)) stack.push(path.join(current, name));
+    }
+    return { entries, bytes, truncated: Boolean(stack.length) };
+  };
+  const trashInventory = async () => {
+    await fsp.mkdir(trashRoot, { recursive: true }); const names = (await fsp.readdir(trashRoot)).filter(name => !name.endsWith('.json') && !name.endsWith('.pending') && name !== '.lost-found');
+    const items = await Promise.all(names.map(async id => { const metadata = JSON.parse(await fsp.readFile(path.join(trashRoot, `${id}.json`), 'utf8')) as TrashMetadata; const usage = await pathUsage(path.join(trashRoot, id)); return { id, metadata, ...usage }; }));
+    return items;
+  };
+  const enforceTrashRetention = async () => {
+    const items = (await trashInventory()).sort((a, b) => a.metadata.deletedAt.localeCompare(b.metadata.deletedAt)); let totalBytes = items.reduce((sum, item) => sum + item.bytes, 0); let removed = 0;
+    const cutoff = trashRetentionDays ? Date.now() - trashRetentionDays * 86_400_000 : 0;
+    for (const item of items) {
+      const expired = cutoff > 0 && new Date(item.metadata.deletedAt).getTime() < cutoff; const overQuota = trashMaxTotalBytes > 0 && totalBytes > trashMaxTotalBytes;
+      if (!expired && !overQuota) continue;
+      await removeTrashOne(item.id); totalBytes -= item.bytes; removed++;
+    }
+    if (removed) await log(`Đã tự dọn ${removed} mục thùng rác theo retention/quota`, 'system', { action: 'trash_retention', level: 'warning', metadata: { removed, totalBytes } });
+    return { totalBytes, removed };
+  };
   const summarizeDeletionResults = (results: Record<string, unknown>[]) => {
     const successful = results.filter(item => item.success).length;
     const failed = results.length - successful;
@@ -389,7 +418,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
   const pruneDeleteJobs = () => {
     if (deleteJobs.size < 200) return;
     for (const [id, job] of deleteJobs) {
-      if (!['pending', 'running'].includes(job.state)) deleteJobs.delete(id);
+      if (!['pending', 'running', 'stopping'].includes(job.state)) deleteJobs.delete(id);
       if (deleteJobs.size < 150) break;
     }
     deleteJobStore?.pruneDeleteJobs(500);
@@ -397,20 +426,24 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
   const persistDeleteJob = (job: DeleteJob) => deleteJobStore?.saveDeleteJob(job);
   const processDeleteJob = (job: DeleteJob, values: unknown[]) => {
     job.state = 'running'; job.message = 'Đang xóa'; persistDeleteJob(job);
-    deletionMetrics?.queueDepth([...deleteJobs.values()].filter(item => ['pending', 'running'].includes(item.state)).length);
-    const watchdog = setTimeout(() => { job.cancelRequested = true; job.message = 'Đã vượt thời gian tối đa, đang dừng'; persistDeleteJob(job); }, deleteJobTimeoutMs); watchdog.unref();
-    void runItemsLimited(values, value => Promise.race([trashOne(value, () => job.cancelRequested), new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(Object.assign(new Error('Mục xóa vượt thời gian tối đa'), { code: 'DELETE_ITEM_TIMEOUT' })), deleteItemTimeoutMs); timer.unref(); })]), result => {
+    deletionMetrics?.queueDepth([...deleteJobs.values()].filter(item => ['pending', 'running', 'stopping'].includes(item.state)).length);
+    const watchdog = setTimeout(() => { job.timedOut = true; job.cancelRequested = true; job.state = 'stopping'; job.message = 'Đã quá thời gian, đang chờ filesystem dừng'; persistDeleteJob(job); }, deleteJobTimeoutMs); watchdog.unref();
+    void runItemsLimited(values, async value => {
+      const itemTimer = setTimeout(() => { job.timedOut = true; job.cancelRequested = true; job.state = 'stopping'; job.message = 'Một mục đã quá thời gian, đang chờ filesystem dừng'; persistDeleteJob(job); }, deleteItemTimeoutMs); itemTimer.unref();
+      try { return await trashOne(value, () => job.cancelRequested); } finally { clearTimeout(itemTimer); }
+    }, result => {
       job.results.push(result); job.completed++; job.progress = Math.round(job.completed / job.total * 100); job.message = `Đã xử lý ${job.completed}/${job.total} mục`; persistDeleteJob(job);
     }, () => job.cancelRequested).then(async results => {
-      if (job.cancelRequested) { job.state = 'cancelled'; job.message = `Đã hủy sau ${job.completed}/${job.total} mục`; }
+      if (job.timedOut) { job.state = 'timed_out'; job.message = `Đã timeout sau ${job.completed}/${job.total} mục`; }
+      else if (job.cancelRequested) { job.state = 'cancelled'; job.message = `Đã hủy sau ${job.completed}/${job.total} mục`; }
       else { const summary = summarizeDeletionResults(results); job.state = summary.failed ? 'failure' : 'success'; job.message = summary.failed ? `Có ${summary.failed} mục thất bại` : 'Hoàn tất'; }
       job.progress = 100; job.finishedAt = new Date().toISOString(); clearTimeout(watchdog); persistDeleteJob(job);
-      const summary = summarizeDeletionResults(job.results); deletionMetrics?.queueDepth([...deleteJobs.values()].filter(item => ['pending', 'running'].includes(item.state) && item.id !== job.id).length);
+      const summary = summarizeDeletionResults(job.results); deletionMetrics?.queueDepth([...deleteJobs.values()].filter(item => ['pending', 'running', 'stopping'].includes(item.state) && item.id !== job.id).length);
       await log(`Tác vụ xóa ${job.id} kết thúc: ${job.message}`, 'system', { action: 'file_delete_job', level: summary.failed ? 'warning' : 'info', result: summary.failed ? 'failure' : 'success', metadata: { jobId: job.id, paths: job.results.map(item => item.path), ...summary } });
       if (summary.failed) void alert?.('file.delete.failure', { jobId: job.id, message: job.message, ...summary });
     }).catch(async error => {
-      job.state = 'failure'; job.progress = 100; job.message = error.message || 'Tác vụ xóa thất bại'; job.finishedAt = new Date().toISOString(); clearTimeout(watchdog); persistDeleteJob(job);
-      deletionMetrics?.queueDepth([...deleteJobs.values()].filter(item => ['pending', 'running'].includes(item.state) && item.id !== job.id).length); await log(`Tác vụ xóa ${job.id} thất bại`, 'system', { action: 'file_delete_job', level: 'critical', result: 'failure', metadata: { jobId: job.id, error: job.message } });
+      job.state = job.timedOut ? 'timed_out' : 'failure'; job.progress = 100; job.message = job.timedOut ? 'Filesystem đã dừng sau timeout' : error.message || 'Tác vụ xóa thất bại'; job.finishedAt = new Date().toISOString(); clearTimeout(watchdog); persistDeleteJob(job);
+      deletionMetrics?.queueDepth([...deleteJobs.values()].filter(item => ['pending', 'running', 'stopping'].includes(item.state) && item.id !== job.id).length); await log(`Tác vụ xóa ${job.id} thất bại`, 'system', { action: 'file_delete_job', level: 'critical', result: 'failure', metadata: { jobId: job.id, error: job.message } });
       void alert?.('file.delete.failure', { jobId: job.id, error: job.message });
     });
   };
@@ -517,7 +550,8 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
       await mustBeDirectory(target);
       const entries = await fsp.readdir(target, { withFileTypes: true });
       const files = (await Promise.all(entries.filter(entry => ![trashRoot, snapshotRoot, uploadRoot].includes(path.join(target, entry.name))).map(entry => itemDetails(path.join(target, entry.name))))).sort((a, b) => Number(b.isDirectory) - Number(a.isDirectory) || a.name.localeCompare(b.name));
-      return res.json({ success: true, currentPath: relative(target), parentPath: target === root ? null : relative(path.dirname(target)), platform: process.platform, files });
+      const mounts = await Promise.all(directDeleteRoots.map(async mount => { const startedAt = Date.now(); try { const stat = await fsp.stat(mount); await fsp.access(mount, fs.constants.R_OK); return { path: relative(mount), available: stat.isDirectory(), readable: true, device: stat.dev.toString(), latencyMs: Date.now() - startedAt }; } catch (error: any) { return { path: relative(mount), available: false, readable: false, latencyMs: Date.now() - startedAt, error: error.code || error.message }; } }));
+      return res.json({ success: true, currentPath: relative(target), parentPath: target === root ? null : relative(path.dirname(target)), platform: process.platform, files, mounts });
     } catch (error) { return fail(res, error); }
   });
 
@@ -1015,26 +1049,26 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
 
   router.get('/delete-jobs/:id', (req, res) => {
     const job = deleteJobs.get(req.params.id) || deleteJobStore?.getDeleteJob(req.params.id);
-    const role = sessionRole(cookieToken(req)); if (!job || job.owner !== uploadOwner(req) && role !== 'admin' && role !== 'root') return res.status(404).json({ success: false, error: 'Không tìm thấy tác vụ xóa' });
+    const role = sessionRole(cookieToken(req)); if (!job || job.owner !== deletionOwner(req) && role !== 'admin' && role !== 'root') return res.status(404).json({ success: false, error: 'Không tìm thấy tác vụ xóa' });
     return res.json({ success: true, job: { ...job, owner: undefined, cancelRequested: undefined } });
   });
 
   router.post('/delete-jobs/:id/cancel', (req, res) => {
     const job = deleteJobs.get(req.params.id);
-    const role = sessionRole(cookieToken(req)); if (!job || job.owner !== uploadOwner(req) && role !== 'admin' && role !== 'root') return res.status(404).json({ success: false, error: 'Không tìm thấy tác vụ xóa' });
-    if (!['pending', 'running'].includes(job.state)) return res.status(409).json({ success: false, error: 'Tác vụ xóa đã kết thúc' });
+    const role = sessionRole(cookieToken(req)); if (!job || job.owner !== deletionOwner(req) && role !== 'admin' && role !== 'root') return res.status(404).json({ success: false, error: 'Không tìm thấy tác vụ xóa' });
+    if (!['pending', 'running'].includes(job.state)) return res.status(409).json({ success: false, error: 'Tác vụ xóa đã kết thúc hoặc đang dừng' });
     job.cancelRequested = true; job.message = 'Đang yêu cầu hủy'; persistDeleteJob(job);
     return res.json({ success: true, job: { ...job, owner: undefined, cancelRequested: undefined } });
   });
 
   router.get('/delete-jobs', (req, res) => {
-    const owner = uploadOwner(req); const role = sessionRole(cookieToken(req)); const jobs = deleteJobStore?.getDeleteJobs(role === 'admin' || role === 'root' ? undefined : owner, 200) || [...deleteJobs.values()].filter(job => role === 'admin' || role === 'root' || job.owner === owner);
+    const owner = deletionOwner(req); const role = sessionRole(cookieToken(req)); const jobs = deleteJobStore?.getDeleteJobs(role === 'admin' || role === 'root' ? undefined : owner, 200) || [...deleteJobs.values()].filter(job => role === 'admin' || role === 'root' || job.owner === owner);
     return res.json({ success: true, jobs: jobs.map(job => ({ ...job, owner: undefined, cancelRequested: undefined })) });
   });
 
   router.delete('/', async (req, res) => {
     try {
-      const owner = uploadOwner(req); const requestedIdempotencyKey = typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'].slice(0, 128) : undefined;
+      const owner = deletionOwner(req); const requestedIdempotencyKey = typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'].slice(0, 128) : undefined;
       const existing = requestedIdempotencyKey && (deleteJobStore?.getDeleteJobByIdempotency(owner, requestedIdempotencyKey) || [...deleteJobs.values()].find(job => job.owner === owner && job.idempotencyKey === requestedIdempotencyKey));
       if (existing) return res.status(202).json({ success: true, queued: true, jobId: existing.id, message: existing.message, idempotent: true });
       const policy = await verifyPolicyToken(req.query.path, req.headers['x-policy-token']);
@@ -1051,7 +1085,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
 
   router.post('/trash', async (req, res) => {
     try {
-      const owner = uploadOwner(req); const requestedIdempotencyKey = typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'].slice(0, 128) : undefined;
+      const owner = deletionOwner(req); const requestedIdempotencyKey = typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'].slice(0, 128) : undefined;
       const existing = requestedIdempotencyKey && (deleteJobStore?.getDeleteJobByIdempotency(owner, requestedIdempotencyKey) || [...deleteJobs.values()].find(job => job.owner === owner && job.idempotencyKey === requestedIdempotencyKey));
       if (existing) return res.status(202).json({ success: true, queued: true, jobId: existing.id, message: existing.message, idempotent: true });
       const values = pathsFrom(req.body);
@@ -1071,10 +1105,27 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
   router.get('/trash', async (_req, res) => {
     try {
       await reconcileTrash();
+      await enforceTrashRetention();
       await fsp.mkdir(trashRoot, { recursive: true }); const names = (await fsp.readdir(trashRoot)).filter(name => !name.endsWith('.json') && !name.endsWith('.pending') && name !== '.lost-found');
       const items = await Promise.all(names.map(async id => { try { const metadata = JSON.parse(await fsp.readFile(path.join(trashRoot, `${id}.json`), 'utf8')) as TrashMetadata; const details = await itemDetails(path.join(trashRoot, id)); return { id, ...metadata, name: path.basename(metadata.originalPath), isDirectory: details.isDirectory, size: details.size, mtime: details.mtime, mode: details.mode, permissions: details.permissions, platform: process.platform }; } catch (error: any) { return { id, error: error.message || 'Metadata thùng rác không hợp lệ' }; } }));
-      return res.json({ success: true, items: items.sort((a: any, b: any) => String(b.deletedAt || '').localeCompare(String(a.deletedAt || ''))) });
+      const inventory = await trashInventory(); const lostFoundRoot = path.join(trashRoot, '.lost-found'); const lostFound = await Promise.all((await fsp.readdir(lostFoundRoot).catch(() => [])).map(async id => ({ id, name: id.replace(/^\d+-/, ''), ...(await pathUsage(path.join(lostFoundRoot, id))) })));
+      return res.json({ success: true, items: items.sort((a: any, b: any) => String(b.deletedAt || '').localeCompare(String(a.deletedAt || ''))), usage: { bytes: inventory.reduce((sum, item) => sum + item.bytes, 0), entries: inventory.reduce((sum, item) => sum + item.entries, 0), maxBytes: trashMaxTotalBytes, retentionDays: trashRetentionDays }, lostFound });
     } catch (error) { return fail(res, error); }
+  });
+
+  router.get('/trash/lost-found/:id/download', async (req, res) => {
+    try { if (!['admin', 'root'].includes(String(sessionRole(cookieToken(req))))) throw httpError(403, 'Chỉ admin/root được truy cập lost-found'); if (!validName(req.params.id)) throw httpError(400, 'Mục lost-found không hợp lệ'); const target = path.join(trashRoot, '.lost-found', req.params.id); const stat = await fsp.stat(target); if (!stat.isFile()) throw httpError(400, 'Chỉ có thể tải trực tiếp tệp'); res.download(target, req.params.id.replace(/^\d+-/, '')); }
+    catch (error) { return fail(res, error); }
+  });
+
+  router.post('/trash/lost-found/:id/restore', async (req, res) => {
+    try { if (!['admin', 'root'].includes(String(sessionRole(cookieToken(req))))) throw httpError(403, 'Chỉ admin/root được khôi phục lost-found'); if (!validName(req.params.id)) throw httpError(400, 'Mục lost-found không hợp lệ'); const source = path.join(trashRoot, '.lost-found', req.params.id); const destination = resolveInsideRoot(req.body?.path); await ensureMissing(destination); await fsp.mkdir(path.dirname(destination), { recursive: true }); await safeMove(source, destination); await log(`Đã khôi phục lost-found: ${relative(destination)}`, clientIp(req), { action: 'lost_found_restore', level: 'warning' }); return res.json({ success: true, path: relative(destination) }); }
+    catch (error) { return fail(res, error); }
+  });
+
+  router.delete('/trash/lost-found/:id', async (req, res) => {
+    try { if (!['admin', 'root'].includes(String(sessionRole(cookieToken(req))))) throw httpError(403, 'Chỉ admin/root được xóa lost-found'); if (!validName(req.params.id)) throw httpError(400, 'Mục lost-found không hợp lệ'); await fsp.rm(path.join(trashRoot, '.lost-found', req.params.id), { recursive: true, force: false }); await log(`Đã xóa lost-found: ${req.params.id}`, clientIp(req), { action: 'lost_found_delete', level: 'critical' }); return res.json({ success: true }); }
+    catch (error) { return fail(res, error); }
   });
 
   router.post('/trash/restore', async (req, res) => {
@@ -1092,7 +1143,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
   });
 
   router.delete('/trash/empty', async (req, res) => {
-    try { await fsp.rm(trashRoot, { recursive: true, force: true }); await fsp.mkdir(trashRoot, { recursive: true }); await log('Đã dọn sạch thùng rác', clientIp(req)); return res.json({ success: true }); }
+    try { for (const item of await trashInventory()) await removeTrashOne(item.id); await log('Đã dọn sạch thùng rác', clientIp(req)); return res.json({ success: true }); }
     catch (error) { return fail(res, error); }
   });
 

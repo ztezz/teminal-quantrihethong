@@ -24,7 +24,7 @@ export function createOperationsRouter({ manager, authorize, log, deletionJobs }
     const type = typeof req.query.type === 'string' ? req.query.type : '';
     const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
     const offset = Math.max(0, Math.floor(Number(req.query.offset) || 0));
-    const fileJobs = (deletionJobs?.getDeleteJobs(undefined, 200) || []).map(job => ({ ...job, type: 'file_delete', path: job.paths.map(String).join(', '), source: 'api', createdBy: job.owner.slice(0, 12), requiredRole: 'admin', logs: [], result: { completed: job.completed, total: job.total, results: job.results } })) as Job[];
+    const fileJobs = (deletionJobs?.getDeleteJobs(undefined, 200) || []).map(job => ({ ...job, type: 'file_delete', path: job.paths.map(String).join(', '), source: 'api', createdBy: job.owner.slice(0, 12), requiredRole: 'admin', logs: [], result: { completed: job.completed, total: job.total, results: job.results } })) as Array<Job & { type: 'file_delete' }>;
     const filtered = [...manager.list(), ...fileJobs].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).filter(job => (!state || job.state === state) && (!type || job.type === type));
     return res.json({ success: true, jobs: filtered.slice(offset, offset + limit), total: filtered.length, offset, limit });
   });

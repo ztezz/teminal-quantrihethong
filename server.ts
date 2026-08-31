@@ -23,6 +23,7 @@ import path from 'path';
 import fs from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { createCorsMiddleware } from './lib/cors-config';
 
 dotenv.config({ path: path.join(process.cwd(), '.env'), override: false, quiet: true });
 
@@ -435,18 +436,7 @@ async function startServer() {
 
   if (backendOnly) {
     const allowedOrigin = runtimeConfig.frontendOrigin!;
-    expressApp.use((req, res, nextMiddleware) => {
-      res.setHeader('Vary', 'Origin');
-      res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
-      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Idempotency-Key, X-File-Name, X-Directory, X-Policy-Token, X-Upload-Offset, X-Quick-Share-Token');
-      res.setHeader('Access-Control-Expose-Headers', 'X-Request-ID');
-      if (req.method === 'OPTIONS') return res.sendStatus(204);
-      const isOnlyOfficeCallback = req.path.startsWith('/api/files/onlyoffice/callback/');
-      if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && req.headers.origin !== allowedOrigin && !isOnlyOfficeCallback) return res.status(403).json({ success: false, error: 'Invalid request origin' });
-      nextMiddleware();
-    });
+    expressApp.use(createCorsMiddleware(allowedOrigin));
   }
 
   expressApp.use('/api', (_req, res, nextMiddleware) => { res.setHeader('Cache-Control', 'no-store'); nextMiddleware(); });
@@ -869,6 +859,21 @@ async function startServer() {
     }
   });
 
+  expressApp.get('/api/metrics/prometheus', (req, res) => {
+    if (!authenticated(req)) return res.status(401).type('text/plain').send('Unauthorized\n');
+    const requestSnapshot = requestMetrics.snapshot();
+    const lines = [
+      '# HELP terminal_file_delete_total Total file deletion operations', '# TYPE terminal_file_delete_total counter', `terminal_file_delete_total ${fileDeletionMetrics.total}`,
+      '# HELP terminal_file_delete_failed_total Failed file deletion operations', '# TYPE terminal_file_delete_failed_total counter', `terminal_file_delete_failed_total ${fileDeletionMetrics.failed}`,
+      '# HELP terminal_file_delete_queue_depth Current deletion queue depth', '# TYPE terminal_file_delete_queue_depth gauge', `terminal_file_delete_queue_depth ${fileDeletionMetrics.queueDepth}`,
+      '# HELP terminal_trash_orphans_total Trash orphan records detected', '# TYPE terminal_trash_orphans_total counter', `terminal_trash_orphans_total ${fileDeletionMetrics.orphans}`,
+      '# HELP terminal_file_delete_duration_milliseconds_total Total deletion duration', '# TYPE terminal_file_delete_duration_milliseconds_total counter', `terminal_file_delete_duration_milliseconds_total ${fileDeletionMetrics.totalDurationMs}`,
+      '# HELP terminal_http_requests_total Total API requests', '# TYPE terminal_http_requests_total counter', `terminal_http_requests_total ${requestSnapshot.requests}`,
+      '# HELP terminal_http_errors_total Total API errors', '# TYPE terminal_http_errors_total counter', `terminal_http_errors_total ${requestSnapshot.errors}`
+    ];
+    return res.type('text/plain; version=0.0.4; charset=utf-8').send(`${lines.join('\n')}\n`);
+  });
+
   // Log logout event
   expressApp.post('/api/auth/logout', async (req, res) => {
     try {
@@ -1089,6 +1094,7 @@ async function startServer() {
   expressApp.use('/api/files', createFileManagerRouter({
     hasSession,
     sessionRole,
+    sessionUserId: token => { const session = db.getSession(token); return session?.userId || null; },
     hasStepUp,
     consumePreviewTicket,
     log: async (event, ip, details) => audit({ category: 'file', action: details?.action || event.split(':', 1)[0].slice(0, 80), event, level: details?.level || (/xóa|metadata|quyền/i.test(event) ? 'warning' : 'info'), result: details?.result || 'success', ip, metadata: details?.metadata }),

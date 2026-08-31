@@ -65,6 +65,7 @@ export interface FileWorkspaceData {
   searchTruncated: boolean;
   uploadProgress: Record<string, number>;
   previewTicket: string | null;
+  mounts: Array<{ path: string; available: boolean; readable: boolean; latencyMs: number; error?: string }>;
   activeDeleteJob: { id: string; state: string; progress: number; message: string } | null;
 }
 export interface FileWorkspaceActions {
@@ -145,6 +146,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
     uploadProgress,
     previewTicket,
     activeDeleteJob,
+    mounts,
   } = data;
   const currentUser = role ? { role } : null;
   const {
@@ -304,6 +306,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
             </button>
           </div>
         )}
+        {mounts.length > 0 && <div className="grid gap-2 sm:grid-cols-2">{mounts.map(mount => <div key={mount.path} className={`rounded border p-3 text-xs ${mount.available ? "border-emerald-500/20 bg-emerald-500/5" : "border-red-500/20 bg-red-500/5"}`}><div className="flex items-center justify-between"><span className="font-mono text-white">{mount.path}</span><span className={mount.available ? "text-emerald-400" : "text-red-400"}>{mount.available ? "Sẵn sàng" : "Mất kết nối"}</span></div><p className="mt-1 font-mono text-[10px] text-slate-500">{mount.latencyMs} ms{mount.error ? ` · ${mount.error}` : " · health check chỉ đọc"}</p></div>)}</div>}
         {activeDeleteJob && (
           <div className="space-y-2 rounded-lg border border-rose-500/25 bg-rose-500/8 p-4 font-mono">
             <div className="flex items-center gap-3 text-xs">

@@ -13,6 +13,8 @@ const typeLabels: Record<JobType, string> = {
 const stateLabels: Record<JobState, string> = {
   pending: "Đang chờ",
   running: "Đang chạy",
+  stopping: "Đang dừng",
+  timed_out: "Quá thời gian",
   success: "Hoàn tất",
   failure: "Thất bại",
   cancelled: "Đã hủy",
@@ -20,6 +22,8 @@ const stateLabels: Record<JobState, string> = {
 const stateStyles: Record<JobState, string> = {
   pending: "border-amber-400/20 bg-amber-400/5 text-amber-300",
   running: "border-sky-400/20 bg-sky-400/5 text-sky-300",
+  stopping: "border-amber-400/20 bg-amber-400/5 text-amber-300",
+  timed_out: "border-orange-400/20 bg-orange-400/5 text-orange-300",
   success: "border-emerald-400/20 bg-emerald-400/5 text-emerald-300",
   failure: "border-rose-400/20 bg-rose-400/5 text-rose-300",
   cancelled: "border-slate-400/20 bg-slate-400/5 text-slate-400",
@@ -38,7 +42,7 @@ function formatDate(value?: string) {
 }
 
 function StateIcon({ state }: { state: JobState }) {
-  if (state === "running") return <LoaderCircle className="h-4 w-4 animate-spin" />;
+  if (state === "running" || state === "stopping") return <LoaderCircle className="h-4 w-4 animate-spin" />;
   if (state === "success") return <CheckCircle2 className="h-4 w-4" />;
   if (state === "failure") return <XCircle className="h-4 w-4" />;
   if (state === "cancelled") return <Ban className="h-4 w-4" />;

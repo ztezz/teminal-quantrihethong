@@ -62,6 +62,8 @@ export interface TrashItem {
   name?: string;
   deletedAt?: string;
 }
+export interface LostFoundItem { id: string; name: string; entries: number; bytes: number; truncated: boolean }
+export interface TrashUsage { bytes: number; entries: number; maxBytes: number; retentionDays: number }
 
 export type ActiveTab =
   | "overview"
@@ -135,7 +137,7 @@ export interface SqliteFile {
 }
 
 export type JobType = "sqlite_backup" | "sqlite_integrity" | "sqlite_vacuum" | "file_delete";
-export type JobState = "pending" | "running" | "success" | "failure" | "cancelled";
+export type JobState = "pending" | "running" | "stopping" | "timed_out" | "success" | "failure" | "cancelled";
 
 export interface JobLog {
   timestamp: string;
