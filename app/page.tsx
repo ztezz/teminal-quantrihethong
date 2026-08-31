@@ -29,7 +29,6 @@ import { SettingsWorkspace } from "./components/control-center/workspaces/Settin
 import { FileWorkspace } from "./components/control-center/workspaces/FileWorkspace";
 import { OverviewWorkspace } from "./components/control-center/workspaces/OverviewWorkspace";
 import { JobsWorkspace } from "./components/control-center/workspaces/JobsWorkspace";
-import { NotesWorkspace } from "./components/control-center/workspaces/NotesWorkspace";
 import { apiClient } from "@/lib/client/api";
 import { applyUiPreferences } from "@/lib/client/preferences";
 import { useMetricsPolling } from "@/hooks/use-operations-data";
@@ -2755,13 +2754,12 @@ export default function Home() {
           "jobs",
           "logs",
           "files",
-          "notes",
           "settings",
         ];
         const tab = tabs[Number(event.key) - 1];
         if (
           tab &&
-          (["files", "notes", "settings"].includes(tab) ||
+          (["files", "settings"].includes(tab) ||
             ["admin", "root"].includes(currentUser?.role || ""))
         ) {
           event.preventDefault();
@@ -2865,15 +2863,8 @@ export default function Home() {
       run: () => navigateWorkspace("files"),
     },
     {
-      label: "Sổ ghi chú",
-      hint: "Alt+8",
-      keywords: "notes notebook passwords reminders encrypted vault",
-      allowed: true,
-      run: () => navigateWorkspace("notes"),
-    },
-    {
       label: "Cấu hình",
-      hint: "Alt+9",
+      hint: "Alt+8",
       keywords: "settings security",
       allowed: true,
       run: () => navigateWorkspace("settings"),
@@ -3153,10 +3144,6 @@ export default function Home() {
                           notify={notify}
                         />
                       )}
-
-                    {activeTab === "notes" && (
-                      <NotesWorkspace notify={notify} />
-                    )}
 
                     {/* TAB 3: Admin Configurations & Security Settings */}
                     {activeTab === "settings" && (

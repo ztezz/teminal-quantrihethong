@@ -25,8 +25,7 @@ export function getSavedActiveTab(): ActiveTab {
     saved === "settings" ||
     saved === "files" ||
     saved === "system" ||
-    saved === "sqlite" ||
-    saved === "notes"
+    saved === "sqlite"
     ? saved
     : "overview";
 }
