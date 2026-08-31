@@ -52,6 +52,7 @@ type Options = {
   rootDir?: string;
   trashDir?: string;
   snapshotDir?: string;
+  directDeletePaths?: string[];
   previewFrameAncestor?: string;
   onlyOffice?: { documentServerUrl: string; publicApiUrl: string; jwtSecret: string };
 };
@@ -80,12 +81,20 @@ function modeInfo(mode: number) {
   };
 }
 
-export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, consumePreviewTicket, log, rootDir, trashDir, snapshotDir, previewFrameAncestor = "'self'", onlyOffice }: Options) {
+export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, consumePreviewTicket, log, rootDir, trashDir, snapshotDir, directDeletePaths = [], previewFrameAncestor = "'self'", onlyOffice }: Options) {
   const router = Router();
   const root = path.resolve(rootDir || process.cwd());
   const trashRoot = path.resolve(trashDir || path.join(process.cwd(), '.terminal-trash'));
   const snapshotRoot = path.resolve(snapshotDir || path.join(process.cwd(), '.terminal-snapshots'));
   const uploadRoot = path.join(root, '.terminal-uploads');
+  const directDeleteRoots = directDeletePaths.map(value => {
+    const configuredPath = value.trim();
+    if (!configuredPath || path.isAbsolute(configuredPath)) throw new Error('FILE_MANAGER_DIRECT_DELETE_PATHS chỉ chấp nhận đường dẫn tương đối không rỗng');
+    const target = path.resolve(root, configuredPath);
+    const relativeTarget = path.relative(root, target);
+    if (!relativeTarget || relativeTarget === '..' || relativeTarget.startsWith('..' + path.sep) || path.isAbsolute(relativeTarget)) throw new Error('FILE_MANAGER_DIRECT_DELETE_PATHS phải nằm bên trong FILE_MANAGER_ROOT');
+    return target;
+  });
   const reservedUploadTargets = new Map<string, string>();
   const canonicalRoot = fs.realpathSync(root);
   const maxSnapshotFileSize = Number(process.env.SNAPSHOT_MAX_FILE_MB || 100) * 1024 * 1024;
@@ -222,8 +231,9 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
     if (target === root) throw httpError(400, 'Không thể xóa thư mục gốc');
     const targetStat = await fsp.lstat(target);
     await fsp.mkdir(trashRoot, { recursive: true });
+    const configuredForDirectDelete = directDeleteRoots.some(configuredRoot => target === configuredRoot || target.startsWith(configuredRoot + path.sep));
     // Mounted network filesystems cannot reliably be moved into a local trash directory.
-    if (targetStat.dev !== (await fsp.stat(trashRoot)).dev) {
+    if (configuredForDirectDelete || targetStat.dev !== (await fsp.stat(trashRoot)).dev) {
       await fsp.rm(target, { recursive: true, force: false });
       return { path: relative(target), permanentlyDeleted: true };
     }

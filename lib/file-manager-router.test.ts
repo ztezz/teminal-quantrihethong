@@ -9,7 +9,7 @@ import { createFileManagerRouter } from './file-manager-router';
 
 type Role = 'viewer' | 'operator' | 'admin' | 'root';
 
-async function fixture(trashDir?: string) {
+async function fixture(trashDir?: string, directDeletePaths?: string[]) {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'file-manager-router-'));
   const root = path.join(temporaryDirectory, 'root');
   const trash = trashDir || path.join(temporaryDirectory, 'trash');
@@ -29,6 +29,7 @@ async function fixture(trashDir?: string) {
     rootDir: root,
     trashDir: trash,
     snapshotDir: snapshots,
+    directDeletePaths,
     hasSession: token => token === 'valid-token',
     sessionRole: token => token === 'valid-token' ? role : null,
     hasStepUp: () => stepUp,
@@ -268,6 +269,21 @@ test('requires step-up authorization for single and bulk deletion', async () => 
     assert.equal(bulk.status, 428);
     assert.equal(bulk.body.code, 'STEP_UP_REQUIRED');
     assert.equal(fs.existsSync(path.join(context.root, 'bulk.txt')), true);
+  } finally { await context.close(); }
+});
+
+test('permanently deletes configured paths without relying on filesystem device detection', async () => {
+  const context = await fixture(undefined, ['network-drive']);
+  try {
+    fs.mkdirSync(path.join(context.root, 'network-drive', 'movies'), { recursive: true });
+    fs.writeFileSync(path.join(context.root, 'network-drive', 'movies', 'video.mp4'), 'video');
+
+    const response = await context.request(`/?path=${encodeURIComponent('network-drive/movies/video.mp4')}`, { method: 'DELETE' });
+    assert.equal(response.status, 200);
+    assert.equal(response.body.permanentlyDeleted, true);
+    assert.equal(fs.existsSync(path.join(context.root, 'network-drive', 'movies', 'video.mp4')), false);
+    assert.equal(fs.existsSync(context.snapshots), false);
+    assert.deepEqual(fs.readdirSync(context.trash), []);
   } finally { await context.close(); }
 });
 

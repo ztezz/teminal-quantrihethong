@@ -119,6 +119,7 @@ Mở `http://localhost:3000`.
 | `FILE_MANAGER_ROOT` | Backend | Thư mục gốc hiển thị trong File Manager. Dùng `/` để quản lý toàn máy chủ. |
 | `FILE_MANAGER_TRASH_DIR` | Backend | Nơi lưu thùng rác, phải có quyền ghi. |
 | `FILE_MANAGER_SNAPSHOT_DIR` | Backend | Kho snapshot nội bộ, không đặt trong thư mục được web server phục vụ. |
+| `FILE_MANAGER_DIRECT_DELETE_PATHS` | Backend | Danh sách đường dẫn tương đối với `FILE_MANAGER_ROOT`, phân cách bằng dấu phẩy. Mọi mục trong các nhánh này luôn bị xóa trực tiếp, không snapshot và không vào thùng rác. |
 | `QUICK_SHARE_DIR` | Backend | Thư mục tạm riêng cho truyền file công khai, mặc định là `terminal-quick-share` trong thư mục tạm hệ điều hành. Không đặt trong File Manager hoặc thư mục web server phục vụ. |
 | `QUICK_SHARE_MAX_FILE_MB` | Backend | Dung lượng tối đa của file truyền nhanh, mặc định và tối đa `2048` (2 GB). |
 | `QUICK_SHARE_TTL_MINUTES` | Backend | Thời gian tồn tại của file truyền nhanh, mặc định và tối đa `1440` (24 giờ). |
@@ -276,6 +277,7 @@ Nếu không cần quản lý toàn filesystem, nên chạy service bằng user 
 ```env
 FILE_MANAGER_ROOT=/home/admin
 FILE_MANAGER_TRASH_DIR=/home/admin/.terminal-trash
+FILE_MANAGER_DIRECT_DELETE_PATHS=gdrive
 ```
 
 ## Reverse Proxy Nginx
