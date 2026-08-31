@@ -396,6 +396,7 @@ async function startServer() {
   if (trustProxy) expressApp.set('trust proxy', /^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy);
   const httpServer = createServer(expressApp);
   const requestMetrics = new RequestMetricsCollector();
+  const fileDeletionMetrics = { total: 0, failed: 0, totalDurationMs: 0, queueDepth: 0, orphans: 0 };
   const authKeyLength = process.env.AUTH_ENCRYPTION_KEY?.length || 0;
   console.log(`[SECURITY] AUTH_ENCRYPTION_KEY: ${authKeyLength >= 32 ? 'configured' : authKeyLength ? `invalid (${authKeyLength} characters)` : 'missing'}`);
   
@@ -861,6 +862,7 @@ async function startServer() {
         diskUsedGB: metrics.disk.usedGB,
         diskTotalGB: metrics.disk.totalGB,
         diskPercent: metrics.disk.percent
+        ,fileDeletion: { ...fileDeletionMetrics, averageDurationMs: fileDeletionMetrics.total ? Math.round(fileDeletionMetrics.totalDurationMs / fileDeletionMetrics.total) : 0 }
       });
     } catch (error: any) {
       return res.status(500).json({ success: false, error: error.message });
@@ -1094,6 +1096,9 @@ async function startServer() {
     trashDir: FILE_MANAGER_TRASH_DIR,
     snapshotDir: FILE_MANAGER_SNAPSHOT_DIR,
     directDeletePaths: FILE_MANAGER_DIRECT_DELETE_PATHS,
+    deleteJobStore: db,
+    deletionMetrics: { record: event => { if (event.durationMs || !event.orphaned) { fileDeletionMetrics.total++; if (!event.success) fileDeletionMetrics.failed++; fileDeletionMetrics.totalDurationMs += event.durationMs; } fileDeletionMetrics.orphans += event.orphaned || 0; }, queueDepth: value => { fileDeletionMetrics.queueDepth = value; } },
+    alert: (event, details) => jobManager.sendOperationalAlert(event, details),
     previewFrameAncestor: runtimeConfig.frontendOrigin || "'self'",
     onlyOffice
   }));
@@ -1110,6 +1115,7 @@ async function startServer() {
 
   expressApp.use('/api/jobs', createOperationsRouter({
     manager: jobManager,
+    deletionJobs: db,
     authorize: (req, res, minimum) => requireCapability(req, res, minimum === 'root' ? 'sqlite:dangerous' : 'jobs:manage'),
     log: (req, action, metadata) => auditRequest(req, { category: 'operations', action, event: action === 'job_create' ? 'Background job created' : 'Background job cancellation requested', level: 'warning', metadata })
   }));

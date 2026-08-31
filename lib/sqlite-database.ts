@@ -8,6 +8,7 @@ export type StoredSession = { tokenHash: string; userId: string; createdAt: numb
 export type AuditLevel = 'info' | 'warning' | 'critical';
 export type AuditResult = 'success' | 'failure';
 export type AuditEntry = { id: number; category: string; action: string; event: string; level: AuditLevel; result: AuditResult; ip: string; sessionId?: string; metadata?: Record<string, unknown>; timestamp: string; previousHash: string; hash: string };
+export type StoredDeleteJob = { id: string; owner: string; state: string; progress: number; completed: number; total: number; message: string; paths: unknown[]; results: Record<string, unknown>[]; createdAt: string; finishedAt?: string; cancelRequested: boolean; idempotencyKey?: string };
 
 type LegacyData = {
   settings?: Record<string, string>;
@@ -71,6 +72,14 @@ export class SqliteDatabase {
         timestamp TEXT NOT NULL, previous_hash TEXT NOT NULL, hash TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS audit_logs_timestamp_idx ON audit_logs(timestamp DESC);
+      CREATE TABLE IF NOT EXISTS file_delete_jobs (
+        id TEXT PRIMARY KEY, owner TEXT NOT NULL, state TEXT NOT NULL, progress INTEGER NOT NULL,
+        completed INTEGER NOT NULL, total INTEGER NOT NULL, message TEXT NOT NULL, paths TEXT NOT NULL,
+        results TEXT NOT NULL, created_at TEXT NOT NULL, finished_at TEXT, cancel_requested INTEGER NOT NULL,
+        idempotency_key TEXT
+      );
+      CREATE INDEX IF NOT EXISTS file_delete_jobs_owner_created_idx ON file_delete_jobs(owner, created_at DESC);
+      CREATE UNIQUE INDEX IF NOT EXISTS file_delete_jobs_owner_idempotency_idx ON file_delete_jobs(owner, idempotency_key) WHERE idempotency_key IS NOT NULL;
     `);
   }
 
@@ -231,6 +240,15 @@ export class SqliteDatabase {
   getSession(token: string) { const row = this.database.prepare('SELECT * FROM sessions WHERE token_hash = ? AND expires_at > ?').get(crypto.createHash('sha256').update(token).digest('hex'), Date.now()) as Record<string, unknown> | undefined; return row ? this.rowToSession(row) : undefined; }
   getSessionByHash(tokenHash: string) { const row = this.database.prepare('SELECT * FROM sessions WHERE token_hash = ? AND expires_at > ?').get(tokenHash, Date.now()) as Record<string, unknown> | undefined; return row ? this.rowToSession(row) : undefined; }
   getUsers() { return (this.database.prepare('SELECT * FROM users ORDER BY created_at').all() as Record<string, unknown>[]).map(row => this.rowToUser(row)); }
+  saveDeleteJob(job: StoredDeleteJob) { this.database.prepare('INSERT INTO file_delete_jobs (id, owner, state, progress, completed, total, message, paths, results, created_at, finished_at, cancel_requested, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,progress=excluded.progress,completed=excluded.completed,total=excluded.total,message=excluded.message,results=excluded.results,finished_at=excluded.finished_at,cancel_requested=excluded.cancel_requested').run(job.id, job.owner, job.state, job.progress, job.completed, job.total, job.message, JSON.stringify(job.paths), JSON.stringify(job.results), job.createdAt, job.finishedAt ?? null, job.cancelRequested ? 1 : 0, job.idempotencyKey ?? null); }
+  getDeleteJobs(owner?: string, limit = 200) {
+    const rows = (owner ? this.database.prepare('SELECT * FROM file_delete_jobs WHERE owner = ? ORDER BY created_at DESC LIMIT ?').all(owner, limit) : this.database.prepare('SELECT * FROM file_delete_jobs ORDER BY created_at DESC LIMIT ?').all(limit)) as Record<string, unknown>[];
+    return rows.map(row => ({ id: String(row.id), owner: String(row.owner), state: String(row.state), progress: Number(row.progress), completed: Number(row.completed), total: Number(row.total), message: String(row.message), paths: parseJson<unknown[]>(row.paths, []), results: parseJson<Record<string, unknown>[]>(row.results, []), createdAt: String(row.created_at), finishedAt: row.finished_at ? String(row.finished_at) : undefined, cancelRequested: Boolean(row.cancel_requested), idempotencyKey: row.idempotency_key ? String(row.idempotency_key) : undefined } satisfies StoredDeleteJob));
+  }
+  getDeleteJob(id: string) { const row = this.database.prepare('SELECT * FROM file_delete_jobs WHERE id = ?').get(id) as Record<string, unknown> | undefined; return row ? this.getDeleteJobs(String(row.owner), 5000).find(job => job.id === id) : undefined; }
+  getDeleteJobByIdempotency(owner: string, key: string) { return this.getDeleteJobs(owner, 5000).find(job => job.idempotencyKey === key); }
+  interruptDeleteJobs() { this.database.prepare("UPDATE file_delete_jobs SET state='failure', progress=100, message='Interrupted by server restart', finished_at=? WHERE state IN ('pending','running')").run(new Date().toISOString()); }
+  pruneDeleteJobs(limit = 500) { this.database.prepare("DELETE FROM file_delete_jobs WHERE id IN (SELECT id FROM file_delete_jobs WHERE state NOT IN ('pending','running') ORDER BY created_at DESC LIMIT -1 OFFSET ?)").run(limit); }
   getUserById(id: string) { const row = this.database.prepare('SELECT * FROM users WHERE id = ?').get(id) as Record<string, unknown> | undefined; return row ? this.rowToUser(row) : undefined; }
   getUserByName(username: string) { const row = this.database.prepare('SELECT * FROM users WHERE username = ? COLLATE NOCASE').get(username) as Record<string, unknown> | undefined; return row ? this.rowToUser(row) : undefined; }
   saveUser(user: StoredUser) { this.database.prepare('INSERT INTO users (id, username, password_hash, legacy_salt, role, enabled, created_at, totp_secret, recovery_codes, pending_totp_secret) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET username=excluded.username,password_hash=excluded.password_hash,legacy_salt=excluded.legacy_salt,role=excluded.role,enabled=excluded.enabled,created_at=excluded.created_at,totp_secret=excluded.totp_secret,recovery_codes=excluded.recovery_codes,pending_totp_secret=excluded.pending_totp_secret').run(user.id, user.username, user.passwordHash, user.legacySalt ?? null, user.role, user.enabled ? 1 : 0, user.createdAt, user.totpSecret ?? null, user.recoveryCodes ? JSON.stringify(user.recoveryCodes) : null, user.pendingTotpSecret ?? null); }

@@ -6,7 +6,7 @@ import { backup, DatabaseSync } from 'node:sqlite';
 const fsp = fs.promises;
 const SQLITE_EXTENSIONS = new Set(['.sqlite', '.sqlite3', '.db']);
 
-export type JobType = 'sqlite_backup' | 'sqlite_integrity' | 'sqlite_vacuum';
+export type JobType = 'sqlite_backup' | 'sqlite_integrity' | 'sqlite_vacuum' | 'file_delete';
 export type JobState = 'pending' | 'running' | 'success' | 'failure' | 'cancelled';
 export type JobSource = 'api' | 'schedule';
 export type JobLog = { timestamp: string; message: string };
@@ -183,6 +183,14 @@ export class JobManager {
   async waitForIdle() {
     await this.processPromise;
     await this.persistChain;
+  }
+
+  async sendOperationalAlert(event: string, details: Record<string, unknown>) {
+    if (!this.webhook) return;
+    try {
+      const response = await this.fetchImpl(this.webhook, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(5000), headers: { 'content-type': 'application/json' }, body: JSON.stringify({ event, details, timestamp: new Date().toISOString() }) });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    } catch (error) { console.error('[JOBS] Operational alert could not be delivered:', errorMessage(error)); }
   }
 
   private async load() {

@@ -134,7 +134,7 @@ export interface SqliteFile {
   protected: boolean;
 }
 
-export type JobType = "sqlite_backup" | "sqlite_integrity" | "sqlite_vacuum";
+export type JobType = "sqlite_backup" | "sqlite_integrity" | "sqlite_vacuum" | "file_delete";
 export type JobState = "pending" | "running" | "success" | "failure" | "cancelled";
 
 export interface JobLog {

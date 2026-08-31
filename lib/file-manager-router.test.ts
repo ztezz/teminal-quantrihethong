@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -54,11 +55,23 @@ async function fixture(trashDir?: string, directDeletePaths?: string[]) {
     const contentType = response.headers.get('content-type') || '';
     return { status: response.status, headers: response.headers, body: text ? contentType.includes('application/json') ? JSON.parse(text) : text : null };
   };
+  const deletePath = async (filePath: string) => {
+    const plan = await request('/delete-plan', { method: 'POST', body: JSON.stringify({ paths: [filePath] }) });
+    const response = await request(`/?path=${encodeURIComponent(filePath)}`, { method: 'DELETE', headers: { 'x-policy-token': plan.body.plans[0].policyToken, 'idempotency-key': crypto.randomUUID() } });
+    if (!response.body.queued) return response;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const current = await request(`/delete-jobs/${response.body.jobId}`);
+      if (!['pending', 'running'].includes(current.body.job.state)) return { status: current.body.job.state === 'success' ? 200 : 500, headers: current.headers, body: { success: current.body.job.state === 'success', ...current.body.job.results[0] } };
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error('Delete job did not finish');
+  };
   return {
     root,
     trash,
     snapshots,
     request,
+    deletePath,
     setRole: (value: Role) => { role = value; },
     setStepUp: (value: boolean) => { stepUp = value; },
     close: async () => {
@@ -245,7 +258,7 @@ test('supports create, write, move, and trash flow', async () => {
     assert.equal(moved.status, 200);
     assert.equal(moved.body.path, 'documents/final.txt');
 
-    const trashed = await context.request(`/?path=${encodeURIComponent('documents/final.txt')}`, { method: 'DELETE' });
+    const trashed = await context.deletePath('documents/final.txt');
     assert.equal(trashed.status, 200);
     assert.equal(fs.existsSync(path.join(context.root, 'documents', 'final.txt')), false);
     assert.equal(fs.existsSync(path.join(context.trash, trashed.body.id)), true);
@@ -278,12 +291,40 @@ test('permanently deletes configured paths without relying on filesystem device 
     fs.mkdirSync(path.join(context.root, 'network-drive', 'movies'), { recursive: true });
     fs.writeFileSync(path.join(context.root, 'network-drive', 'movies', 'video.mp4'), 'video');
 
-    const response = await context.request(`/?path=${encodeURIComponent('network-drive/movies/video.mp4')}`, { method: 'DELETE' });
+    const response = await context.deletePath('network-drive/movies/video.mp4');
     assert.equal(response.status, 200);
     assert.equal(response.body.permanentlyDeleted, true);
     assert.equal(fs.existsSync(path.join(context.root, 'network-drive', 'movies', 'video.mp4')), false);
     assert.equal(fs.existsSync(context.snapshots), false);
     assert.deepEqual(fs.readdirSync(context.trash), []);
+  } finally { await context.close(); }
+});
+
+test('protects configured direct-delete roots', async () => {
+  const context = await fixture(undefined, ['network-drive']);
+  try {
+    fs.mkdirSync(path.join(context.root, 'network-drive'));
+    const response = await context.request('/delete-plan', { method: 'POST', body: JSON.stringify({ paths: ['network-drive'] }) });
+    assert.equal(response.status, 200);
+    assert.equal(response.body.success, false);
+    assert.equal(response.body.plans[0].code, 'PROTECTED_DELETE_ROOT');
+    assert.equal(fs.existsSync(path.join(context.root, 'network-drive')), true);
+  } finally { await context.close(); }
+});
+
+test('returns the existing deletion job for a repeated idempotency key', async () => {
+  const context = await fixture(undefined, ['network-drive']);
+  try {
+    fs.mkdirSync(path.join(context.root, 'network-drive'));
+    fs.writeFileSync(path.join(context.root, 'network-drive', 'duplicate.txt'), 'data');
+    const plan = await context.request('/delete-plan', { method: 'POST', body: JSON.stringify({ paths: ['network-drive/duplicate.txt'] }) });
+    const headers = { 'x-policy-token': plan.body.plans[0].policyToken, 'idempotency-key': 'same-request' };
+    const first = await context.request('/?path=network-drive%2Fduplicate.txt', { method: 'DELETE', headers });
+    const second = await context.request('/?path=network-drive%2Fduplicate.txt', { method: 'DELETE', headers });
+    assert.equal(first.status, 202);
+    assert.equal(second.status, 202);
+    assert.equal(second.body.jobId, first.body.jobId);
+    assert.equal(second.body.idempotent, true);
   } finally { await context.close(); }
 });
 
@@ -303,6 +344,19 @@ test('preflights mixed deletion policies before deleting anything', async () => 
   } finally { await context.close(); }
 });
 
+test('rejects deletion when the file changes after planning', async () => {
+  const context = await fixture();
+  try {
+    fs.writeFileSync(path.join(context.root, 'changing.txt'), 'first');
+    const plan = await context.request('/delete-plan', { method: 'POST', body: JSON.stringify({ paths: ['changing.txt'] }) });
+    fs.writeFileSync(path.join(context.root, 'changing.txt'), 'second version');
+    const response = await context.request('/?path=changing.txt', { method: 'DELETE', headers: { 'x-policy-token': plan.body.plans[0].policyToken } });
+    assert.equal(response.status, 409);
+    assert.equal(response.body.code, 'FILE_CHANGED');
+    assert.equal(fs.existsSync(path.join(context.root, 'changing.txt')), true);
+  } finally { await context.close(); }
+});
+
 test('reconciles orphaned trash metadata and data', async () => {
   const context = await fixture();
   try {
@@ -313,7 +367,8 @@ test('reconciles orphaned trash metadata and data', async () => {
     const response = await context.request('/trash');
     assert.equal(response.status, 200);
     assert.deepEqual(response.body.items, []);
-    assert.deepEqual(fs.readdirSync(context.trash), []);
+    assert.deepEqual(fs.readdirSync(context.trash), ['.lost-found']);
+    assert.equal(fs.readFileSync(path.join(context.trash, '.lost-found', fs.readdirSync(path.join(context.trash, '.lost-found'))[0]), 'utf8'), 'orphan');
   } finally { await context.close(); }
 });
 
@@ -322,7 +377,8 @@ test('runs direct directory deletion as a background job', async () => {
   try {
     fs.mkdirSync(path.join(context.root, 'network-drive', 'folder'), { recursive: true });
     fs.writeFileSync(path.join(context.root, 'network-drive', 'folder', 'remote.txt'), 'remote');
-    const queued = await context.request(`/?path=${encodeURIComponent('network-drive/folder')}`, { method: 'DELETE' });
+    const plan = await context.request('/delete-plan', { method: 'POST', body: JSON.stringify({ paths: ['network-drive/folder'] }) });
+    const queued = await context.request(`/?path=${encodeURIComponent('network-drive/folder')}`, { method: 'DELETE', headers: { 'x-policy-token': plan.body.plans[0].policyToken, 'idempotency-key': crypto.randomUUID() } });
     assert.equal(queued.status, 202);
     assert.equal(queued.body.queued, true);
 
@@ -357,7 +413,7 @@ test('permanently deletes files when the trash directory is on another filesyste
       return;
     }
     fs.writeFileSync(path.join(context.root, 'remote-file.txt'), 'remote content');
-    const response = await context.request('/?path=remote-file.txt', { method: 'DELETE' });
+    const response = await context.deletePath('remote-file.txt');
     assert.equal(response.status, 200);
     assert.equal(response.body.permanentlyDeleted, true);
     assert.equal(fs.existsSync(path.join(context.root, 'remote-file.txt')), false);

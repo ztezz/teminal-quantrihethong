@@ -119,3 +119,14 @@ test('audit retention applies age and count limits and refuses a broken chain', 
   assert.deepEqual(valid.verifyAuditIntegrity(), { valid: true, checked: 0 });
   valid.close();
 });
+test('persists deletion jobs, enforces idempotency, and marks interrupted work', () => {
+  const database = new SqliteDatabase(':memory:');
+  const job = { id: 'delete-1', owner: 'owner', state: 'running', progress: 25, completed: 1, total: 4, message: 'Running', paths: ['gdrive/folder'], results: [{ success: true, path: 'gdrive/file' }], createdAt: new Date().toISOString(), cancelRequested: false, idempotencyKey: 'request-1' };
+  database.saveDeleteJob(job);
+  assert.equal(database.getDeleteJob('delete-1')?.progress, 25);
+  assert.equal(database.getDeleteJobByIdempotency('owner', 'request-1')?.id, 'delete-1');
+  database.interruptDeleteJobs();
+  assert.equal(database.getDeleteJob('delete-1')?.state, 'failure');
+  assert.equal(database.getDeleteJob('delete-1')?.message, 'Interrupted by server restart');
+  database.close();
+});

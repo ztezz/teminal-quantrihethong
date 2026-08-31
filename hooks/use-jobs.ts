@@ -64,9 +64,11 @@ export function useJobs(active: boolean) {
   };
 
   const cancel = async (job: Job) => {
-    const response = await apiClient.request<JobResponse>(`/api/jobs/${encodeURIComponent(job.id)}/cancel`, { method: "POST" });
-    setJobs((current) => current.map((item) => item.id === job.id ? response.job : item));
-    return response.job;
+    const endpoint = job.type === "file_delete" ? `/api/files/delete-jobs/${encodeURIComponent(job.id)}/cancel` : `/api/jobs/${encodeURIComponent(job.id)}/cancel`;
+    const response = await apiClient.request<JobResponse>(endpoint, { method: "POST" });
+    const updated = job.type === "file_delete" ? { ...job, ...response.job, type: "file_delete" as const } : response.job;
+    setJobs((current) => current.map((item) => item.id === job.id ? updated : item));
+    return updated;
   };
 
   return { jobs, total, stateFilter, setStateFilter, typeFilter, setTypeFilter, selectedId, setSelectedId, loading, refreshing, error, refresh, create, cancel };

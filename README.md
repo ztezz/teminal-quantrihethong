@@ -122,6 +122,11 @@ Mở `http://localhost:3000`.
 | `FILE_MANAGER_DIRECT_DELETE_PATHS` | Backend | Danh sách đường dẫn tương đối với `FILE_MANAGER_ROOT`, phân cách bằng dấu phẩy. Mọi mục trong các nhánh này luôn bị xóa trực tiếp, không snapshot và không vào thùng rác. |
 | `FILE_DELETE_CONCURRENCY` | Backend | Số mục được xóa đồng thời trong một request/job, giới hạn `1-10`, mặc định `4`. Nên dùng `2-4` cho rclone/FUSE. |
 | `FILE_DELETE_BACKGROUND_THRESHOLD` | Backend | Số mục từ đó thao tác xóa hàng loạt chuyển sang job nền, giới hạn `2-100`, mặc định `20`. Thư mục trên nhánh xóa trực tiếp luôn chạy nền. |
+| `FILE_DELETE_MAX_ENTRIES` | Backend | Số entry tối đa được quét/xóa trong một cây thư mục, mặc định `100000`. |
+| `FILE_DELETE_MAX_DEPTH` | Backend | Độ sâu thư mục tối đa khi lập kế hoạch và xóa trực tiếp, mặc định `256`. |
+| `FILE_DELETE_ITEM_TIMEOUT_SECONDS` | Backend | Watchdog cho mỗi mục cấp cao trong job xóa, mặc định `120` giây. Syscall FUSE bị treo trong kernel có thể chỉ kết thúc sau khi mount tự timeout. |
+| `FILE_DELETE_JOB_TIMEOUT_MINUTES` | Backend | Thời gian tối đa của toàn job xóa trước khi yêu cầu dừng, mặc định `60` phút. |
+| `FILE_MANAGER_PROTECT_DIRECT_DELETE_ROOTS` | Backend | Mặc định `true`, chặn xóa chính root đã khai báo trong `FILE_MANAGER_DIRECT_DELETE_PATHS`; vẫn cho xóa nội dung bên dưới. |
 | `QUICK_SHARE_DIR` | Backend | Thư mục tạm riêng cho truyền file công khai, mặc định là `terminal-quick-share` trong thư mục tạm hệ điều hành. Không đặt trong File Manager hoặc thư mục web server phục vụ. |
 | `QUICK_SHARE_MAX_FILE_MB` | Backend | Dung lượng tối đa của file truyền nhanh, mặc định và tối đa `2048` (2 GB). |
 | `QUICK_SHARE_TTL_MINUTES` | Backend | Thời gian tồn tại của file truyền nhanh, mặc định và tối đa `1440` (24 giờ). |
@@ -408,9 +413,14 @@ Backend tự tạo snapshot cho file thường trước khi chỉnh sửa, move/
 - Khôi phục và xóa snapshot luôn yêu cầu step-up authorization.
 - Kho snapshot bị chặn khỏi File Manager thông thường.
 - Trước khi xóa, frontend hỏi backend để hiển thị chính xác số mục vào thùng rác và số mục bị xóa vĩnh viễn.
+- Kế hoạch xóa trả số entry, dung lượng ước tính và policy token ngắn hạn. Backend từ chối bằng `409 FILE_CHANGED` nếu inode, device, mtime hoặc size thay đổi trước lúc xóa.
 - Xóa hàng loạt lớn và xóa trực tiếp thư mục chạy dưới dạng job nền có tiến trình và nút hủy. Hủy có thể để lại phần thư mục chưa xử lý; các mục đã xóa trước đó không thể phục hồi.
-- Backend tự hoàn tất transaction thùng rác bị gián đoạn và dọn metadata/data mồ côi khi khởi động hoặc khi mở thùng rác.
-- Job xóa được giữ trong bộ nhớ và được giới hạn số lượng; khi backend khởi động lại, job đang chạy dừng và người dùng cần tải lại danh sách file.
+- Job xóa được lưu trong SQLite; khi backend restart, job đang chạy được đánh dấu thất bại do gián đoạn và vẫn còn trong lịch sử tab Tác vụ.
+- `Idempotency-Key` ngăn proxy hoặc trình duyệt tạo job trùng khi gửi lại request. Path lock trả `409 PATH_BUSY` nếu xóa/move/restore/upload cùng đụng một nhánh.
+- Backend tự hoàn tất transaction thùng rác bị gián đoạn khi khởi động hoặc khi mở thùng rác. Dữ liệu thiếu metadata được chuyển vào `.lost-found`, không tự xóa.
+- Chính root của ổ mạng được bảo vệ mặc định. Xóa trực tiếp dùng stack lặp với giới hạn entry/depth, watchdog mỗi mục và toàn job.
+- `/api/files/delete-plan` hỗ trợ dry-run; `/api/metrics` trả thêm `fileDeletion` gồm tổng số, lỗi, thời gian trung bình, queue depth và orphan.
+- Webhook cảnh báo được gửi khi mount chưa sẵn sàng, phát hiện orphan hoặc job xóa thất bại.
 
 ## Quản Lý Systemd Và Process
 

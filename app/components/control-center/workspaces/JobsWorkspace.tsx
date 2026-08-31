@@ -8,6 +8,7 @@ const typeLabels: Record<JobType, string> = {
   sqlite_backup: "Sao lưu",
   sqlite_integrity: "Kiểm tra toàn vẹn",
   sqlite_vacuum: "VACUUM",
+  file_delete: "Xóa tệp",
 };
 const stateLabels: Record<JobState, string> = {
   pending: "Đang chờ",

@@ -53,6 +53,16 @@ type Options = {
   trashDir?: string;
   snapshotDir?: string;
   directDeletePaths?: string[];
+  deleteJobStore?: {
+    saveDeleteJob: (job: any) => void;
+    getDeleteJobs: (owner?: string, limit?: number) => any[];
+    getDeleteJob: (id: string) => any;
+    getDeleteJobByIdempotency: (owner: string, key: string) => any;
+    interruptDeleteJobs: () => void;
+    pruneDeleteJobs: (limit?: number) => void;
+  };
+  deletionMetrics?: { record: (event: { success: boolean; durationMs: number; orphaned?: number }) => void; queueDepth: (value: number) => void };
+  alert?: (event: string, details: Record<string, unknown>) => Promise<void>;
   previewFrameAncestor?: string;
   onlyOffice?: { documentServerUrl: string; publicApiUrl: string; jwtSecret: string };
 };
@@ -73,6 +83,8 @@ type DeleteJob = {
   createdAt: string;
   finishedAt?: string;
   cancelRequested: boolean;
+  paths: unknown[];
+  idempotencyKey?: string;
 };
 
 function clientIp(req: Request) {
@@ -95,7 +107,7 @@ function modeInfo(mode: number) {
   };
 }
 
-export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, consumePreviewTicket, log, rootDir, trashDir, snapshotDir, directDeletePaths = [], previewFrameAncestor = "'self'", onlyOffice }: Options) {
+export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, consumePreviewTicket, log, rootDir, trashDir, snapshotDir, directDeletePaths = [], deleteJobStore, deletionMetrics, alert, previewFrameAncestor = "'self'", onlyOffice }: Options) {
   const router = Router();
   const root = path.resolve(rootDir || process.cwd());
   const trashRoot = path.resolve(trashDir || path.join(process.cwd(), '.terminal-trash'));
@@ -121,10 +133,18 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
   const deleteConcurrency = Number.isSafeInteger(configuredDeleteConcurrency) ? Math.min(10, Math.max(1, configuredDeleteConcurrency)) : 4;
   const configuredBackgroundThreshold = Number(process.env.FILE_DELETE_BACKGROUND_THRESHOLD || 20);
   const backgroundDeleteThreshold = Number.isSafeInteger(configuredBackgroundThreshold) ? Math.min(MAX_BULK_ITEMS, Math.max(2, configuredBackgroundThreshold)) : 20;
+  const maxDeleteEntries = Math.max(1, Number(process.env.FILE_DELETE_MAX_ENTRIES || 100000));
+  const maxDeleteDepth = Math.max(1, Number(process.env.FILE_DELETE_MAX_DEPTH || 256));
+  const deleteJobTimeoutMs = Math.max(1, Number(process.env.FILE_DELETE_JOB_TIMEOUT_MINUTES || 60)) * 60_000;
+  const deleteItemTimeoutMs = Math.max(1, Number(process.env.FILE_DELETE_ITEM_TIMEOUT_SECONDS || 120)) * 1000;
+  const protectDirectDeleteRoots = process.env.FILE_MANAGER_PROTECT_DIRECT_DELETE_ROOTS !== 'false';
   let activeOfficeConversions = 0;
   const officeSessions = new Map<string, { path: string; expiresAt: number }>();
   const deleteJobs = new Map<string, DeleteJob>();
   const activeTrashTransactions = new Set<string>();
+  const lockedDeletePaths = new Set<string>();
+  const policySecret = crypto.randomBytes(32);
+  deleteJobStore?.interruptDeleteJobs();
   const base64Url = (value: Buffer | string) => Buffer.from(value).toString('base64url');
   const signJwt = (payload: Record<string, unknown>) => {
     const header = base64Url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
@@ -231,7 +251,9 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
     if (!Array.isArray(value) || !value.length || value.length > MAX_BULK_ITEMS) throw httpError(400, `Danh sách phải có từ 1 đến ${MAX_BULK_ITEMS} mục`);
     return value;
   };
+  const pathIsBusy = (target: string) => [...lockedDeletePaths].some(locked => target === locked || target.startsWith(locked + path.sep) || locked.startsWith(target + path.sep));
   const safeMove = async (source: string, destination: string) => {
+    if (pathIsBusy(source) || pathIsBusy(destination)) throw Object.assign(httpError(409, 'Đường dẫn đang được thao tác bởi yêu cầu xóa'), { code: 'PATH_BUSY' });
     try {
       await fsp.rename(source, destination);
       return;
@@ -252,18 +274,40 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
     const targetStat = await fsp.lstat(target);
     await fsp.mkdir(trashRoot, { recursive: true });
     const configuredForDirectDelete = directDeleteRoots.some(configuredRoot => target === configuredRoot || target.startsWith(configuredRoot + path.sep));
+    if (protectDirectDeleteRoots && directDeleteRoots.includes(target)) throw Object.assign(httpError(403, 'Không thể xóa thư mục gốc của ổ đĩa mạng'), { code: 'PROTECTED_DELETE_ROOT' });
     const mode: DeletionMode = configuredForDirectDelete ? 'configured_direct' : targetStat.dev !== (await fsp.stat(trashRoot)).dev ? 'cross_device' : 'trash';
     return { target, targetStat, path: relative(target), mode, permanentlyDeleted: mode !== 'trash' };
   };
-  const removeDirect = async (target: string, shouldStop?: () => boolean): Promise<void> => {
-    if (shouldStop?.()) throw Object.assign(new Error('Tác vụ xóa đã bị hủy'), { name: 'AbortError' });
-    const stat = await fsp.lstat(target);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) { await fsp.rm(target, { force: false }); return; }
-    for (const name of await fsp.readdir(target)) await removeDirect(path.join(target, name), shouldStop);
-    if (shouldStop?.()) throw Object.assign(new Error('Tác vụ xóa đã bị hủy'), { name: 'AbortError' });
-    await fsp.rmdir(target);
+  const policyFingerprint = (policy: Awaited<ReturnType<typeof deletionPolicy>>) => ({ path: policy.path, dev: policy.targetStat.dev.toString(), ino: policy.targetStat.ino.toString(), mtimeMs: policy.targetStat.mtimeMs, size: policy.targetStat.size, exp: Date.now() + 5 * 60_000 });
+  const signPolicy = (fingerprint: Record<string, unknown>) => { const body = Buffer.from(JSON.stringify(fingerprint)).toString('base64url'); return `${body}.${crypto.createHmac('sha256', policySecret).update(body).digest('base64url')}`; };
+  const verifyPolicyToken = async (userPath: unknown, token: unknown) => {
+    if (typeof token !== 'string') throw Object.assign(httpError(409, 'Cần xác nhận lại kế hoạch xóa'), { code: 'FILE_CHANGED' });
+    const [body, signature] = token.split('.'); const expected = body && crypto.createHmac('sha256', policySecret).update(body).digest('base64url');
+    if (!body || !signature || signature.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) throw Object.assign(httpError(409, 'Kế hoạch xóa không hợp lệ'), { code: 'FILE_CHANGED' });
+    const fingerprint = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as Record<string, unknown>;
+    const policy = await deletionPolicy(userPath); const current = policyFingerprint(policy);
+    const keys: Array<keyof typeof current> = ['path', 'dev', 'ino', 'mtimeMs', 'size'];
+    if (Number(fingerprint.exp) < Date.now() || keys.some(key => String(fingerprint[key]) !== String(current[key]))) throw Object.assign(httpError(409, 'Tệp hoặc thư mục đã thay đổi, vui lòng xác nhận lại'), { code: 'FILE_CHANGED' });
+    return policy;
   };
-  const trashOne = async (userPath: unknown, shouldStop?: () => boolean) => {
+  const removeDirect = async (target: string, shouldStop?: () => boolean): Promise<{ entries: number; bytes: number }> => {
+    const stack: Array<{ target: string; depth: number; visited: boolean }> = [{ target, depth: 0, visited: false }];
+    let entries = 0; let bytes = 0;
+    while (stack.length) {
+      if (shouldStop?.()) throw Object.assign(new Error('Tác vụ xóa đã bị hủy'), { name: 'AbortError' });
+      const item = stack.pop()!;
+      if (item.depth > maxDeleteDepth) throw Object.assign(httpError(413, `Cây thư mục vượt giới hạn độ sâu ${maxDeleteDepth}`), { code: 'DELETE_DEPTH_LIMIT' });
+      if (item.visited) { await fsp.rmdir(item.target); continue; }
+      const stat = await fsp.lstat(item.target); entries++; bytes += stat.size;
+      if (entries > maxDeleteEntries) throw Object.assign(httpError(413, `Số mục vượt giới hạn ${maxDeleteEntries}`), { code: 'DELETE_ENTRY_LIMIT' });
+      if (!stat.isDirectory() || stat.isSymbolicLink()) { await fsp.rm(item.target, { force: false }); continue; }
+      stack.push({ ...item, visited: true });
+      const names = await fsp.readdir(item.target);
+      for (let index = names.length - 1; index >= 0; index--) stack.push({ target: path.join(item.target, names[index]), depth: item.depth + 1, visited: false });
+    }
+    return { entries, bytes };
+  };
+  const trashOneUnlocked = async (userPath: unknown, shouldStop?: () => boolean) => {
     const policy = await deletionPolicy(userPath);
     const { target } = policy;
     // Mounted network filesystems cannot reliably be moved into a local trash directory.
@@ -302,7 +346,16 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
     finally { activeTrashTransactions.delete(id); }
     return { id, path: policy.path, permanentlyDeleted: false, deletionMode: 'trash' as DeletionMode };
   };
-  const reconcileTrash = async () => {
+  const trashOne = async (userPath: unknown, shouldStop?: () => boolean) => {
+    const startedAt = Date.now();
+    const target = resolveInsideRoot(userPath);
+    if (pathIsBusy(target)) throw Object.assign(httpError(409, 'Đường dẫn đang được thao tác bởi yêu cầu khác'), { code: 'PATH_BUSY' });
+    lockedDeletePaths.add(target);
+    try { const result = await trashOneUnlocked(userPath, shouldStop); deletionMetrics?.record({ success: true, durationMs: Date.now() - startedAt }); return result; }
+    catch (error) { deletionMetrics?.record({ success: false, durationMs: Date.now() - startedAt }); throw error; }
+    finally { lockedDeletePaths.delete(target); }
+  };
+  const reconcileTrashOnce = async () => {
     await fsp.mkdir(trashRoot, { recursive: true });
     const names = await fsp.readdir(trashRoot);
     const data = new Set(names.filter(name => !name.endsWith('.json') && !name.endsWith('.pending')));
@@ -317,8 +370,15 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
       else { await fsp.rm(path.join(trashRoot, `${id}.pending`), { force: true }); }
     }
     for (const id of metadata) if (!data.has(id)) { await fsp.rm(path.join(trashRoot, `${id}.json`), { force: true }); removedMetadata++; }
-    for (const id of data) if (!metadata.has(id)) { await fsp.rm(path.join(trashRoot, id), { recursive: true, force: true }); removedData++; }
-    return { removedMetadata, removedData, recovered };
+    const lostFound = path.join(trashRoot, '.lost-found');
+    for (const id of data) if (!metadata.has(id) && id !== '.lost-found') { await fsp.mkdir(lostFound, { recursive: true }); await fsp.rename(path.join(trashRoot, id), path.join(lostFound, `${Date.now()}-${id}`)); removedData++; }
+    return { removedMetadata, movedToLostFound: removedData, recovered };
+  };
+  let reconcilePromise: ReturnType<typeof reconcileTrashOnce> | null = null;
+  const reconcileTrash = () => {
+    if (reconcilePromise) return reconcilePromise;
+    reconcilePromise = reconcileTrashOnce().finally(() => { reconcilePromise = null; });
+    return reconcilePromise;
   };
   const summarizeDeletionResults = (results: Record<string, unknown>[]) => {
     const successful = results.filter(item => item.success).length;
@@ -332,29 +392,35 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
       if (!['pending', 'running'].includes(job.state)) deleteJobs.delete(id);
       if (deleteJobs.size < 150) break;
     }
+    deleteJobStore?.pruneDeleteJobs(500);
   };
+  const persistDeleteJob = (job: DeleteJob) => deleteJobStore?.saveDeleteJob(job);
   const processDeleteJob = (job: DeleteJob, values: unknown[]) => {
-    job.state = 'running'; job.message = 'Đang xóa';
-    void runItemsLimited(values, value => trashOne(value, () => job.cancelRequested), result => {
-      job.results.push(result); job.completed++; job.progress = Math.round(job.completed / job.total * 100); job.message = `Đã xử lý ${job.completed}/${job.total} mục`;
+    job.state = 'running'; job.message = 'Đang xóa'; persistDeleteJob(job);
+    deletionMetrics?.queueDepth([...deleteJobs.values()].filter(item => ['pending', 'running'].includes(item.state)).length);
+    const watchdog = setTimeout(() => { job.cancelRequested = true; job.message = 'Đã vượt thời gian tối đa, đang dừng'; persistDeleteJob(job); }, deleteJobTimeoutMs); watchdog.unref();
+    void runItemsLimited(values, value => Promise.race([trashOne(value, () => job.cancelRequested), new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(Object.assign(new Error('Mục xóa vượt thời gian tối đa'), { code: 'DELETE_ITEM_TIMEOUT' })), deleteItemTimeoutMs); timer.unref(); })]), result => {
+      job.results.push(result); job.completed++; job.progress = Math.round(job.completed / job.total * 100); job.message = `Đã xử lý ${job.completed}/${job.total} mục`; persistDeleteJob(job);
     }, () => job.cancelRequested).then(async results => {
       if (job.cancelRequested) { job.state = 'cancelled'; job.message = `Đã hủy sau ${job.completed}/${job.total} mục`; }
       else { const summary = summarizeDeletionResults(results); job.state = summary.failed ? 'failure' : 'success'; job.message = summary.failed ? `Có ${summary.failed} mục thất bại` : 'Hoàn tất'; }
-      job.progress = 100; job.finishedAt = new Date().toISOString();
-      const summary = summarizeDeletionResults(job.results);
+      job.progress = 100; job.finishedAt = new Date().toISOString(); clearTimeout(watchdog); persistDeleteJob(job);
+      const summary = summarizeDeletionResults(job.results); deletionMetrics?.queueDepth([...deleteJobs.values()].filter(item => ['pending', 'running'].includes(item.state) && item.id !== job.id).length);
       await log(`Tác vụ xóa ${job.id} kết thúc: ${job.message}`, 'system', { action: 'file_delete_job', level: summary.failed ? 'warning' : 'info', result: summary.failed ? 'failure' : 'success', metadata: { jobId: job.id, paths: job.results.map(item => item.path), ...summary } });
+      if (summary.failed) void alert?.('file.delete.failure', { jobId: job.id, message: job.message, ...summary });
     }).catch(async error => {
-      job.state = 'failure'; job.progress = 100; job.message = error.message || 'Tác vụ xóa thất bại'; job.finishedAt = new Date().toISOString();
-      await log(`Tác vụ xóa ${job.id} thất bại`, 'system', { action: 'file_delete_job', level: 'critical', result: 'failure', metadata: { jobId: job.id, error: job.message } });
+      job.state = 'failure'; job.progress = 100; job.message = error.message || 'Tác vụ xóa thất bại'; job.finishedAt = new Date().toISOString(); clearTimeout(watchdog); persistDeleteJob(job);
+      deletionMetrics?.queueDepth([...deleteJobs.values()].filter(item => ['pending', 'running'].includes(item.state) && item.id !== job.id).length); await log(`Tác vụ xóa ${job.id} thất bại`, 'system', { action: 'file_delete_job', level: 'critical', result: 'failure', metadata: { jobId: job.id, error: job.message } });
+      void alert?.('file.delete.failure', { jobId: job.id, error: job.message });
     });
   };
   void reconcileTrash().then(result => {
-    if (result.removedData || result.removedMetadata || result.recovered) void log('Đã sửa dữ liệu thùng rác mồ côi', 'system', { action: 'trash_reconcile', level: 'warning', metadata: result });
+    if (result.movedToLostFound || result.removedMetadata || result.recovered) { deletionMetrics?.record({ success: true, durationMs: 0, orphaned: result.movedToLostFound + result.removedMetadata }); void log('Đã sửa dữ liệu thùng rác mồ côi', 'system', { action: 'trash_reconcile', level: 'warning', metadata: result }); void alert?.('trash.orphans', result); }
   }).catch(error => void log('Không thể kiểm tra thùng rác khi khởi động', 'system', { action: 'trash_reconcile', level: 'warning', result: 'failure', metadata: { error: error.message } }));
   for (const configuredRoot of directDeleteRoots) void fsp.stat(configuredRoot).then(stat => {
     if (!stat.isDirectory()) void log(`Đường dẫn xóa trực tiếp không phải thư mục: ${relative(configuredRoot)}`, 'system', { action: 'direct_delete_path_check', level: 'warning', result: 'failure' });
     else void log(`Đã bật xóa trực tiếp: ${relative(configuredRoot)}`, 'system', { action: 'direct_delete_path_check', metadata: { path: relative(configuredRoot) } });
-  }).catch(error => void log(`Đường dẫn xóa trực tiếp chưa sẵn sàng: ${relative(configuredRoot)}`, 'system', { action: 'direct_delete_path_check', level: 'warning', result: 'failure', metadata: { error: error.message } }));
+  }).catch(error => { void log(`Đường dẫn xóa trực tiếp chưa sẵn sàng: ${relative(configuredRoot)}`, 'system', { action: 'direct_delete_path_check', level: 'warning', result: 'failure', metadata: { error: error.message } }); void alert?.('file.mount.unavailable', { path: relative(configuredRoot), error: error.message }); });
   const restoreOne = async (id: unknown) => {
     if (!validName(id)) throw httpError(400, 'Mục thùng rác không hợp lệ');
     const trashed = path.join(trashRoot, id);
@@ -925,33 +991,57 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
     try {
       const policies = await runItemsLimited(pathsFrom(req.body), async value => {
         const policy = await deletionPolicy(value);
-        return { path: policy.path, isDirectory: policy.targetStat.isDirectory(), deletionMode: policy.mode, permanentlyDeleted: policy.permanentlyDeleted };
+        return { path: policy.path, isDirectory: policy.targetStat.isDirectory(), deletionMode: policy.mode, permanentlyDeleted: policy.permanentlyDeleted, policyToken: signPolicy(policyFingerprint(policy)) };
       });
       const permanent = policies.filter(item => item.success && item.permanentlyDeleted).length;
       return res.json({ success: policies.every(item => item.success), permanent, trashed: policies.filter(item => item.success).length - permanent, policies });
     } catch (error) { return fail(res, error); }
   });
 
+  router.post('/delete-plan', async (req, res) => {
+    try {
+      const plans = await runItemsLimited(pathsFrom(req.body), async value => {
+        const policy = await deletionPolicy(value); const stack = [{ target: policy.target, depth: 0 }]; let entries = 0; let bytes = 0; let truncated = false;
+        while (stack.length) {
+          const item = stack.pop()!; if (item.depth > maxDeleteDepth || entries >= maxDeleteEntries) { truncated = true; break; }
+          const stat = await fsp.lstat(item.target); entries++; bytes += stat.size;
+          if (stat.isDirectory() && !stat.isSymbolicLink()) for (const name of await fsp.readdir(item.target)) stack.push({ target: path.join(item.target, name), depth: item.depth + 1 });
+        }
+        return { path: policy.path, entries, bytes, truncated, isDirectory: policy.targetStat.isDirectory(), deletionMode: policy.mode, permanentlyDeleted: policy.permanentlyDeleted, policyToken: signPolicy(policyFingerprint(policy)) };
+      });
+      return res.json({ success: plans.every(item => item.success), totalEntries: plans.reduce((sum, item) => sum + Number(item.entries || 0), 0), totalBytes: plans.reduce((sum, item) => sum + Number(item.bytes || 0), 0), truncated: plans.some(item => item.truncated), permanent: plans.filter(item => item.success && item.permanentlyDeleted).length, trashed: plans.filter(item => item.success && !item.permanentlyDeleted).length, plans });
+    } catch (error) { return fail(res, error); }
+  });
+
   router.get('/delete-jobs/:id', (req, res) => {
-    const job = deleteJobs.get(req.params.id);
-    if (!job || job.owner !== uploadOwner(req)) return res.status(404).json({ success: false, error: 'Không tìm thấy tác vụ xóa' });
+    const job = deleteJobs.get(req.params.id) || deleteJobStore?.getDeleteJob(req.params.id);
+    const role = sessionRole(cookieToken(req)); if (!job || job.owner !== uploadOwner(req) && role !== 'admin' && role !== 'root') return res.status(404).json({ success: false, error: 'Không tìm thấy tác vụ xóa' });
     return res.json({ success: true, job: { ...job, owner: undefined, cancelRequested: undefined } });
   });
 
   router.post('/delete-jobs/:id/cancel', (req, res) => {
     const job = deleteJobs.get(req.params.id);
-    if (!job || job.owner !== uploadOwner(req)) return res.status(404).json({ success: false, error: 'Không tìm thấy tác vụ xóa' });
+    const role = sessionRole(cookieToken(req)); if (!job || job.owner !== uploadOwner(req) && role !== 'admin' && role !== 'root') return res.status(404).json({ success: false, error: 'Không tìm thấy tác vụ xóa' });
     if (!['pending', 'running'].includes(job.state)) return res.status(409).json({ success: false, error: 'Tác vụ xóa đã kết thúc' });
-    job.cancelRequested = true; job.message = 'Đang yêu cầu hủy';
+    job.cancelRequested = true; job.message = 'Đang yêu cầu hủy'; persistDeleteJob(job);
     return res.json({ success: true, job: { ...job, owner: undefined, cancelRequested: undefined } });
+  });
+
+  router.get('/delete-jobs', (req, res) => {
+    const owner = uploadOwner(req); const role = sessionRole(cookieToken(req)); const jobs = deleteJobStore?.getDeleteJobs(role === 'admin' || role === 'root' ? undefined : owner, 200) || [...deleteJobs.values()].filter(job => role === 'admin' || role === 'root' || job.owner === owner);
+    return res.json({ success: true, jobs: jobs.map(job => ({ ...job, owner: undefined, cancelRequested: undefined })) });
   });
 
   router.delete('/', async (req, res) => {
     try {
-      const policy = await deletionPolicy(req.query.path);
-      if (policy.permanentlyDeleted && policy.targetStat.isDirectory()) {
-        const id = crypto.randomUUID(); const job: DeleteJob = { id, owner: uploadOwner(req), state: 'pending', progress: 0, completed: 0, total: 1, message: 'Đang chờ', results: [], createdAt: new Date().toISOString(), cancelRequested: false };
-        pruneDeleteJobs(); deleteJobs.set(id, job); processDeleteJob(job, [req.query.path]);
+      const owner = uploadOwner(req); const requestedIdempotencyKey = typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'].slice(0, 128) : undefined;
+      const existing = requestedIdempotencyKey && (deleteJobStore?.getDeleteJobByIdempotency(owner, requestedIdempotencyKey) || [...deleteJobs.values()].find(job => job.owner === owner && job.idempotencyKey === requestedIdempotencyKey));
+      if (existing) return res.status(202).json({ success: true, queued: true, jobId: existing.id, message: existing.message, idempotent: true });
+      const policy = await verifyPolicyToken(req.query.path, req.headers['x-policy-token']);
+      if (policy.permanentlyDeleted || requestedIdempotencyKey) {
+        const idempotencyKey = requestedIdempotencyKey;
+        const id = crypto.randomUUID(); const job: DeleteJob = { id, owner, state: 'pending', progress: 0, completed: 0, total: 1, message: 'Đang chờ', paths: [req.query.path], results: [], createdAt: new Date().toISOString(), cancelRequested: false, idempotencyKey };
+        pruneDeleteJobs(); deleteJobs.set(id, job); persistDeleteJob(job); processDeleteJob(job, job.paths);
         return res.status(202).json({ success: true, queued: true, jobId: id, message: 'Đã đưa thao tác xóa thư mục vào hàng đợi' });
       }
       const result = await trashOne(req.query.path); const message = result.permanentlyDeleted ? 'Đã xóa trực tiếp khỏi ổ đĩa mạng' : 'Đã chuyển vào thùng rác'; await log(`${message}: ${result.path}`, clientIp(req), { action: 'file_delete', level: result.permanentlyDeleted ? 'critical' : 'warning', metadata: { path: result.path, deletionMode: result.deletionMode } }); return res.json({ success: true, message, ...result });
@@ -961,10 +1051,16 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
 
   router.post('/trash', async (req, res) => {
     try {
+      const owner = uploadOwner(req); const requestedIdempotencyKey = typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'].slice(0, 128) : undefined;
+      const existing = requestedIdempotencyKey && (deleteJobStore?.getDeleteJobByIdempotency(owner, requestedIdempotencyKey) || [...deleteJobs.values()].find(job => job.owner === owner && job.idempotencyKey === requestedIdempotencyKey));
+      if (existing) return res.status(202).json({ success: true, queued: true, jobId: existing.id, message: existing.message, idempotent: true });
       const values = pathsFrom(req.body);
-      if (values.length >= backgroundDeleteThreshold) {
-        const id = crypto.randomUUID(); const job: DeleteJob = { id, owner: uploadOwner(req), state: 'pending', progress: 0, completed: 0, total: values.length, message: 'Đang chờ', results: [], createdAt: new Date().toISOString(), cancelRequested: false };
-        pruneDeleteJobs(); deleteJobs.set(id, job); processDeleteJob(job, values);
+      const tokens = req.body?.policyTokens; if (!tokens || typeof tokens !== 'object') throw Object.assign(httpError(409, 'Cần xác nhận lại kế hoạch xóa'), { code: 'FILE_CHANGED' });
+      await Promise.all(values.map(value => verifyPolicyToken(value, tokens[String(value)])));
+      if (values.length >= backgroundDeleteThreshold || requestedIdempotencyKey) {
+        const idempotencyKey = requestedIdempotencyKey;
+        const id = crypto.randomUUID(); const job: DeleteJob = { id, owner, state: 'pending', progress: 0, completed: 0, total: values.length, message: 'Đang chờ', paths: values, results: [], createdAt: new Date().toISOString(), cancelRequested: false, idempotencyKey };
+        pruneDeleteJobs(); deleteJobs.set(id, job); persistDeleteJob(job); processDeleteJob(job, values);
         return res.status(202).json({ success: true, queued: true, jobId: id, message: `Đã đưa ${values.length} mục vào hàng đợi xóa` });
       }
       const results = await runItemsLimited(values, trashOne); const summary = summarizeDeletionResults(results); const message = `Đã xóa trực tiếp ${summary.directlyDeleted} mục và chuyển ${summary.trashed} mục vào thùng rác`; await log(message, clientIp(req), { action: 'file_bulk_delete', level: summary.directlyDeleted ? 'critical' : 'warning', result: summary.failed ? 'failure' : 'success', metadata: { paths: values, ...summary } });
@@ -975,7 +1071,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
   router.get('/trash', async (_req, res) => {
     try {
       await reconcileTrash();
-      await fsp.mkdir(trashRoot, { recursive: true }); const names = (await fsp.readdir(trashRoot)).filter(name => !name.endsWith('.json') && !name.endsWith('.pending'));
+      await fsp.mkdir(trashRoot, { recursive: true }); const names = (await fsp.readdir(trashRoot)).filter(name => !name.endsWith('.json') && !name.endsWith('.pending') && name !== '.lost-found');
       const items = await Promise.all(names.map(async id => { try { const metadata = JSON.parse(await fsp.readFile(path.join(trashRoot, `${id}.json`), 'utf8')) as TrashMetadata; const details = await itemDetails(path.join(trashRoot, id)); return { id, ...metadata, name: path.basename(metadata.originalPath), isDirectory: details.isDirectory, size: details.size, mtime: details.mtime, mode: details.mode, permissions: details.permissions, platform: process.platform }; } catch (error: any) { return { id, error: error.message || 'Metadata thùng rác không hợp lệ' }; } }));
       return res.json({ success: true, items: items.sort((a: any, b: any) => String(b.deletedAt || '').localeCompare(String(a.deletedAt || ''))) });
     } catch (error) { return fail(res, error); }

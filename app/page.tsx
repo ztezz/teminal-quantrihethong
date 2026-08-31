@@ -1206,15 +1206,19 @@ export default function Home() {
   const trashPaths = async (paths: string[]) => {
     if (!paths.length) return;
     try {
-      const policy = await requestFileApi("/api/files/delete-policy", { method: "POST", body: JSON.stringify({ paths }) });
+      const policy = await requestFileApi("/api/files/delete-plan", { method: "POST", body: JSON.stringify({ paths }) });
+      const requiresText = policy.permanent > 0 && (policy.totalEntries >= 1000 || policy.totalBytes >= 10 * 1024 * 1024 * 1024 || policy.plans?.some((item: any) => item.permanentlyDeleted && item.isDirectory));
       if (!(await askConfirm({
-        message: `Xóa ${paths.length} mục? ${policy.permanent} mục sẽ bị xóa vĩnh viễn, ${policy.trashed} mục sẽ được chuyển vào thùng rác.`,
+        message: `Xóa ${paths.length} mục (${policy.totalEntries.toLocaleString("vi-VN")} tệp/thư mục, ${(policy.totalBytes / 1024 / 1024 / 1024).toFixed(2)} GB)? ${policy.permanent} mục sẽ bị xóa vĩnh viễn, ${policy.trashed} mục sẽ được chuyển vào thùng rác.${policy.truncated ? " Kế hoạch đã chạm giới hạn quét." : ""}`,
         danger: true,
+        requiredText: requiresText ? "DELETE" : undefined,
         confirmLabel: "Xóa",
       }))) return;
+      const policyTokens = Object.fromEntries(policy.plans.filter((item: any) => item.success).map((item: any) => [item.path, item.policyToken]));
       const data = await requestFileApi("/api/files/trash", {
         method: "POST",
-        body: JSON.stringify({ paths }),
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ paths, policyTokens }),
       });
       if (data.queued) await waitForDeleteJob(data.jobId);
       if (data.results?.some((item: any) => !item.success))
@@ -1509,14 +1513,16 @@ export default function Home() {
       filePath.replace(/\\/g, "/").split("/").pop() || "tệp/thư mục";
     let policy: any;
     try {
-      policy = await requestFileApi("/api/files/delete-policy", { method: "POST", body: JSON.stringify({ paths: [filePath] }) });
+      policy = await requestFileApi("/api/files/delete-plan", { method: "POST", body: JSON.stringify({ paths: [filePath] }) });
     } catch (error: any) {
       setFileError(error.message);
       return;
     }
+    const plan = policy.plans?.[0];
     if (!(await askConfirm({
-        message: policy.permanent ? `Xóa vĩnh viễn "${itemName}"? Mục này không thể khôi phục từ thùng rác.` : `Chuyển "${itemName}" vào thùng rác?`,
+        message: policy.permanent ? `Xóa vĩnh viễn "${itemName}" (${plan?.entries?.toLocaleString("vi-VN")} mục, ${((plan?.bytes || 0) / 1024 / 1024 / 1024).toFixed(2)} GB)? Mục này không thể khôi phục từ thùng rác.` : `Chuyển "${itemName}" vào thùng rác?`,
         danger: true,
+        requiredText: policy.permanent && plan?.isDirectory ? "DELETE" : undefined,
         confirmLabel: "Xóa",
       }))) return;
     setFileLoading(true);
@@ -1527,6 +1533,7 @@ export default function Home() {
         {
           method: "DELETE",
           credentials: "include",
+          headers: { "X-Policy-Token": plan.policyToken, "Idempotency-Key": crypto.randomUUID() },
         },
       );
       const data = await res.json();
