@@ -14,10 +14,10 @@ test("shows the unauthenticated login screen", async ({ page }) => {
   await page.goto("/");
 
   await expect(page).toHaveTitle("NodeShell Control Center");
-  await expect(page.getByRole("heading", { name: "Yêu Cầu Xác Thực" })).toBeVisible();
-  await expect(page.getByPlaceholder("Tên đăng nhập")).toHaveValue("root");
-  await expect(page.getByPlaceholder("••••••••••••")).toBeVisible();
-  await expect(page.getByRole("button", { name: "KẾT NỐI SHELL" })).toBeEnabled();
+  await expect(page.getByRole("heading", { name: "Chào mừng trở lại" })).toBeVisible();
+  await expect(page.getByPlaceholder("operator")).toHaveValue("root");
+  await expect(page.getByPlaceholder("Nhập mật khẩu bảo mật")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Đăng nhập hệ thống" })).toBeEnabled();
 });
 
 test("publishes installable app metadata", async ({ page, request }) => {
@@ -49,5 +49,5 @@ test("keeps login controls usable on a narrow viewport", async ({ page }) => {
   expect(bounds).not.toBeNull();
   expect(bounds!.x).toBeGreaterThanOrEqual(0);
   expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(375);
-  await expect(page.getByRole("button", { name: "KẾT NỐI SHELL" })).toBeInViewport();
+  await expect(page.getByRole("button", { name: "Đăng nhập hệ thống" })).toBeInViewport();
 });

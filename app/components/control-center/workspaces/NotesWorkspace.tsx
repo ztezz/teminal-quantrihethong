@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import {
   Check,
-  Clock3,
   FilePlus2,
   FileText,
   FolderOpen,
@@ -23,8 +22,6 @@ type NoteTable = NonNullable<Note["table"]>;
 
 const emptyTable = (): NoteTable => ({ columns: ["Mục", "Thông tin"], rows: [["", ""]] });
 const noteBookName = (note: Note) => note.notebook || "Sổ cá nhân";
-const notePreview = (note: Note) => note.content.trim() || note.table?.rows.flat().filter(Boolean).join(" · ") || "Chưa có nội dung";
-const formatUpdatedAt = (date: string) => new Intl.DateTimeFormat("vi-VN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(date));
 
 export function NotesWorkspace({ notify }: { notify: (kind: "success" | "error" | "info", message: string) => void }) {
   const [notes, setNotes] = useState<Note[]>([]);
@@ -152,7 +149,7 @@ export function NotesWorkspace({ notify }: { notify: (kind: "success" | "error" 
           </div>
         </header>
 
-        <div className="grid min-h-0 flex-1 lg:grid-cols-[210px_minmax(250px_.7fr)_1.45fr]">
+        <div className="grid min-h-0 flex-1 lg:grid-cols-[210px_minmax(0_1fr)]">
           <aside className="min-h-0 overflow-auto border-b border-white/10 p-3 lg:border-r lg:border-b-0">
             <div className="mb-3 flex items-center gap-2 px-2 text-[10px] font-bold uppercase tracking-[.16em] text-slate-500"><FolderOpen className="h-3.5 w-3.5" />Sổ tay</div>
             <nav className="space-y-1">
@@ -168,24 +165,26 @@ export function NotesWorkspace({ notify }: { notify: (kind: "success" | "error" 
             </form>
           </aside>
 
-          <aside className="flex min-h-0 flex-col overflow-hidden border-b border-white/10 lg:border-r lg:border-b-0">
-            <div className="border-b border-white/10 p-3">
-              <label className="relative block"><Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm trong sổ tay..." className="w-full rounded-lg border border-white/10 bg-white/[.035] py-2.5 pl-9 pr-3 text-xs text-slate-300 outline-none placeholder:text-slate-600 focus:border-sky-400/40" /></label>
-              <div className="mt-3 flex items-center justify-between px-1"><span className="text-xs font-semibold text-slate-300">{notebookFilter || "Sổ ghi chú"}</span><span className="font-mono text-[10px] text-slate-600">{visibleNotes.length} ghi chú</span></div>
+          <section className="flex min-h-0 flex-col overflow-hidden">
+            <div className="shrink-0 border-b border-white/10 bg-black/10 px-4 pt-3 sm:px-6">
+              <div className="flex flex-wrap items-center justify-between gap-3 pb-3">
+                <div className="flex items-center gap-2 text-xs font-semibold text-slate-300"><FileText className="h-4 w-4 text-sky-300" />{notebookFilter || "Sổ ghi chú"}<span className="font-mono text-[10px] font-normal text-slate-600">{visibleNotes.length} tệp</span></div>
+                <label className="relative w-full sm:w-56"><Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm ghi chú..." className="w-full rounded-lg border border-white/10 bg-white/[.035] py-2 pl-9 pr-3 text-xs text-slate-300 outline-none placeholder:text-slate-600 focus:border-sky-400/40" /></label>
+              </div>
+              <div className="flex min-w-0 gap-1 overflow-x-auto pb-0.5">
+                {loading && <span className="px-3 py-2 text-xs text-slate-500">Đang tải ghi chú...</span>}
+                {!loading && visibleNotes.length === 0 && <button type="button" onClick={() => newNote()} className="inline-flex items-center gap-2 rounded-t-lg border border-dashed border-white/15 px-3 py-2 text-xs text-slate-500 hover:border-sky-400/35 hover:text-sky-200"><Plus className="h-3.5 w-3.5" />Tạo ghi chú đầu tiên</button>}
+                {visibleNotes.map((note) => <button type="button" key={note.id} onClick={() => openNote(note)} className={`flex max-w-52 shrink-0 items-center gap-2 rounded-t-lg border border-b-0 px-3 py-2.5 text-left text-xs ${selectedId === note.id ? "border-white/15 bg-slate-950/80 text-sky-100" : "border-transparent text-slate-500 hover:bg-white/[.035] hover:text-slate-300"}`}><FileText className={`h-3.5 w-3.5 shrink-0 ${selectedId === note.id ? "text-sky-300" : "text-slate-600"}`} /><span className="truncate font-medium">{note.title || "Không tiêu đề"}</span></button>)}
+              </div>
             </div>
-            <div className="min-h-0 flex-1 overflow-auto p-2">
-              {loading && <div className="px-3 py-5 text-xs text-slate-500">Đang tải ghi chú...</div>}
-              {!loading && visibleNotes.length === 0 && <div className="px-3 py-8 text-center"><FileText className="mx-auto h-5 w-5 text-slate-700" /><p className="mt-2 text-xs text-slate-500">Chưa có ghi chú nào</p><button type="button" onClick={() => newNote()} className="mt-3 text-xs font-semibold text-sky-300 hover:text-sky-200">Tạo ghi chú đầu tiên</button></div>}
-              {visibleNotes.map((note) => <button type="button" key={note.id} onClick={() => openNote(note)} className={`mb-1.5 w-full rounded-xl border p-3 text-left ${selectedId === note.id ? "border-sky-400/30 bg-sky-400/10 shadow-sm shadow-sky-950/30" : "border-transparent hover:border-white/8 hover:bg-white/[.035]"}`}><div className="flex items-start gap-2"><FileText className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${selectedId === note.id ? "text-sky-300" : "text-slate-600"}`} /><strong className="min-w-0 flex-1 truncate text-xs font-semibold text-slate-200">{note.title || "Không tiêu đề"}</strong></div><p className="mt-2 line-clamp-2 pl-5.5 text-[11px] leading-5 text-slate-500">{notePreview(note)}</p><span className="mt-2.5 flex items-center gap-1 pl-5.5 text-[10px] text-slate-600"><Clock3 className="h-3 w-3" />{formatUpdatedAt(note.updatedAt)}</span></button>)}
-            </div>
-          </aside>
 
-          <section className="flex min-h-0 flex-col overflow-auto p-5 sm:p-6">
-            <div className="flex flex-wrap items-center gap-3 border-b border-white/10 pb-3">
+            <div className="min-h-0 flex-1 overflow-auto">
+            <section className="mx-auto flex min-h-full w-full max-w-4xl flex-col px-5 py-7 sm:px-10 sm:py-9">
+            <div className="flex flex-wrap items-center gap-3 border-b border-white/10 pb-4">
               <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Tiêu đề ghi chú" maxLength={160} className="min-w-48 flex-1 border-0 bg-transparent text-xl font-semibold tracking-tight text-white outline-none placeholder:text-slate-600" />
               <span className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-white/[.035] px-2.5 py-1.5 text-[11px] text-slate-400"><Tag className="h-3.5 w-3.5 text-sky-300" />{notebook || "Sổ cá nhân"}</span>
             </div>
-            <textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="Viết điều cần ghi nhớ..." maxLength={20000} className="mt-4 min-h-44 w-full flex-1 resize-y bg-transparent text-sm leading-7 text-slate-300 outline-none placeholder:text-slate-700" />
+            <textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="Viết điều cần ghi nhớ..." maxLength={20000} className="mt-6 min-h-80 w-full flex-1 resize-y bg-transparent text-[15px] leading-8 text-slate-300 outline-none placeholder:text-slate-700" />
 
             <div className="mt-5 border-t border-white/10 pt-4">
               <div className="flex flex-wrap items-center justify-between gap-3"><div><div className="flex items-center gap-2 text-sm font-semibold text-slate-200"><Table2 className="h-4 w-4 text-sky-300" />Bảng dữ liệu</div><p className="mt-1 text-[11px] text-slate-600">Thêm thông tin có cấu trúc vào ghi chú.</p></div>{!table ? <button type="button" onClick={() => setTable(emptyTable())} className="inline-flex items-center gap-1.5 rounded-lg border border-sky-400/25 px-2.5 py-1.5 text-xs font-semibold text-sky-200 hover:bg-sky-400/10"><Plus className="h-3.5 w-3.5" />Tạo bảng</button> : <button type="button" onClick={() => setTable(undefined)} className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-rose-300 hover:bg-rose-500/10"><X className="h-3.5 w-3.5" />Bỏ bảng</button>}</div>
@@ -193,6 +192,8 @@ export function NotesWorkspace({ notify }: { notify: (kind: "success" | "error" 
             </div>
 
             <footer className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-white/10 pt-4"><span className="text-[10px] text-slate-600">{content.length.toLocaleString("vi-VN")} / 20.000 ký tự</span><div className="flex items-center gap-2">{selectedId && <button type="button" onClick={() => void remove()} className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-xs text-rose-300 hover:bg-rose-500/10"><Trash2 className="h-4 w-4" />Xóa</button>}<button type="button" disabled={saving} onClick={() => void save()} className="inline-flex items-center gap-2 rounded-lg bg-emerald-400 px-3 py-2 text-xs font-bold text-slate-950 hover:bg-emerald-300 disabled:opacity-60"><Check className="h-4 w-4" />{saving ? "Đang lưu" : "Lưu ghi chú"}</button></div></footer>
+            </section>
+            </div>
           </section>
         </div>
       </div>
