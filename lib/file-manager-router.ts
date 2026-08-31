@@ -132,6 +132,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
   const dangerousRequest = (req: Request) => {
     if ((req.method === 'POST' && req.path === '/snapshots/restore') || (req.method === 'DELETE' && req.path === '/snapshots')) return true;
     if (req.method === 'PATCH' && req.path === '/metadata') return true;
+    if ((req.method === 'DELETE' && req.path === '/') || (req.method === 'POST' && req.path === '/trash')) return true;
     if ((req.method === 'DELETE' && (req.path === '/trash' || req.path === '/trash/empty')) || (req.method === 'POST' && req.path === '/trash/restore')) return true;
     const values = [req.query.path, req.body?.path, req.body?.filePath, req.body?.dirPath, req.body?.sourcePath, req.body?.destinationDir, req.body?.destinationPath, req.body?.archivePath, req.body?.targetPath, req.body?.paths, req.body?.ids, req.headers['x-directory']];
     return values.flatMap(value => Array.isArray(value) ? value : [value]).some(sensitivePath);
@@ -232,14 +233,22 @@ export function createFileManagerRouter({ hasSession, sessionRole, hasStepUp, co
       void log(`Không thể tạo snapshot trước khi xóa: ${relative(target)}`, 'system', { action: 'snapshot_create', level: 'warning', result: 'failure', metadata: { error: error.message } });
     }
     const id = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-${path.basename(target)}`;
+    const metadataFile = path.join(trashRoot, `${id}.json`);
+    await fsp.writeFile(metadataFile, JSON.stringify({ originalPath: relative(target), deletedAt: new Date().toISOString() } satisfies TrashMetadata), { flag: 'wx' });
     try {
       await fsp.rename(target, path.join(trashRoot, id));
     } catch (error: any) {
-      if (error?.code !== 'EXDEV') throw error;
-      await fsp.rm(target, { recursive: true, force: false });
-      return { path: relative(target), permanentlyDeleted: true };
+      if (error?.code === 'EXDEV') {
+        try {
+          await fsp.rm(target, { recursive: true, force: false });
+          return { path: relative(target), permanentlyDeleted: true };
+        } finally {
+          await fsp.rm(metadataFile, { force: true });
+        }
+      }
+      await fsp.rm(metadataFile, { force: true });
+      throw error;
     }
-    await fsp.writeFile(path.join(trashRoot, `${id}.json`), JSON.stringify({ originalPath: relative(target), deletedAt: new Date().toISOString() } satisfies TrashMetadata));
     return { id, path: relative(target), permanentlyDeleted: false };
   };
   const restoreOne = async (id: unknown) => {

@@ -16,6 +16,7 @@ async function fixture(trashDir?: string) {
   const snapshots = path.join(temporaryDirectory, 'snapshots');
   fs.mkdirSync(root);
   let role: Role = 'root';
+  let stepUp = true;
   const app = express();
   app.use((_req, res, next) => {
     res.setHeader('X-Frame-Options', 'DENY');
@@ -30,7 +31,7 @@ async function fixture(trashDir?: string) {
     snapshotDir: snapshots,
     hasSession: token => token === 'valid-token',
     sessionRole: token => token === 'valid-token' ? role : null,
-    hasStepUp: () => true,
+    hasStepUp: () => stepUp,
     consumePreviewTicket: () => false,
     log: async () => undefined,
     previewFrameAncestor: 'https://terminal.example.com'
@@ -58,6 +59,7 @@ async function fixture(trashDir?: string) {
     snapshots,
     request,
     setRole: (value: Role) => { role = value; },
+    setStepUp: (value: boolean) => { stepUp = value; },
     close: async () => {
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
       fs.rmSync(temporaryDirectory, { recursive: true, force: true });
@@ -246,6 +248,26 @@ test('supports create, write, move, and trash flow', async () => {
     assert.equal(trashed.status, 200);
     assert.equal(fs.existsSync(path.join(context.root, 'documents', 'final.txt')), false);
     assert.equal(fs.existsSync(path.join(context.trash, trashed.body.id)), true);
+    assert.equal(fs.existsSync(path.join(context.trash, `${trashed.body.id}.json`)), true);
+  } finally { await context.close(); }
+});
+
+test('requires step-up authorization for single and bulk deletion', async () => {
+  const context = await fixture();
+  try {
+    fs.writeFileSync(path.join(context.root, 'single.txt'), 'single');
+    fs.writeFileSync(path.join(context.root, 'bulk.txt'), 'bulk');
+    context.setStepUp(false);
+
+    const single = await context.request('/?path=single.txt', { method: 'DELETE' });
+    assert.equal(single.status, 428);
+    assert.equal(single.body.code, 'STEP_UP_REQUIRED');
+    assert.equal(fs.existsSync(path.join(context.root, 'single.txt')), true);
+
+    const bulk = await context.request('/trash', { method: 'POST', body: JSON.stringify({ paths: ['bulk.txt'] }) });
+    assert.equal(bulk.status, 428);
+    assert.equal(bulk.body.code, 'STEP_UP_REQUIRED');
+    assert.equal(fs.existsSync(path.join(context.root, 'bulk.txt')), true);
   } finally { await context.close(); }
 });
 
