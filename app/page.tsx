@@ -354,6 +354,7 @@ export default function Home() {
   const [fileMtime, setFileMtime] = useState<string | null>(null);
   const [isEditingFile, setIsEditingFile] = useState<boolean>(false);
   const [fileLoading, setFileLoading] = useState<boolean>(false);
+  const [activeDeleteJob, setActiveDeleteJob] = useState<{ id: string; state: string; progress: number; message: string } | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [showCreateFolder, setShowCreateFolder] = useState<boolean>(false);
   const [showCreateFile, setShowCreateFile] = useState<boolean>(false);
@@ -1170,24 +1171,55 @@ export default function Home() {
     }
   };
 
+  const waitForDeleteJob = async (jobId: string) => {
+    const toast = notify("loading", "Đang xử lý tác vụ xóa...");
+    setActiveDeleteJob({ id: jobId, state: "pending", progress: 0, message: "Đang chờ" });
+    try {
+      while (true) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+        const data = await requestFileApi(`/api/files/delete-jobs/${encodeURIComponent(jobId)}`);
+        const job = data.job;
+        setActiveDeleteJob({ id: jobId, state: job.state, progress: job.progress, message: job.message });
+        if (["pending", "running"].includes(job.state)) {
+          replaceToast(toast, "loading", `${job.message} (${job.progress}%)`);
+          continue;
+        }
+        if (job.state === "success") replaceToast(toast, "success", "Tác vụ xóa đã hoàn tất.");
+        else replaceToast(toast, "error", job.message || "Tác vụ xóa không hoàn tất.");
+        window.dispatchEvent(new Event("jobs:refresh"));
+        window.setTimeout(() => setActiveDeleteJob((current) => current?.id === jobId ? null : current), 5_000);
+        return job;
+      }
+    } catch (error: any) {
+      replaceToast(toast, "error", error.message || "Không thể theo dõi tác vụ xóa.");
+      throw error;
+    }
+  };
+  const cancelDeleteJob = async () => {
+    if (!activeDeleteJob || !["pending", "running"].includes(activeDeleteJob.state)) return;
+    try {
+      await requestFileApi(`/api/files/delete-jobs/${encodeURIComponent(activeDeleteJob.id)}/cancel`, { method: "POST" });
+      setActiveDeleteJob((current) => current ? { ...current, message: "Đang yêu cầu hủy" } : current);
+    } catch (error: any) { setFileError(error.message); }
+  };
+
   const trashPaths = async (paths: string[]) => {
-    if (
-      !paths.length ||
-      !(await askConfirm({
-        message: `Xóa ${paths.length} mục? Mục trên ổ đĩa mạng sẽ bị xóa vĩnh viễn và không thể khôi phục từ thùng rác.`,
+    if (!paths.length) return;
+    try {
+      const policy = await requestFileApi("/api/files/delete-policy", { method: "POST", body: JSON.stringify({ paths }) });
+      if (!(await askConfirm({
+        message: `Xóa ${paths.length} mục? ${policy.permanent} mục sẽ bị xóa vĩnh viễn, ${policy.trashed} mục sẽ được chuyển vào thùng rác.`,
         danger: true,
         confirmLabel: "Xóa",
-      }))
-    )
-      return;
-    try {
+      }))) return;
       const data = await requestFileApi("/api/files/trash", {
         method: "POST",
         body: JSON.stringify({ paths }),
       });
+      if (data.queued) await waitForDeleteJob(data.jobId);
       if (data.results?.some((item: any) => !item.success))
         setFileError("Một số mục không thể chuyển vào thùng rác.");
-      else notify("success", data.message || "Đã xử lý các mục đã chọn.");
+      else if (!data.queued) notify("success", data.message || "Đã xử lý các mục đã chọn.");
       setSelectedPaths([]);
       await loadFiles(currentPath, null, "none");
     } catch (error: any) {
@@ -1475,14 +1507,18 @@ export default function Home() {
     if (!sessionReady) return;
     const itemName =
       filePath.replace(/\\/g, "/").split("/").pop() || "tệp/thư mục";
-    if (
-      !(await askConfirm({
-        message: `Bạn có chắc chắn muốn xóa "${itemName}" không? Nếu mục nằm trên ổ đĩa mạng, mục sẽ bị xóa vĩnh viễn.`,
+    let policy: any;
+    try {
+      policy = await requestFileApi("/api/files/delete-policy", { method: "POST", body: JSON.stringify({ paths: [filePath] }) });
+    } catch (error: any) {
+      setFileError(error.message);
+      return;
+    }
+    if (!(await askConfirm({
+        message: policy.permanent ? `Xóa vĩnh viễn "${itemName}"? Mục này không thể khôi phục từ thùng rác.` : `Chuyển "${itemName}" vào thùng rác?`,
         danger: true,
         confirmLabel: "Xóa",
-      }))
-    )
-      return;
+      }))) return;
     setFileLoading(true);
     setFileError(null);
     try {
@@ -1495,7 +1531,8 @@ export default function Home() {
       );
       const data = await res.json();
       if (data.success) {
-        notify("success", data.message || "Đã xóa tệp/thư mục.");
+        if (data.queued) await waitForDeleteJob(data.jobId);
+        else notify("success", data.message || "Đã xóa tệp/thư mục.");
         await loadFiles(currentPath);
         if (viewingFile === filePath) {
           setViewingFile(null);
@@ -3230,6 +3267,7 @@ export default function Home() {
                           searchTruncated,
                           uploadProgress,
                           previewTicket,
+                          activeDeleteJob,
                         }}
                         actions={{
                           uploadInputRef,
@@ -3271,6 +3309,7 @@ export default function Home() {
                           moveOrRename,
                           deleteFileOrFolder,
                           downloadFile,
+                          cancelDeleteJob,
                         }}
                       />
                     )}

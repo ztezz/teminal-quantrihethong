@@ -65,6 +65,7 @@ export interface FileWorkspaceData {
   searchTruncated: boolean;
   uploadProgress: Record<string, number>;
   previewTicket: string | null;
+  activeDeleteJob: { id: string; state: string; progress: number; message: string } | null;
 }
 export interface FileWorkspaceActions {
   uploadInputRef: RefObject<HTMLInputElement | null>;
@@ -110,6 +111,7 @@ export interface FileWorkspaceActions {
   moveOrRename: (path: string) => void;
   deleteFileOrFolder: (path: string) => void;
   downloadFile: (path: string) => void;
+  cancelDeleteJob: () => void;
 }
 export interface FileWorkspaceProps {
   data: FileWorkspaceData;
@@ -142,6 +144,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
     searchTruncated,
     uploadProgress,
     previewTicket,
+    activeDeleteJob,
   } = data;
   const currentUser = role ? { role } : null;
   const {
@@ -184,6 +187,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
     moveOrRename,
     deleteFileOrFolder,
     downloadFile,
+    cancelDeleteJob,
   } = actions;
   return (
     <motion.div
@@ -298,6 +302,19 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
             >
               X
             </button>
+          </div>
+        )}
+        {activeDeleteJob && (
+          <div className="space-y-2 rounded-lg border border-rose-500/25 bg-rose-500/8 p-4 font-mono">
+            <div className="flex items-center gap-3 text-xs">
+              <Trash2 className={`h-4 w-4 text-rose-400 ${["pending", "running"].includes(activeDeleteJob.state) ? "animate-pulse" : ""}`} />
+              <span className="min-w-0 flex-1 truncate text-slate-200">{activeDeleteJob.message}</span>
+              <span className="font-bold tabular-nums text-rose-300">{activeDeleteJob.progress}%</span>
+              {["pending", "running"].includes(activeDeleteJob.state) && <button type="button" onClick={cancelDeleteJob} className="rounded border border-rose-400/20 px-2 py-1 text-[10px] text-rose-300 hover:bg-rose-400/10">Hủy</button>}
+            </div>
+            <div role="progressbar" aria-label="Tiến độ xóa" aria-valuemin={0} aria-valuemax={100} aria-valuenow={activeDeleteJob.progress} className="h-2 overflow-hidden rounded-full bg-black/40">
+              <div className="h-full rounded-full bg-rose-500 transition-[width] duration-300" style={{ width: `${activeDeleteJob.progress}%` }} />
+            </div>
           </div>
         )}
         {Object.keys(uploadProgress).length > 0 && (

@@ -287,6 +287,59 @@ test('permanently deletes configured paths without relying on filesystem device 
   } finally { await context.close(); }
 });
 
+test('preflights mixed deletion policies before deleting anything', async () => {
+  const context = await fixture(undefined, ['network-drive']);
+  try {
+    fs.mkdirSync(path.join(context.root, 'network-drive'));
+    fs.writeFileSync(path.join(context.root, 'network-drive', 'remote.txt'), 'remote');
+    fs.writeFileSync(path.join(context.root, 'local.txt'), 'local');
+
+    const response = await context.request('/delete-policy', { method: 'POST', body: JSON.stringify({ paths: ['network-drive/remote.txt', 'local.txt'] }) });
+    assert.equal(response.status, 200);
+    assert.equal(response.body.permanent, 1);
+    assert.equal(response.body.trashed, 1);
+    assert.equal(fs.existsSync(path.join(context.root, 'network-drive', 'remote.txt')), true);
+    assert.equal(fs.existsSync(path.join(context.root, 'local.txt')), true);
+  } finally { await context.close(); }
+});
+
+test('reconciles orphaned trash metadata and data', async () => {
+  const context = await fixture();
+  try {
+    fs.mkdirSync(context.trash, { recursive: true });
+    fs.writeFileSync(path.join(context.trash, 'metadata-only.json'), '{}');
+    fs.writeFileSync(path.join(context.trash, 'data-only'), 'orphan');
+
+    const response = await context.request('/trash');
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body.items, []);
+    assert.deepEqual(fs.readdirSync(context.trash), []);
+  } finally { await context.close(); }
+});
+
+test('runs direct directory deletion as a background job', async () => {
+  const context = await fixture(undefined, ['network-drive']);
+  try {
+    fs.mkdirSync(path.join(context.root, 'network-drive', 'folder'), { recursive: true });
+    fs.writeFileSync(path.join(context.root, 'network-drive', 'folder', 'remote.txt'), 'remote');
+    const queued = await context.request(`/?path=${encodeURIComponent('network-drive/folder')}`, { method: 'DELETE' });
+    assert.equal(queued.status, 202);
+    assert.equal(queued.body.queued, true);
+
+    let job;
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const response = await context.request(`/delete-jobs/${queued.body.jobId}`);
+      assert.equal(response.status, 200);
+      job = response.body.job;
+      if (!['pending', 'running'].includes(job.state)) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(job.state, 'success');
+    assert.equal(job.progress, 100);
+    assert.equal(fs.existsSync(path.join(context.root, 'network-drive', 'folder')), false);
+  } finally { await context.close(); }
+});
+
 test('permanently deletes files when the trash directory is on another filesystem', async t => {
   if (process.platform === 'win32') {
     t.skip('The test requires a separate mounted filesystem');

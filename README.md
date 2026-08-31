@@ -120,6 +120,8 @@ Mở `http://localhost:3000`.
 | `FILE_MANAGER_TRASH_DIR` | Backend | Nơi lưu thùng rác, phải có quyền ghi. |
 | `FILE_MANAGER_SNAPSHOT_DIR` | Backend | Kho snapshot nội bộ, không đặt trong thư mục được web server phục vụ. |
 | `FILE_MANAGER_DIRECT_DELETE_PATHS` | Backend | Danh sách đường dẫn tương đối với `FILE_MANAGER_ROOT`, phân cách bằng dấu phẩy. Mọi mục trong các nhánh này luôn bị xóa trực tiếp, không snapshot và không vào thùng rác. |
+| `FILE_DELETE_CONCURRENCY` | Backend | Số mục được xóa đồng thời trong một request/job, giới hạn `1-10`, mặc định `4`. Nên dùng `2-4` cho rclone/FUSE. |
+| `FILE_DELETE_BACKGROUND_THRESHOLD` | Backend | Số mục từ đó thao tác xóa hàng loạt chuyển sang job nền, giới hạn `2-100`, mặc định `20`. Thư mục trên nhánh xóa trực tiếp luôn chạy nền. |
 | `QUICK_SHARE_DIR` | Backend | Thư mục tạm riêng cho truyền file công khai, mặc định là `terminal-quick-share` trong thư mục tạm hệ điều hành. Không đặt trong File Manager hoặc thư mục web server phục vụ. |
 | `QUICK_SHARE_MAX_FILE_MB` | Backend | Dung lượng tối đa của file truyền nhanh, mặc định và tối đa `2048` (2 GB). |
 | `QUICK_SHARE_TTL_MINUTES` | Backend | Thời gian tồn tại của file truyền nhanh, mặc định và tối đa `1440` (24 giờ). |
@@ -405,6 +407,10 @@ Backend tự tạo snapshot cho file thường trước khi chỉnh sửa, move/
 - Khôi phục xác minh checksum, snapshot trạng thái hiện tại rồi ghi file theo cách atomic.
 - Khôi phục và xóa snapshot luôn yêu cầu step-up authorization.
 - Kho snapshot bị chặn khỏi File Manager thông thường.
+- Trước khi xóa, frontend hỏi backend để hiển thị chính xác số mục vào thùng rác và số mục bị xóa vĩnh viễn.
+- Xóa hàng loạt lớn và xóa trực tiếp thư mục chạy dưới dạng job nền có tiến trình và nút hủy. Hủy có thể để lại phần thư mục chưa xử lý; các mục đã xóa trước đó không thể phục hồi.
+- Backend tự hoàn tất transaction thùng rác bị gián đoạn và dọn metadata/data mồ côi khi khởi động hoặc khi mở thùng rác.
+- Job xóa được giữ trong bộ nhớ và được giới hạn số lượng; khi backend khởi động lại, job đang chạy dừng và người dùng cần tải lại danh sách file.
 
 ## Quản Lý Systemd Và Process
 
