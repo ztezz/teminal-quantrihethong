@@ -13,6 +13,10 @@ const decode = (value: string) => {
 
 export const randomSalt = () => encode(crypto.getRandomValues(new Uint8Array(16)));
 
+export async function importVaultKey(value: string) {
+  return crypto.subtle.importKey("raw", decode(value), { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+}
+
 export async function deriveVaultKey(password: string, salt: string, iterations: number) {
   const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
   return crypto.subtle.deriveKey({ name: "PBKDF2", salt: decode(salt), iterations, hash: "SHA-256" }, material, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);

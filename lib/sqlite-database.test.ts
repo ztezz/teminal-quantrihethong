@@ -164,3 +164,15 @@ test('vault items enforce optimistic versions, history, trash, and user isolatio
   assert.equal(database.purgeVaultItem(rootUser.id, item.id), true);
   database.close();
 });
+
+test('managed vault reset removes old encrypted data and installs the wrapped account key', () => {
+  const database = new SqliteDatabase(':memory:'); database.saveUser(rootUser);
+  database.createVaultConfig(rootUser.id, 'old-salt', 'old-check', 600_000);
+  database.createVaultItem({ id: 'old-item', userId: rootUser.id, envelope: 'old-encrypted-envelope', content: 'old-encrypted-content', version: 1, pinned: false, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' });
+  database.saveNote({ id: 'legacy', userId: rootUser.id, titleCipher: 'legacy-title', contentCipher: 'legacy-content', pinned: false, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' });
+  database.resetManagedVault(rootUser.id, 'wrapped-account-key');
+  assert.deepEqual(database.listVaultItems(rootUser.id), []);
+  assert.deepEqual(database.getNotes(rootUser.id), []);
+  assert.deepEqual(database.getVaultConfig(rootUser.id), { salt: 'managed-v1', checkCipher: 'wrapped-account-key', iterations: 0, createdAt: database.getVaultConfig(rootUser.id)!.createdAt });
+  database.close();
+});

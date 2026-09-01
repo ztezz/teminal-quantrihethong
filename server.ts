@@ -935,18 +935,18 @@ async function startServer() {
 
   expressApp.get('/api/vault/config', (req, res) => {
     const context = vaultContext(req, res, true); if (!context) return;
-    const config = db.getVaultConfig(context.user.id);
+    let config = db.getVaultConfig(context.user.id); let reset = false;
+    if (!config || config.salt !== 'managed-v1') {
+      const key = crypto.randomBytes(32).toString('base64url');
+      db.resetManagedVault(context.user.id, encryptSecret(key)); config = db.getVaultConfig(context.user.id); reset = true;
+      auditRequest(req, { category: 'vault', action: 'reset', event: 'Vault reset and switched to account-managed key', level: 'warning' });
+    }
     auditRequest(req, { category: 'vault', action: 'open', event: 'Encrypted vault accessed' });
-    return res.json({ success: true, configured: Boolean(config), config, legacyCount: db.getNotes(context.user.id).length });
+    return res.json({ success: true, mode: 'managed', key: decryptSecret(config!.checkCipher), reset });
   });
   expressApp.post('/api/vault/config', (req, res) => {
     const context = vaultContext(req, res, true); if (!context) return;
-    if (db.getVaultConfig(context.user.id)) return res.status(409).json({ success: false, error: 'Két đã được khởi tạo' });
-    const { salt, checkCipher, iterations } = req.body;
-    if (!validCipher(salt, 200) || !validCipher(checkCipher, 1000) || !Number.isInteger(iterations) || iterations < 200_000 || iterations > 2_000_000) return res.status(400).json({ success: false, error: 'Cấu hình két không hợp lệ' });
-    db.createVaultConfig(context.user.id, salt, checkCipher, iterations);
-    auditRequest(req, { category: 'vault', action: 'configure', event: 'Zero-knowledge vault configured' });
-    return res.status(201).json({ success: true });
+    return res.status(410).json({ success: false, error: 'Két hiện được mở bằng tài khoản và không còn dùng mật khẩu két riêng' });
   });
   expressApp.get('/api/vault/items', (req, res) => {
     const context = vaultContext(req, res, true); if (!context) return;
