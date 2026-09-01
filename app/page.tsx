@@ -3260,7 +3260,7 @@ export default function Home() {
                       )}
 
                     {activeTab === "notes" && (
-                      <NotesWorkspace active={activeTab === "notes"} askConfirm={askConfirm} notify={notify} />
+                      <NotesWorkspace active={activeTab === "notes"} askConfirm={askConfirm} notify={notify} requestStepUp={requestStepUp} />
                     )}
 
                     {/* TAB 3: Admin Configurations & Security Settings */}

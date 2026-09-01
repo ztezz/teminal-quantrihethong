@@ -144,3 +144,23 @@ test('secure notes are isolated by user and removed with their owner', () => {
   assert.deepEqual(database.getNotes(rootUser.id), []);
   database.close();
 });
+
+test('vault items enforce optimistic versions, history, trash, and user isolation', () => {
+  const database = new SqliteDatabase(':memory:'); const secondUser = { ...rootUser, id: 'vault-second', username: 'vault-second' };
+  database.saveUser(rootUser); database.saveUser(secondUser); database.createVaultConfig(rootUser.id, 'salt-cipher', 'check-cipher', 600_000);
+  const item = { id: 'vault-1', userId: rootUser.id, envelope: 'encrypted-envelope-v1', content: 'encrypted-content-v1', version: 1, pinned: false, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' };
+  database.createVaultItem(item);
+  assert.equal(database.getVaultConfig(rootUser.id)?.iterations, 600_000);
+  assert.equal(database.getVaultItem(secondUser.id, item.id), undefined);
+  assert.equal(database.updateVaultItem(rootUser.id, item.id, 1, 'encrypted-envelope-v2', 'encrypted-content-v2', true), true);
+  assert.equal(database.updateVaultItem(rootUser.id, item.id, 1, 'stale-envelope', 'stale-content', false), false);
+  assert.equal(database.getVaultItem(rootUser.id, item.id)?.version, 2);
+  assert.equal(database.getVaultVersions(rootUser.id, item.id)[0].content, item.content);
+  assert.equal(database.trashVaultItem(rootUser.id, item.id), true);
+  assert.equal(database.listVaultItems(rootUser.id).length, 0);
+  assert.equal(database.listVaultItems(rootUser.id, true).length, 1);
+  assert.equal(database.restoreVaultItem(rootUser.id, item.id), true);
+  assert.equal(database.trashVaultItem(rootUser.id, item.id), true);
+  assert.equal(database.purgeVaultItem(rootUser.id, item.id), true);
+  database.close();
+});

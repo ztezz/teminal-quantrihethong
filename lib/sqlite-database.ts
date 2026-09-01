@@ -10,6 +10,7 @@ export type AuditResult = 'success' | 'failure';
 export type AuditEntry = { id: number; category: string; action: string; event: string; level: AuditLevel; result: AuditResult; ip: string; sessionId?: string; metadata?: Record<string, unknown>; timestamp: string; previousHash: string; hash: string };
 export type StoredDeleteJob = { id: string; owner: string; state: string; progress: number; completed: number; total: number; message: string; paths: unknown[]; results: Record<string, unknown>[]; createdAt: string; finishedAt?: string; cancelRequested: boolean; idempotencyKey?: string };
 export type StoredNote = { id: string; userId: string; titleCipher: string; contentCipher: string; pinned: boolean; createdAt: string; updatedAt: string };
+export type VaultItem = { id: string; userId: string; envelope: string; content: string; version: number; pinned: boolean; deletedAt?: string; createdAt: string; updatedAt: string };
 
 type LegacyData = {
   settings?: Record<string, string>;
@@ -87,6 +88,22 @@ export class SqliteDatabase {
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS secure_notes_user_updated_idx ON secure_notes(user_id, pinned DESC, updated_at DESC);
+      CREATE TABLE IF NOT EXISTS vault_config (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, salt TEXT NOT NULL,
+        check_cipher TEXT NOT NULL, iterations INTEGER NOT NULL, created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS vault_items (
+        id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        envelope TEXT NOT NULL, content TEXT NOT NULL, version INTEGER NOT NULL, pinned INTEGER NOT NULL,
+        deleted_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS vault_items_user_updated_idx ON vault_items(user_id, deleted_at, pinned DESC, updated_at DESC);
+      CREATE TABLE IF NOT EXISTS vault_versions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, item_id TEXT NOT NULL REFERENCES vault_items(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, envelope TEXT NOT NULL, content TEXT NOT NULL,
+        version INTEGER NOT NULL, created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS vault_versions_item_idx ON vault_versions(user_id, item_id, version DESC);
     `);
   }
 
@@ -260,6 +277,17 @@ export class SqliteDatabase {
   getNote(userId: string, id: string) { return this.getNotes(userId).find(note => note.id === id); }
   saveNote(note: StoredNote) { this.database.prepare('INSERT INTO secure_notes (id, user_id, title_cipher, content_cipher, pinned, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title_cipher=excluded.title_cipher,content_cipher=excluded.content_cipher,pinned=excluded.pinned,updated_at=excluded.updated_at WHERE secure_notes.user_id=excluded.user_id').run(note.id, note.userId, note.titleCipher, note.contentCipher, note.pinned ? 1 : 0, note.createdAt, note.updatedAt); }
   deleteNote(userId: string, id: string) { return Number(this.database.prepare('DELETE FROM secure_notes WHERE user_id = ? AND id = ?').run(userId, id).changes) > 0; }
+  getVaultConfig(userId: string) { const row = this.database.prepare('SELECT * FROM vault_config WHERE user_id = ?').get(userId) as Record<string, unknown> | undefined; return row ? { salt: String(row.salt), checkCipher: String(row.check_cipher), iterations: Number(row.iterations), createdAt: String(row.created_at) } : undefined; }
+  createVaultConfig(userId: string, salt: string, checkCipher: string, iterations: number) { this.database.prepare('INSERT INTO vault_config (user_id, salt, check_cipher, iterations, created_at) VALUES (?, ?, ?, ?, ?)').run(userId, salt, checkCipher, iterations, new Date().toISOString()); }
+  listVaultItems(userId: string, trash = false) { return (this.database.prepare(`SELECT * FROM vault_items WHERE user_id = ? AND deleted_at IS ${trash ? 'NOT ' : ''}NULL ORDER BY pinned DESC, updated_at DESC`).all(userId) as Record<string, unknown>[]).map(row => ({ id: String(row.id), userId: String(row.user_id), envelope: String(row.envelope), content: String(row.content), version: Number(row.version), pinned: Boolean(row.pinned), deletedAt: row.deleted_at ? String(row.deleted_at) : undefined, createdAt: String(row.created_at), updatedAt: String(row.updated_at) } satisfies VaultItem)); }
+  getVaultItem(userId: string, id: string) { const row = this.database.prepare('SELECT * FROM vault_items WHERE user_id = ? AND id = ?').get(userId, id) as Record<string, unknown> | undefined; return row ? ({ id: String(row.id), userId: String(row.user_id), envelope: String(row.envelope), content: String(row.content), version: Number(row.version), pinned: Boolean(row.pinned), deletedAt: row.deleted_at ? String(row.deleted_at) : undefined, createdAt: String(row.created_at), updatedAt: String(row.updated_at) } satisfies VaultItem) : undefined; }
+  createVaultItem(item: VaultItem) { this.database.prepare('INSERT INTO vault_items (id,user_id,envelope,content,version,pinned,deleted_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)').run(item.id, item.userId, item.envelope, item.content, item.version, item.pinned ? 1 : 0, null, item.createdAt, item.updatedAt); }
+  updateVaultItem(userId: string, id: string, expectedVersion: number, envelope: string, content: string, pinned: boolean) { const current = this.getVaultItem(userId, id); if (!current || current.deletedAt || current.version !== expectedVersion) return false; this.database.exec('BEGIN IMMEDIATE'); try { this.database.prepare('INSERT INTO vault_versions (item_id,user_id,envelope,content,version,created_at) VALUES (?,?,?,?,?,?)').run(id,userId,current.envelope,current.content,current.version,new Date().toISOString()); const result = this.database.prepare('UPDATE vault_items SET envelope=?,content=?,pinned=?,version=version+1,updated_at=? WHERE user_id=? AND id=? AND version=? AND deleted_at IS NULL').run(envelope,content,pinned?1:0,new Date().toISOString(),userId,id,expectedVersion); this.database.prepare('DELETE FROM vault_versions WHERE id IN (SELECT id FROM vault_versions WHERE user_id=? AND item_id=? ORDER BY version DESC LIMIT -1 OFFSET 20)').run(userId,id); this.database.exec('COMMIT'); return Number(result.changes) > 0; } catch (error) { this.database.exec('ROLLBACK'); throw error; } }
+  trashVaultItem(userId: string, id: string) { return Number(this.database.prepare('UPDATE vault_items SET deleted_at=?,updated_at=? WHERE user_id=? AND id=? AND deleted_at IS NULL').run(new Date().toISOString(),new Date().toISOString(),userId,id).changes) > 0; }
+  restoreVaultItem(userId: string, id: string) { return Number(this.database.prepare('UPDATE vault_items SET deleted_at=NULL,updated_at=? WHERE user_id=? AND id=? AND deleted_at IS NOT NULL').run(new Date().toISOString(),userId,id).changes) > 0; }
+  purgeVaultItem(userId: string, id: string) { return Number(this.database.prepare('DELETE FROM vault_items WHERE user_id=? AND id=? AND deleted_at IS NOT NULL').run(userId,id).changes) > 0; }
+  getVaultVersions(userId: string, id: string) { return this.database.prepare('SELECT id,envelope,content,version,created_at AS createdAt FROM vault_versions WHERE user_id=? AND item_id=? ORDER BY version DESC LIMIT 20').all(userId,id) as Array<{ id: number; envelope: string; content: string; version: number; createdAt: string }>; }
+  pruneVaultTrash(cutoff: string) { return Number(this.database.prepare('DELETE FROM vault_items WHERE deleted_at IS NOT NULL AND deleted_at < ?').run(cutoff).changes); }
   getUserById(id: string) { const row = this.database.prepare('SELECT * FROM users WHERE id = ?').get(id) as Record<string, unknown> | undefined; return row ? this.rowToUser(row) : undefined; }
   getUserByName(username: string) { const row = this.database.prepare('SELECT * FROM users WHERE username = ? COLLATE NOCASE').get(username) as Record<string, unknown> | undefined; return row ? this.rowToUser(row) : undefined; }
   saveUser(user: StoredUser) { this.database.prepare('INSERT INTO users (id, username, password_hash, legacy_salt, role, enabled, created_at, totp_secret, recovery_codes, pending_totp_secret) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET username=excluded.username,password_hash=excluded.password_hash,legacy_salt=excluded.legacy_salt,role=excluded.role,enabled=excluded.enabled,created_at=excluded.created_at,totp_secret=excluded.totp_secret,recovery_codes=excluded.recovery_codes,pending_totp_secret=excluded.pending_totp_secret').run(user.id, user.username, user.passwordHash, user.legacySalt ?? null, user.role, user.enabled ? 1 : 0, user.createdAt, user.totpSecret ?? null, user.recoveryCodes ? JSON.stringify(user.recoveryCodes) : null, user.pendingTotpSecret ?? null); }
