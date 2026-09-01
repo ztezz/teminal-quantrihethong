@@ -934,7 +934,7 @@ async function startServer() {
   const vaultPublic = (item: ReturnType<typeof db.listVaultItems>[number], includeContent = false) => ({ id: item.id, envelope: item.envelope, ...(includeContent ? { content: item.content } : {}), version: item.version, pinned: item.pinned, deletedAt: item.deletedAt, createdAt: item.createdAt, updatedAt: item.updatedAt });
 
   expressApp.get('/api/vault/config', (req, res) => {
-    const context = vaultContext(req, res, true); if (!context) return;
+    const context = vaultContext(req, res); if (!context) return;
     let config = db.getVaultConfig(context.user.id); let reset = false;
     if (!config || config.salt !== 'managed-v1') {
       const key = crypto.randomBytes(32).toString('base64url');
@@ -945,20 +945,20 @@ async function startServer() {
     return res.json({ success: true, mode: 'managed', key: decryptSecret(config!.checkCipher), reset });
   });
   expressApp.post('/api/vault/config', (req, res) => {
-    const context = vaultContext(req, res, true); if (!context) return;
+    const context = vaultContext(req, res); if (!context) return;
     return res.status(410).json({ success: false, error: 'Két hiện được mở bằng tài khoản và không còn dùng mật khẩu két riêng' });
   });
   expressApp.get('/api/vault/items', (req, res) => {
-    const context = vaultContext(req, res, true); if (!context) return;
+    const context = vaultContext(req, res); if (!context) return;
     const trash = req.query.trash === 'true'; return res.json({ success: true, items: db.listVaultItems(context.user.id, trash).map(item => vaultPublic(item)) });
   });
   expressApp.get('/api/vault/items/:id', (req, res) => {
-    const context = vaultContext(req, res, true); if (!context) return;
+    const context = vaultContext(req, res); if (!context) return;
     const item = db.getVaultItem(context.user.id, req.params.id); if (!item) return res.status(404).json({ success: false, error: 'Không tìm thấy mục trong két' });
     return res.json({ success: true, item: vaultPublic(item, true) });
   });
   expressApp.post('/api/vault/items', (req, res) => {
-    const context = vaultContext(req, res, true); if (!context) return;
+    const context = vaultContext(req, res); if (!context) return;
     const { envelope, content, pinned = false, clientId } = req.body;
     if (!validCipher(envelope, 20_000) || !validCipher(content) || typeof pinned !== 'boolean' || (clientId !== undefined && (typeof clientId !== 'string' || !/^[0-9a-f-]{36}$/i.test(clientId)))) return res.status(400).json({ success: false, error: 'Dữ liệu mã hóa không hợp lệ' });
     const now = new Date().toISOString(); const item = { id: clientId || crypto.randomUUID(), userId: context.user.id, envelope, content, version: 1, pinned, deletedAt: undefined, createdAt: now, updatedAt: now };
@@ -966,7 +966,7 @@ async function startServer() {
     return res.status(201).json({ success: true, item: vaultPublic(item) });
   });
   expressApp.put('/api/vault/items/:id', (req, res) => {
-    const context = vaultContext(req, res, true); if (!context) return;
+    const context = vaultContext(req, res); if (!context) return;
     const { envelope, content, pinned = false, version } = req.body;
     if (!validCipher(envelope, 20_000) || !validCipher(content) || typeof pinned !== 'boolean' || !Number.isInteger(version)) return res.status(400).json({ success: false, error: 'Dữ liệu mã hóa không hợp lệ' });
     const existing = db.getVaultItem(context.user.id, req.params.id); if (!existing) return res.status(404).json({ success: false, error: 'Không tìm thấy mục trong két' });
@@ -975,38 +975,38 @@ async function startServer() {
     return res.json({ success: true, item: vaultPublic(db.getVaultItem(context.user.id, existing.id)!) });
   });
   expressApp.delete('/api/vault/items/:id', (req, res) => {
-    const context = vaultContext(req, res, true); if (!context) return;
+    const context = vaultContext(req, res); if (!context) return;
     if (!db.trashVaultItem(context.user.id, req.params.id)) return res.status(404).json({ success: false, error: 'Không tìm thấy mục trong két' });
     auditRequest(req, { category: 'vault', action: 'trash', event: 'Vault item moved to trash', metadata: { itemId: req.params.id } }); return res.json({ success: true });
   });
   expressApp.post('/api/vault/items/:id/restore', (req, res) => {
-    const context = vaultContext(req, res, true); if (!context) return;
+    const context = vaultContext(req, res); if (!context) return;
     if (!db.restoreVaultItem(context.user.id, req.params.id)) return res.status(404).json({ success: false, error: 'Không tìm thấy mục trong thùng rác' });
     auditRequest(req, { category: 'vault', action: 'restore', event: 'Vault item restored', metadata: { itemId: req.params.id } }); return res.json({ success: true });
   });
   expressApp.delete('/api/vault/items/:id/purge', (req, res) => {
-    const context = vaultContext(req, res, true); if (!context) return;
+    const context = vaultContext(req, res); if (!context) return;
     if (!db.purgeVaultItem(context.user.id, req.params.id)) return res.status(404).json({ success: false, error: 'Không tìm thấy mục trong thùng rác' });
     auditRequest(req, { category: 'vault', action: 'purge', event: 'Vault item permanently deleted', level: 'warning', metadata: { itemId: req.params.id } }); return res.json({ success: true });
   });
   expressApp.get('/api/vault/items/:id/versions', (req, res) => {
-    const context = vaultContext(req, res, true); if (!context) return;
+    const context = vaultContext(req, res); if (!context) return;
     if (!db.getVaultItem(context.user.id, req.params.id)) return res.status(404).json({ success: false, error: 'Không tìm thấy mục trong két' });
     return res.json({ success: true, versions: db.getVaultVersions(context.user.id, req.params.id) });
   });
   expressApp.get('/api/vault/export', (req, res) => {
-    const context = vaultContext(req, res, true); if (!context) return;
+    const context = vaultContext(req, res); if (!context) return;
     const config = db.getVaultConfig(context.user.id); if (!config) return res.status(404).json({ success: false, error: 'Két chưa được khởi tạo' });
     auditRequest(req, { category: 'vault', action: 'export', event: 'Encrypted vault exported' });
     return res.json({ success: true, format: 'nodeshell-vault-v1', exportedAt: new Date().toISOString(), config, items: [...db.listVaultItems(context.user.id), ...db.listVaultItems(context.user.id, true)].map(item => vaultPublic(item, true)) });
   });
   expressApp.get('/api/vault/legacy', (req, res) => {
-    const context = vaultContext(req, res, true); if (!context) return;
+    const context = vaultContext(req, res); if (!context) return;
     try { return res.json({ success: true, notes: db.getNotes(context.user.id).map(publicNote) }); }
     catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message || 'Không thể đọc ghi chú cũ' }); }
   });
   expressApp.delete('/api/vault/legacy/:id', (req, res) => {
-    const context = vaultContext(req, res, true); if (!context) return;
+    const context = vaultContext(req, res); if (!context) return;
     if (!db.deleteNote(context.user.id, req.params.id)) return res.status(404).json({ success: false, error: 'Không tìm thấy ghi chú cũ' });
     auditRequest(req, { category: 'vault', action: 'migrate', event: 'Legacy note migrated to zero-knowledge vault', metadata: { legacyId: req.params.id } }); return res.json({ success: true });
   });
