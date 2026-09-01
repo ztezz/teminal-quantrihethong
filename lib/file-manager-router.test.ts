@@ -172,6 +172,31 @@ test('rejects an upload chunk with the wrong offset', async () => {
   } finally { await context.close(); }
 });
 
+test('creates a nested directory tree for folder uploads', async () => {
+  const context = await fixture();
+  try {
+    const response = await context.request('/mkdir-tree', {
+      method: 'POST',
+      body: JSON.stringify({ dirPath: '', paths: ['photos/2025', 'photos/2026/raw'] })
+    });
+    assert.equal(response.status, 201);
+    assert.equal(fs.statSync(path.join(context.root, 'photos', '2025')).isDirectory(), true);
+    assert.equal(fs.statSync(path.join(context.root, 'photos', '2026', 'raw')).isDirectory(), true);
+  } finally { await context.close(); }
+});
+
+test('rejects unsafe directory paths for folder uploads', async () => {
+  const context = await fixture();
+  try {
+    const response = await context.request('/mkdir-tree', {
+      method: 'POST',
+      body: JSON.stringify({ dirPath: '', paths: ['safe', '../outside'] })
+    });
+    assert.equal(response.status, 400);
+    assert.equal(fs.existsSync(path.join(context.root, '..', 'outside')), false);
+  } finally { await context.close(); }
+});
+
 test('reserves upload destinations to prevent a completion-time name collision', async () => {
   const context = await fixture();
   try {

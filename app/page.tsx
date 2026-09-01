@@ -394,6 +394,7 @@ export default function Home() {
   const [editorOriginal, setEditorOriginal] = useState("");
   const pendingTerminalCwdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
+  const uploadFolderInputRef = useRef<HTMLInputElement>(null);
   const fileListRequestRef = useRef(0);
   const fileOpenRequestRef = useRef(0);
   const sqliteOpenRequestRef = useRef(0);
@@ -1256,19 +1257,39 @@ export default function Home() {
     setFileLoading(true);
     setFileError(null);
     const directory = currentPath;
+    const uploadItems = files.map((file) => {
+      const relativePath = file.webkitRelativePath.replace(/\\/g, "/");
+      const parts = relativePath ? relativePath.split("/") : [file.name];
+      return { file, relativeDirectory: parts.slice(0, -1).join("/"), displayName: relativePath || file.name };
+    });
     setUploadProgress(
       Object.fromEntries(
-        files.map((file) => [
-          `${file.name}-${file.size}-${file.lastModified}`,
+        uploadItems.map(({ file, displayName }) => [
+          `${displayName}-${file.size}-${file.lastModified}`,
           0,
         ]),
       ),
     );
-    const uploadOne = async (file: globalThis.File): Promise<void> => {
-      const key = `${file.name}-${file.size}-${file.lastModified}`;
+    const relativeDirectories = [...new Set(uploadItems.map((item) => item.relativeDirectory).filter(Boolean))];
+    if (relativeDirectories.length) {
+      try {
+        await requestFileApi("/api/files/mkdir-tree", {
+          method: "POST",
+          body: JSON.stringify({ dirPath: directory, paths: relativeDirectories }),
+        });
+      } catch (error: any) {
+        setUploadProgress({});
+        setFileLoading(false);
+        setFileError(error.message);
+        return;
+      }
+    }
+    const uploadOne = async ({ file, relativeDirectory, displayName }: typeof uploadItems[number]): Promise<void> => {
+      const key = `${displayName}-${file.size}-${file.lastModified}`;
+      const targetDirectory = [directory, relativeDirectory].filter(Boolean).join("/");
       const initialized = await requestFileApi("/api/files/upload", {
         method: "POST",
-        body: JSON.stringify({ name: file.name, dirPath: directory, size: file.size }),
+        body: JSON.stringify({ name: file.name, dirPath: targetDirectory, size: file.size }),
       });
       const uploadId = String(initialized.uploadId);
       const chunkSize = Number(initialized.chunkSize);
@@ -1310,7 +1331,15 @@ export default function Home() {
       }
     };
 
-    const results = await Promise.allSettled(files.map(uploadOne));
+    const results: PromiseSettledResult<void>[] = [];
+    let nextUpload = 0;
+    await Promise.all(Array.from({ length: Math.min(4, uploadItems.length) }, async () => {
+      while (nextUpload < uploadItems.length) {
+        const item = uploadItems[nextUpload++];
+        try { await uploadOne(item); results.push({ status: "fulfilled", value: undefined }); }
+        catch (reason) { results.push({ status: "rejected", reason }); }
+      }
+    }));
     setUploadProgress({});
     const failures = results
       .filter((result): result is PromiseRejectedResult => result.status === "rejected")
@@ -3021,6 +3050,17 @@ export default function Home() {
                 event.target.value = "";
               }}
             />
+            <input
+              ref={uploadFolderInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+              onChange={(event) => {
+                uploadFiles(Array.from(event.target.files || []));
+                event.target.value = "";
+              }}
+            />
             <Header
               socketStatus={displayedSocketStatus}
               onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
@@ -3298,6 +3338,7 @@ export default function Home() {
                         }}
                         actions={{
                           uploadInputRef,
+                          uploadFolderInputRef,
                           uploadFiles,
                           loadFiles,
                           openTrash,

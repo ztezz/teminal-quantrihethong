@@ -14,6 +14,7 @@ const fsp = fs.promises;
 const MAX_EDITOR_SIZE = 2 * 1024 * 1024;
 const MAX_UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
 const MAX_BULK_ITEMS = 100;
+const MAX_UPLOAD_DIRECTORIES = 10000;
 const MAX_SEARCH_RESULTS = 500;
 const MAX_SEARCH_ENTRIES = 20_000;
 const PREVIEW_TYPES: Record<string, string> = {
@@ -1018,6 +1019,22 @@ export function createFileManagerRouter({ hasSession, sessionRole, sessionUserId
       const destinationDir = resolveInsideRoot(req.body.destinationDir); await mustBeDirectory(destinationDir); const name = req.body.name ?? path.basename(source); if (!validName(name)) throw httpError(400, 'Tên liên kết không hợp lệ');
       const target = path.join(destinationDir, name); await ensureMissing(target); const type = process.platform === 'win32' ? ((await fsp.stat(source)).isDirectory() ? 'junction' : 'file') : undefined;
       await fsp.symlink(source, target, type); await log(`Đã tạo symlink: ${relative(target)} -> ${relative(source)}`, clientIp(req)); return res.status(201).json({ success: true, path: relative(target) });
+    } catch (error) { return fail(res, error); }
+  });
+
+  router.post('/mkdir-tree', async (req, res) => {
+    try {
+      const { dirPath, paths } = req.body;
+      if (!Array.isArray(paths) || paths.length > MAX_UPLOAD_DIRECTORIES) throw httpError(400, `Danh sách thư mục không được vượt quá ${MAX_UPLOAD_DIRECTORIES} mục`);
+      const directory = resolveInsideRoot(dirPath); await mustBeDirectory(directory);
+      const uniquePaths = [...new Set(paths)];
+      if (uniquePaths.some(directoryPath => typeof directoryPath !== 'string' || !directoryPath || directoryPath.split('/').some(segment => !validName(segment)))) throw httpError(400, 'Đường dẫn thư mục upload không hợp lệ');
+      for (const directoryPath of uniquePaths as string[]) {
+        const target = resolveInsideRoot(path.join(relative(directory), directoryPath));
+        await fsp.mkdir(target, { recursive: true });
+      }
+      await log(`Đã tạo cây thư mục upload gồm ${uniquePaths.length} mục tại: ${relative(directory) || '/'}`, clientIp(req));
+      return res.status(201).json({ success: true, created: uniquePaths.length });
     } catch (error) { return fail(res, error); }
   });
 

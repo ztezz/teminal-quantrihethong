@@ -13,6 +13,7 @@ import {
   Eye,
   FilePlus,
   Folder,
+  FolderUp,
   FolderPlus,
   History,
   Lock,
@@ -70,6 +71,7 @@ export interface FileWorkspaceData {
 }
 export interface FileWorkspaceActions {
   uploadInputRef: RefObject<HTMLInputElement | null>;
+  uploadFolderInputRef: RefObject<HTMLInputElement | null>;
   uploadFiles: (files: globalThis.File[]) => void;
   loadFiles: (
     path?: string,
@@ -151,6 +153,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
   const currentUser = role ? { role } : null;
   const {
     uploadInputRef,
+    uploadFolderInputRef,
     uploadFiles,
     loadFiles,
     openTrash,
@@ -240,7 +243,15 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
               className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white rounded transition cursor-pointer"
             >
               <Upload className="w-3.5 h-3.5" />
-              <span>Upload</span>
+              <span>Upload tệp</span>
+            </button>
+            <button
+              onClick={() => uploadFolderInputRef.current?.click()}
+              disabled={currentUser?.role === "viewer"}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-600 hover:bg-teal-500 text-xs font-semibold text-white rounded transition cursor-pointer"
+            >
+              <FolderUp className="w-3.5 h-3.5" />
+              <span>Upload thư mục</span>
             </button>
             <button
               onClick={openTrash}
@@ -628,7 +639,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
           >
             <div className="flex flex-wrap gap-2 p-2 border-b border-white/10 text-[11px]">
               <span className="text-slate-500 mr-auto">
-                Kéo nhiều tệp từ máy tính vào đây để upload
+                Kéo nhiều tệp từ máy tính vào đây hoặc dùng “Upload thư mục” để giữ nguyên cấu trúc
               </span>
               {currentUser && ["admin", "root"].includes(currentUser.role) && (
                 <button
