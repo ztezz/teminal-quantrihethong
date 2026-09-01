@@ -130,3 +130,17 @@ test('persists deletion jobs, enforces idempotency, and marks interrupted work',
   assert.equal(database.getDeleteJob('delete-1')?.message, 'Interrupted by server restart');
   database.close();
 });
+
+test('secure notes are isolated by user and removed with their owner', () => {
+  const database = new SqliteDatabase(':memory:');
+  const secondUser = { ...rootUser, id: 'second', username: 'second' };
+  database.saveUser(rootUser); database.saveUser(secondUser);
+  const note = { id: 'note-1', userId: rootUser.id, titleCipher: 'encrypted-title', contentCipher: 'encrypted-content', pinned: true, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' };
+  database.saveNote(note);
+  assert.deepEqual(database.getNotes(rootUser.id), [note]);
+  assert.deepEqual(database.getNotes(secondUser.id), []);
+  assert.equal(database.deleteNote(secondUser.id, note.id), false);
+  database.deleteUser(rootUser.id);
+  assert.deepEqual(database.getNotes(rootUser.id), []);
+  database.close();
+});

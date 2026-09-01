@@ -9,6 +9,7 @@ export type AuditLevel = 'info' | 'warning' | 'critical';
 export type AuditResult = 'success' | 'failure';
 export type AuditEntry = { id: number; category: string; action: string; event: string; level: AuditLevel; result: AuditResult; ip: string; sessionId?: string; metadata?: Record<string, unknown>; timestamp: string; previousHash: string; hash: string };
 export type StoredDeleteJob = { id: string; owner: string; state: string; progress: number; completed: number; total: number; message: string; paths: unknown[]; results: Record<string, unknown>[]; createdAt: string; finishedAt?: string; cancelRequested: boolean; idempotencyKey?: string };
+export type StoredNote = { id: string; userId: string; titleCipher: string; contentCipher: string; pinned: boolean; createdAt: string; updatedAt: string };
 
 type LegacyData = {
   settings?: Record<string, string>;
@@ -80,6 +81,12 @@ export class SqliteDatabase {
       );
       CREATE INDEX IF NOT EXISTS file_delete_jobs_owner_created_idx ON file_delete_jobs(owner, created_at DESC);
       CREATE UNIQUE INDEX IF NOT EXISTS file_delete_jobs_owner_idempotency_idx ON file_delete_jobs(owner, idempotency_key) WHERE idempotency_key IS NOT NULL;
+      CREATE TABLE IF NOT EXISTS secure_notes (
+        id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        title_cipher TEXT NOT NULL, content_cipher TEXT NOT NULL, pinned INTEGER NOT NULL CHECK (pinned IN (0,1)),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS secure_notes_user_updated_idx ON secure_notes(user_id, pinned DESC, updated_at DESC);
     `);
   }
 
@@ -249,6 +256,10 @@ export class SqliteDatabase {
   getDeleteJobByIdempotency(owner: string, key: string) { return this.getDeleteJobs(owner, 5000).find(job => job.idempotencyKey === key); }
   interruptDeleteJobs() { this.database.prepare("UPDATE file_delete_jobs SET state='failure', progress=100, message='Interrupted by server restart', finished_at=? WHERE state IN ('pending','running','stopping')").run(new Date().toISOString()); }
   pruneDeleteJobs(limit = 500) { this.database.prepare("DELETE FROM file_delete_jobs WHERE id IN (SELECT id FROM file_delete_jobs WHERE state NOT IN ('pending','running','stopping') ORDER BY created_at DESC LIMIT -1 OFFSET ?)").run(limit); }
+  getNotes(userId: string) { return (this.database.prepare('SELECT * FROM secure_notes WHERE user_id = ? ORDER BY pinned DESC, updated_at DESC').all(userId) as Record<string, unknown>[]).map(row => ({ id: String(row.id), userId: String(row.user_id), titleCipher: String(row.title_cipher), contentCipher: String(row.content_cipher), pinned: Boolean(row.pinned), createdAt: String(row.created_at), updatedAt: String(row.updated_at) } satisfies StoredNote)); }
+  getNote(userId: string, id: string) { return this.getNotes(userId).find(note => note.id === id); }
+  saveNote(note: StoredNote) { this.database.prepare('INSERT INTO secure_notes (id, user_id, title_cipher, content_cipher, pinned, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title_cipher=excluded.title_cipher,content_cipher=excluded.content_cipher,pinned=excluded.pinned,updated_at=excluded.updated_at WHERE secure_notes.user_id=excluded.user_id').run(note.id, note.userId, note.titleCipher, note.contentCipher, note.pinned ? 1 : 0, note.createdAt, note.updatedAt); }
+  deleteNote(userId: string, id: string) { return Number(this.database.prepare('DELETE FROM secure_notes WHERE user_id = ? AND id = ?').run(userId, id).changes) > 0; }
   getUserById(id: string) { const row = this.database.prepare('SELECT * FROM users WHERE id = ?').get(id) as Record<string, unknown> | undefined; return row ? this.rowToUser(row) : undefined; }
   getUserByName(username: string) { const row = this.database.prepare('SELECT * FROM users WHERE username = ? COLLATE NOCASE').get(username) as Record<string, unknown> | undefined; return row ? this.rowToUser(row) : undefined; }
   saveUser(user: StoredUser) { this.database.prepare('INSERT INTO users (id, username, password_hash, legacy_salt, role, enabled, created_at, totp_secret, recovery_codes, pending_totp_secret) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET username=excluded.username,password_hash=excluded.password_hash,legacy_salt=excluded.legacy_salt,role=excluded.role,enabled=excluded.enabled,created_at=excluded.created_at,totp_secret=excluded.totp_secret,recovery_codes=excluded.recovery_codes,pending_totp_secret=excluded.pending_totp_secret').run(user.id, user.username, user.passwordHash, user.legacySalt ?? null, user.role, user.enabled ? 1 : 0, user.createdAt, user.totpSecret ?? null, user.recoveryCodes ? JSON.stringify(user.recoveryCodes) : null, user.pendingTotpSecret ?? null); }

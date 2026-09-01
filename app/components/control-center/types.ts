@@ -72,6 +72,7 @@ export type ActiveTab =
   | "jobs"
   | "settings"
   | "files"
+  | "notes"
   | "system"
   | "sqlite";
 

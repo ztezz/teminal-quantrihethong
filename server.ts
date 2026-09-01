@@ -24,6 +24,7 @@ import fs from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { createCorsMiddleware } from './lib/cors-config';
+import { decryptNoteText, encryptNoteText, noteEncryptionKey } from './lib/secure-notes';
 
 dotenv.config({ path: path.join(process.cwd(), '.env'), override: false, quiet: true });
 
@@ -857,6 +858,56 @@ async function startServer() {
     } catch (error: any) {
       return res.status(500).json({ success: false, error: error.message });
     }
+  });
+
+  const noteKey = () => noteEncryptionKey(process.env.AUTH_ENCRYPTION_KEY);
+  const noteAad = (userId: string, noteId: string, field: 'title' | 'content') => `${userId}:${noteId}:${field}`;
+  const publicNote = (note: ReturnType<typeof db.getNotes>[number]) => ({
+    id: note.id,
+    title: decryptNoteText(note.titleCipher, noteKey(), noteAad(note.userId, note.id, 'title')),
+    content: decryptNoteText(note.contentCipher, noteKey(), noteAad(note.userId, note.id, 'content')),
+    pinned: note.pinned,
+    createdAt: note.createdAt,
+    updatedAt: note.updatedAt
+  });
+  const validNoteInput = (title: unknown, content: unknown) => typeof title === 'string' && title.trim().length > 0 && title.trim().length <= 200 && typeof content === 'string' && content.length <= 100_000;
+
+  expressApp.get('/api/notes', (req, res) => {
+    const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    try { return res.json({ success: true, notes: db.getNotes(context.user.id).map(publicNote) }); }
+    catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message || 'Không thể đọc ghi chú' }); }
+  });
+
+  expressApp.post('/api/notes', (req, res) => {
+    const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    try {
+      const { title, content = '', pinned = false } = req.body;
+      if (!validNoteInput(title, content) || typeof pinned !== 'boolean') return res.status(400).json({ success: false, error: 'Tiêu đề phải có 1-200 ký tự và nội dung không vượt quá 100.000 ký tự' });
+      const id = crypto.randomUUID(); const now = new Date().toISOString(); const key = noteKey();
+      db.saveNote({ id, userId: context.user.id, titleCipher: encryptNoteText(title.trim(), key, noteAad(context.user.id, id, 'title')), contentCipher: encryptNoteText(content, key, noteAad(context.user.id, id, 'content')), pinned, createdAt: now, updatedAt: now });
+      auditRequest(req, { category: 'notes', action: 'create', event: 'Secure note created', metadata: { noteId: id } });
+      return res.status(201).json({ success: true, note: publicNote(db.getNote(context.user.id, id)!) });
+    } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message || 'Không thể tạo ghi chú' }); }
+  });
+
+  expressApp.put('/api/notes/:id', (req, res) => {
+    const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    try {
+      const existing = db.getNote(context.user.id, req.params.id); if (!existing) return res.status(404).json({ success: false, error: 'Không tìm thấy ghi chú' });
+      const { title, content = '', pinned = false } = req.body;
+      if (!validNoteInput(title, content) || typeof pinned !== 'boolean') return res.status(400).json({ success: false, error: 'Tiêu đề phải có 1-200 ký tự và nội dung không vượt quá 100.000 ký tự' });
+      const key = noteKey();
+      db.saveNote({ ...existing, titleCipher: encryptNoteText(title.trim(), key, noteAad(context.user.id, existing.id, 'title')), contentCipher: encryptNoteText(content, key, noteAad(context.user.id, existing.id, 'content')), pinned, updatedAt: new Date().toISOString() });
+      auditRequest(req, { category: 'notes', action: 'update', event: 'Secure note updated', metadata: { noteId: existing.id } });
+      return res.json({ success: true, note: publicNote(db.getNote(context.user.id, existing.id)!) });
+    } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message || 'Không thể cập nhật ghi chú' }); }
+  });
+
+  expressApp.delete('/api/notes/:id', (req, res) => {
+    const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    if (!db.deleteNote(context.user.id, req.params.id)) return res.status(404).json({ success: false, error: 'Không tìm thấy ghi chú' });
+    auditRequest(req, { category: 'notes', action: 'delete', event: 'Secure note deleted', metadata: { noteId: req.params.id } });
+    return res.json({ success: true });
   });
 
   expressApp.get('/api/metrics/prometheus', (req, res) => {
