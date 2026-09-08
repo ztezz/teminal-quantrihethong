@@ -357,6 +357,8 @@ export default function Home() {
   const [fileMtime, setFileMtime] = useState<string | null>(null);
   const [isEditingFile, setIsEditingFile] = useState<boolean>(false);
   const [fileLoading, setFileLoading] = useState<boolean>(false);
+  const extractingPathsRef = useRef(new Set<string>());
+  const [extractingPaths, setExtractingPaths] = useState<string[]>([]);
   const [activeDeleteJob, setActiveDeleteJob] = useState<{ id: string; state: string; progress: number; message: string } | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [showCreateFolder, setShowCreateFolder] = useState<boolean>(false);
@@ -1788,16 +1790,27 @@ export default function Home() {
   };
 
   const extractFileArchive = async (archivePath: string) => {
+    if (extractingPathsRef.current.has(archivePath)) return;
     const destinationDir = prompt("Giải nén vào:", currentPath)?.trim();
     if (!destinationDir) return;
+    extractingPathsRef.current.add(archivePath);
+    setExtractingPaths([...extractingPathsRef.current]);
+    setFileError(null);
+    const toast = notify("loading", `Đang giải nén ${archivePath}...`);
     try {
       await requestFileApi("/api/files/archive/extract", {
         method: "POST",
         body: JSON.stringify({ archivePath, destinationDir }),
       });
+      replaceToast(toast, "success", `Đã giải nén vào ${destinationDir}.`);
       await loadFiles(currentPath, null, "none");
-    } catch (error: any) {
-      setFileError(error.message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Giải nén thất bại";
+      setFileError(message);
+      replaceToast(toast, "error", message);
+    } finally {
+      extractingPathsRef.current.delete(archivePath);
+      setExtractingPaths([...extractingPathsRef.current]);
     }
   };
 
@@ -3330,6 +3343,7 @@ export default function Home() {
                           editorOriginal,
                           isEditing: isEditingFile,
                           loading: fileLoading,
+                          extractingPaths,
                           error: fileError,
                           showCreateFolder,
                           showCreateFile,

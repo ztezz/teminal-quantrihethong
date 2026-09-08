@@ -2,6 +2,7 @@ import type { Dispatch, MouseEvent, RefObject, SetStateAction } from "react";
 import { motion } from "motion/react";
 import {
   AlertCircle,
+  ArchiveRestore,
   ArrowLeft,
   ArrowUpLeft,
   Bookmark,
@@ -50,6 +51,7 @@ export interface FileWorkspaceData {
   editorOriginal: string;
   isEditing: boolean;
   loading: boolean;
+  extractingPaths: readonly string[];
   error: string | null;
   showCreateFolder: boolean;
   showCreateFile: boolean;
@@ -110,7 +112,7 @@ export interface FileWorkspaceActions {
   createArchive: () => void;
   createSymlink: () => void;
   openMetadata: (path: string) => void;
-  extractArchive: (path: string) => void;
+  extractArchive: (path: string) => Promise<void>;
   moveOrRename: (path: string) => void;
   deleteFileOrFolder: (path: string) => void;
   downloadFile: (path: string) => void;
@@ -131,6 +133,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
     editorOriginal,
     isEditing: isEditingFile,
     loading: fileLoading,
+    extractingPaths,
     error: fileError,
     showCreateFolder,
     showCreateFile,
@@ -727,6 +730,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
                   ) : (
                     filteredFiles.map((file) => {
                       const fullItemPath = file.path;
+                      const isExtracting = extractingPaths.includes(fullItemPath);
                       return (
                         <tr
                           key={fullItemPath}
@@ -799,12 +803,13 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
 
                           {/* Actions */}
                           <td className="py-2.5 px-5 text-right">
-                            <div className="flex items-center justify-end gap-1.5">
+                            <div className="flex items-center justify-end gap-1.5 [&>button]:inline-flex [&>button]:min-h-11 [&>button]:min-w-11 [&>button]:items-center [&>button]:justify-center sm:[&>button]:min-h-8 sm:[&>button]:min-w-8 [&>button]:cursor-pointer [&>button]:transition-colors [&>button:focus-visible]:outline-none [&>button:focus-visible]:ring-2 [&>button:focus-visible]:ring-sky-400 [&>button:focus-visible]:ring-offset-2 [&>button:focus-visible]:ring-offset-slate-950 [&>button:disabled]:cursor-not-allowed [&>button:disabled]:opacity-50">
                               {file.isDirectory ? (
                                 <button
                                   onClick={() => loadFiles(fullItemPath)}
                                   className="p-1.5 rounded bg-blue-500/5 hover:bg-blue-500/20 text-blue-400 border border-blue-500/10 cursor-pointer transition-colors"
                                   title="Mở thư mục"
+                                  aria-label={`Mở thư mục ${file.name}`}
                                 >
                                   <ChevronRight className="w-3.5 h-3.5" />
                                 </button>
@@ -814,6 +819,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
                                     onClick={() => downloadFile(fullItemPath)}
                                     className="p-1.5 rounded bg-emerald-500/5 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/10 cursor-pointer transition-colors"
                                     title="Tải xuống"
+                                    aria-label={`Tải xuống ${file.name}`}
                                   >
                                     <Download className="w-3.5 h-3.5" />
                                   </button>
@@ -821,21 +827,32 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
                                     onClick={() => openFile(fullItemPath)}
                                     className="p-1.5 rounded bg-purple-500/5 hover:bg-purple-500/20 text-purple-400 border border-purple-500/10 cursor-pointer transition-colors"
                                     title="Xem tệp"
+                                    aria-label={`Xem tệp ${file.name}`}
                                   >
                                     <Eye className="w-3.5 h-3.5" />
                                   </button>
                                   {currentUser?.role !== "viewer" && (
-                                    <button onClick={() => openFile(fullItemPath, true)} className="p-1.5 rounded bg-blue-500/5 hover:bg-blue-500/20 text-blue-400 border border-blue-500/10 cursor-pointer transition-colors" title="Sửa tệp"><Edit className="w-3.5 h-3.5" /></button>
+                                    <button onClick={() => openFile(fullItemPath, true)} className="p-1.5 rounded bg-blue-500/5 hover:bg-blue-500/20 text-blue-400 border border-blue-500/10 cursor-pointer transition-colors" title="Sửa tệp" aria-label={`Sửa tệp ${file.name}`}><Edit className="w-3.5 h-3.5" /></button>
                                   )}
                                 </>
                               )}
                               {currentUser?.role !== "viewer" && <>
-                                <button onClick={() => openMetadata(fullItemPath)} className="p-1.5 rounded bg-white/5 text-slate-400 border border-white/10" title="Quyền"><Lock className="w-3.5 h-3.5" /></button>
+                                <button onClick={() => openMetadata(fullItemPath)} className="p-1.5 rounded bg-white/5 hover:bg-white/10 hover:text-slate-200 text-slate-400 border border-white/10" title="Quyền" aria-label={`Quyền truy cập ${file.name}`}><Lock className="w-3.5 h-3.5" /></button>
                                 {!file.isDirectory && /\.(zip|tar|tgz|tar\.gz)$/i.test(file.name) && (
-                                  <button onClick={() => extractArchive(fullItemPath)} className="p-1.5 rounded bg-cyan-500/5 text-cyan-400 border border-cyan-500/10" title="Giải nén"><Download className="w-3.5 h-3.5" /></button>
+                                  <button
+                                    onClick={() => extractArchive(fullItemPath)}
+                                    disabled={isExtracting}
+                                    aria-busy={isExtracting}
+                                    aria-label={`${isExtracting ? "Đang giải nén" : "Giải nén"} ${file.name}`}
+                                    className="gap-1.5 p-1.5 rounded bg-cyan-500/5 enabled:hover:bg-cyan-500/20 text-cyan-400 border border-cyan-500/10"
+                                    title={isExtracting ? "Đang giải nén..." : "Giải nén"}
+                                  >
+                                    {isExtracting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" aria-hidden="true" /> : <ArchiveRestore className="w-3.5 h-3.5" aria-hidden="true" />}
+                                    {isExtracting && <span className="hidden xl:inline">Đang giải nén...</span>}
+                                  </button>
                                 )}
-                                <button onClick={() => moveOrRename(fullItemPath)} className="inline-flex items-center gap-1 p-1.5 rounded bg-amber-500/5 hover:bg-amber-500/20 text-amber-400 border border-amber-500/10 cursor-pointer transition-colors" title="Đổi tên"><Pencil className="w-3.5 h-3.5" /><span className="hidden xl:inline">Đổi tên</span></button>
-                                <button onClick={() => deleteFileOrFolder(fullItemPath)} className="p-1.5 rounded bg-red-500/5 hover:bg-red-500/20 text-red-400 border border-red-500/10 cursor-pointer transition-colors" title="Xóa"><Trash2 className="w-3.5 h-3.5" /></button>
+                                <button onClick={() => moveOrRename(fullItemPath)} className="inline-flex items-center gap-1 p-1.5 rounded bg-amber-500/5 hover:bg-amber-500/20 text-amber-400 border border-amber-500/10 cursor-pointer transition-colors" title="Đổi tên" aria-label={`Đổi tên ${file.name}`}><Pencil className="w-3.5 h-3.5" /><span className="hidden xl:inline">Đổi tên</span></button>
+                                <button onClick={() => deleteFileOrFolder(fullItemPath)} className="p-1.5 rounded bg-red-500/5 hover:bg-red-500/20 text-red-400 border border-red-500/10 cursor-pointer transition-colors" title="Xóa" aria-label={`Xóa ${file.name}`}><Trash2 className="w-3.5 h-3.5" /></button>
                               </>}
                             </div>
                           </td>
