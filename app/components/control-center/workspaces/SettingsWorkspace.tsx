@@ -42,6 +42,7 @@ interface NewUser {
   role: UserRole;
 }
 export interface SettingsWorkspaceData {
+  defaultTerminalCwd: string;
   fontSize: number;
   theme: string;
   previewTheme: string | null;
@@ -64,6 +65,7 @@ export interface SettingsWorkspaceData {
   newUser: NewUser;
 }
 export interface SettingsWorkspaceActions {
+  setDefaultTerminalCwd: Dispatch<SetStateAction<string>>;
   setFontSize: Dispatch<SetStateAction<number>>;
   setPreviewTheme: Dispatch<SetStateAction<string | null>>;
   setTheme: Dispatch<SetStateAction<string>>;
@@ -201,7 +203,7 @@ export function SettingsWorkspace({ data, actions }: SettingsWorkspaceProps) {
                 Tùy biến dòng lệnh
               </h3>
               <p className="text-xs text-slate-500 font-mono">
-                Chỉnh sửa các tùy chọn thiết lập được lưu vào cấu hình cục bộ
+                Các tùy chọn được tự động lưu trên máy chủ và dùng chung cho người dùng
               </p>
             </div>
             <AnimatePresence>
@@ -234,6 +236,25 @@ export function SettingsWorkspace({ data, actions }: SettingsWorkspaceProps) {
                 </motion.div>
               )}
             </AnimatePresence>
+          </div>
+
+          <div>
+            <label htmlFor="default-terminal-cwd" className="block text-xs font-bold text-slate-400">
+              Đường dẫn mặc định khi mở terminal
+            </label>
+            <input
+              id="default-terminal-cwd"
+              type="text"
+              value={data.defaultTerminalCwd}
+              onChange={(event) => actions.setDefaultTerminalCwd(event.target.value)}
+              placeholder="Để trống để dùng thư mục mặc định của máy chủ"
+              aria-describedby="default-terminal-cwd-help"
+              spellCheck={false}
+              className="mt-2 w-full rounded border border-white/10 bg-black px-3 py-2.5 font-mono text-sm text-slate-200 focus:outline-none focus:border-blue-500"
+            />
+            <p id="default-terminal-cwd-help" className="mt-2 text-xs text-slate-500">
+              Dùng đường dẫn như trong trình quản lý file, tính từ thư mục gốc được phép. Áp dụng cho terminal mới hoặc kết nối lại, không đổi thư mục của terminal đang chạy. Mở terminal tại thư mục cụ thể luôn được ưu tiên. Đường dẫn không hợp lệ sẽ dùng thư mục mặc định của máy chủ.
+            </p>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

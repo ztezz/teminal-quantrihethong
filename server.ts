@@ -750,12 +750,14 @@ async function startServer() {
 
       const fontSizeRow = await db.get('SELECT value FROM terminal_settings WHERE key = ?', 'font_size');
       const themeRow = await db.get('SELECT value FROM terminal_settings WHERE key = ?', 'theme');
+      const defaultCwdRow = await db.get('SELECT value FROM terminal_settings WHERE key = ?', 'default_terminal_cwd');
 
       return res.json({
         success: true,
         settings: {
           fontSize: fontSizeRow ? fontSizeRow.value : '14',
-          theme: themeRow ? themeRow.value : 'dark-classic'
+          theme: themeRow ? themeRow.value : 'dark-classic',
+          defaultTerminalCwd: defaultCwdRow ? defaultCwdRow.value : ''
         }
       });
     } catch (error: any) {
@@ -770,12 +772,18 @@ async function startServer() {
         return res.status(401).json({ success: false, error: 'Unauthorized' });
       }
 
-      const { fontSize, theme } = req.body;
+      const { fontSize, theme, defaultTerminalCwd } = req.body;
+      if (defaultTerminalCwd !== undefined && typeof defaultTerminalCwd !== 'string') {
+        return res.status(400).json({ success: false, error: 'Default terminal directory must be a string' });
+      }
       if (fontSize) {
         await db.run('INSERT OR REPLACE INTO terminal_settings (key, value) VALUES (?, ?)', 'font_size', String(fontSize));
       }
       if (theme) {
         await db.run('INSERT OR REPLACE INTO terminal_settings (key, value) VALUES (?, ?)', 'theme', String(theme));
+      }
+      if (defaultTerminalCwd !== undefined) {
+        await db.run('INSERT OR REPLACE INTO terminal_settings (key, value) VALUES (?, ?)', 'default_terminal_cwd', defaultTerminalCwd);
       }
 
       return res.json({ success: true, message: 'Settings saved successfully' });
@@ -1303,7 +1311,11 @@ async function startServer() {
     const shellExec = isWin ? 'cmd.exe' : '/bin/bash';
     const args = isWin ? [] : ['-i']; // Interactive mode to force bash prompt
     let terminalCwd = process.cwd();
-    const requestedCwd = socket.handshake.auth?.cwd ?? socket.handshake.query?.cwd;
+    let requestedCwd = socket.handshake.auth?.cwd ?? socket.handshake.query?.cwd;
+    if (requestedCwd == null) {
+      const defaultCwdRow = await db.get('SELECT value FROM terminal_settings WHERE key = ?', 'default_terminal_cwd');
+      requestedCwd = defaultCwdRow?.value || undefined;
+    }
     if (typeof requestedCwd === 'string') {
       const candidate = path.resolve(FILE_MANAGER_ROOT, requestedCwd.replace(/^[/\\]+/, ''));
       const relativeCandidate = path.relative(FILE_MANAGER_ROOT, candidate);

@@ -96,6 +96,7 @@ export default function Home() {
   // Terminal customization preferences
   const [fontSize, setFontSize] = useState<number>(14);
   const [theme, setTheme] = useState<string>("dark-classic");
+  const [defaultTerminalCwd, setDefaultTerminalCwd] = useState("");
   const [previewTheme, setPreviewTheme] = useState<string | null>(null);
   const activePreviewTheme = previewTheme !== null ? previewTheme : theme;
 
@@ -1893,10 +1894,11 @@ export default function Home() {
   const loadSettings = useCallback(async () => {
     if (!sessionReady) return;
     try {
-      const data = await apiClient.request<{ success: boolean; settings?: { fontSize?: string; theme?: string } }>("/api/settings");
+      const data = await apiClient.request<{ success: boolean; settings?: { fontSize?: string; theme?: string; defaultTerminalCwd?: string } }>("/api/settings");
       if (data.success && data.settings) {
         setFontSize(parseInt(data.settings.fontSize || "", 10) || 14);
         setTheme(data.settings.theme || "dark-classic");
+        setDefaultTerminalCwd(data.settings.defaultTerminalCwd || "");
       }
     } catch (err) {
       console.error("Failed to load settings:", err);
@@ -1906,7 +1908,7 @@ export default function Home() {
   }, [sessionReady]);
 
   const saveSettings = useCallback(
-    async (newSize: number, newTheme: string) => {
+    async (newSize: number, newTheme: string, newDefaultCwd: string) => {
       if (!sessionReady) return;
       const shouldShowStatus = isSettingsLoadedRef.current;
       if (shouldShowStatus) {
@@ -1915,9 +1917,9 @@ export default function Home() {
         });
       }
       try {
-        const data = await apiClient.request<{ success: boolean }, { fontSize: number; theme: string }>("/api/settings", {
+        const data = await apiClient.request<{ success: boolean }, { fontSize: number; theme: string; defaultTerminalCwd: string }>("/api/settings", {
           method: "POST",
-          body: { fontSize: newSize, theme: newTheme },
+          body: { fontSize: newSize, theme: newTheme, defaultTerminalCwd: newDefaultCwd },
         });
         if (data.success) {
           if (shouldShowStatus) {
@@ -2659,7 +2661,9 @@ export default function Home() {
           if (data.success && isMounted && socket) {
             socket.auth = {
               ticket: data.ticket,
-              cwd: pendingTerminalCwdRef.current || undefined,
+              cwd: (socket.auth as { cwd?: string }).cwd,
+              cols: term.cols,
+              rows: term.rows,
             };
             socket.connect();
           }
@@ -2761,12 +2765,12 @@ export default function Home() {
       return () => { if (fitTimer) window.clearTimeout(fitTimer); };
     }
     if (settingsDebounceRef.current) clearTimeout(settingsDebounceRef.current);
-    settingsDebounceRef.current = setTimeout(() => saveSettings(fontSize, theme), 300);
+    settingsDebounceRef.current = setTimeout(() => saveSettings(fontSize, theme, defaultTerminalCwd), 300);
     return () => {
       if (fitTimer) window.clearTimeout(fitTimer);
       if (settingsDebounceRef.current) clearTimeout(settingsDebounceRef.current);
     };
-  }, [fontSize, theme, saveSettings]);
+  }, [fontSize, theme, defaultTerminalCwd, saveSettings]);
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -3224,6 +3228,7 @@ export default function Home() {
                       <SettingsWorkspace
                         data={{
                           fontSize,
+                          defaultTerminalCwd,
                           theme,
                           previewTheme,
                           activePreviewTheme,
@@ -3246,6 +3251,7 @@ export default function Home() {
                         }}
                         actions={{
                           setFontSize,
+                          setDefaultTerminalCwd,
                           setPreviewTheme,
                           setTheme,
                           setSaveStatus,

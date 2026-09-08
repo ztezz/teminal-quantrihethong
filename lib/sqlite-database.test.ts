@@ -22,6 +22,9 @@ test('SQLite persists users, settings, sessions, and audit records', async () =>
     assert.equal(database.ping(), true);
     database.saveUser(rootUser);
     await database.run('INSERT INTO settings (key, value) VALUES (?, ?)', 'key', 'value');
+    assert.equal(await database.get('SELECT value FROM terminal_settings WHERE key = ?', 'default_terminal_cwd'), undefined);
+    const defaultCwd = "/projects/team's workspace;$(echo literal)";
+    await database.run('INSERT OR REPLACE INTO terminal_settings (key, value) VALUES (?, ?)', 'default_terminal_cwd', defaultCwd);
     database.addSession('raw-token', rootUser.id, '127.0.0.1', 'test-agent');
     database.addAudit({ category: 'test', action: 'persist', event: 'Persisted', level: 'info', result: 'success', ip: '127.0.0.1' });
     database.close();
@@ -29,6 +32,9 @@ test('SQLite persists users, settings, sessions, and audit records', async () =>
     database = new SqliteDatabase(filename, undefined, 60_000);
     assert.equal(database.getUserByName('ROOT')?.id, rootUser.id);
     assert.equal((await database.get('SELECT value FROM settings WHERE key = ?', 'key'))?.value, 'value');
+    assert.equal((await database.get('SELECT value FROM terminal_settings WHERE key = ?', 'default_terminal_cwd'))?.value, defaultCwd);
+    await database.run('INSERT OR REPLACE INTO terminal_settings (key, value) VALUES (?, ?)', 'default_terminal_cwd', '');
+    assert.equal((await database.get('SELECT value FROM terminal_settings WHERE key = ?', 'default_terminal_cwd'))?.value, '');
     assert.equal(database.hasSession('raw-token'), true);
     assert.equal(database.queryAudit({ offset: 0, limit: 10 }).total, 1);
     assert.deepEqual(database.verifyAuditIntegrity(), { valid: true, checked: 1 });
