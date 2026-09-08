@@ -81,7 +81,6 @@ export interface FileWorkspaceActions {
     history?: "push" | "none",
   ) => void | Promise<void>;
   openTrash: () => void;
-  openSnapshots: (path?: string) => void;
   setShowCreateFolder: Dispatch<SetStateAction<boolean>>;
   setShowCreateFile: Dispatch<SetStateAction<boolean>>;
   setError: Dispatch<SetStateAction<string | null>>;
@@ -160,7 +159,6 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
     uploadFiles,
     loadFiles,
     openTrash,
-    openSnapshots,
     setShowCreateFolder,
     setShowCreateFile,
     setError: setFileError,
@@ -262,13 +260,6 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
             >
               <History className="w-3.5 h-3.5" />
               <span>Thùng rác</span>
-            </button>
-            <button
-              onClick={() => openSnapshots()}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-[#111116] hover:bg-[#1a1a24] text-xs font-semibold text-slate-300 border border-white/10 rounded"
-            >
-              <Database className="w-3.5 h-3.5" />
-              <span>Snapshots</span>
             </button>
             <button
               onClick={() => {
@@ -864,7 +855,7 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
               </table>
             </div>
           </div>
-        {viewingFile && <FilePreviewModal role={role} filePath={viewingFile} fileContent={fileContent} editorOriginal={editorOriginal} editing={isEditingFile} previewTicket={previewTicket} onContentChange={setFileContent} onEditingChange={setIsEditingFile} onSave={saveEditedFile} onReload={() => { void openFile(viewingFile); }} onSnapshots={() => openSnapshots(viewingFile)} onConfirm={askConfirm} onClose={() => { setViewingFile(null); setFileContent(null); }} />}
+        {viewingFile && <FilePreviewModal role={role} filePath={viewingFile} fileContent={fileContent} editorOriginal={editorOriginal} editing={isEditingFile} previewTicket={previewTicket} onContentChange={setFileContent} onEditingChange={setIsEditingFile} onSave={saveEditedFile} onReload={() => { void openFile(viewingFile); }} onConfirm={askConfirm} onClose={() => { setViewingFile(null); setFileContent(null); }} />}
       </div>
     </motion.div>
   );

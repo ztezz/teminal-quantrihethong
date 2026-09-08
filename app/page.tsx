@@ -56,7 +56,6 @@ import type {
   ContextMenuState,
   FileBookmark,
   FileMetadata,
-  FileSnapshot,
   LostFoundItem,
   ManagedUser,
   SecuritySession,
@@ -359,6 +358,10 @@ export default function Home() {
   const [fileLoading, setFileLoading] = useState<boolean>(false);
   const extractingPathsRef = useRef(new Set<string>());
   const [extractingPaths, setExtractingPaths] = useState<string[]>([]);
+  const [extractArchivePath, setExtractArchivePath] = useState<string | null>(null);
+  const [extractDestination, setExtractDestination] = useState("");
+  const [extractError, setExtractError] = useState<string | null>(null);
+  const extractPending = extractArchivePath !== null && extractingPaths.includes(extractArchivePath);
   const [activeDeleteJob, setActiveDeleteJob] = useState<{ id: string; state: string; progress: number; message: string } | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [showCreateFolder, setShowCreateFolder] = useState<boolean>(false);
@@ -391,9 +394,6 @@ export default function Home() {
   const [lostFoundItems, setLostFoundItems] = useState<LostFoundItem[]>([]);
   const [selectedTrashIds, setSelectedTrashIds] = useState<string[]>([]);
   const [showTrash, setShowTrash] = useState(false);
-  const [showSnapshots, setShowSnapshots] = useState(false);
-  const [snapshots, setSnapshots] = useState<FileSnapshot[]>([]);
-  const [snapshotPath, setSnapshotPath] = useState("");
   const [editorOriginal, setEditorOriginal] = useState("");
   const pendingTerminalCwdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
@@ -1403,75 +1403,6 @@ export default function Home() {
     }
   };
 
-  const openSnapshots = async (filePath = "") => {
-    try {
-      const data = await requestFileApi(
-        `/api/files/snapshots${filePath ? `?path=${encodeURIComponent(filePath)}` : ""}`,
-      );
-      setSnapshots(data.items || []);
-      setSnapshotPath(filePath);
-      setShowSnapshots(true);
-    } catch (error: any) {
-      setFileError(error.message);
-    }
-  };
-
-  const restoreSnapshot = async (id: string) => {
-    if (
-      !(await askConfirm({
-        title: "Khôi phục snapshot",
-        message: "Khôi phục phiên bản này và ghi đè file hiện tại?",
-        danger: true,
-        confirmLabel: "Khôi phục",
-      }))
-    )
-      return;
-    try {
-      await requestFileApi("/api/files/snapshots/restore", {
-        method: "POST",
-        body: JSON.stringify({ id }),
-      });
-      await openSnapshots(snapshotPath);
-      await loadFiles(currentPath, null, "none");
-    } catch (error: any) {
-      setFileError(error.message);
-    }
-  };
-
-  const deleteSnapshot = async (id: string) => {
-    if (
-      !(await askConfirm({
-        message: "Xóa vĩnh viễn snapshot này?",
-        danger: true,
-        confirmLabel: "Xóa snapshot",
-      }))
-    )
-      return;
-    try {
-      await requestFileApi("/api/files/snapshots", {
-        method: "DELETE",
-        body: JSON.stringify({ id }),
-      });
-      await openSnapshots(snapshotPath);
-    } catch (error: any) {
-      setFileError(error.message);
-    }
-  };
-
-  const downloadSnapshot = async (id: string, fileName: string) => {
-    const res = await fetch(
-      `${API_URL}/api/files/snapshots/download?id=${encodeURIComponent(id)}`,
-      { credentials: "include" },
-    );
-    if (!res.ok) return setFileError("Không thể tải snapshot");
-    const url = URL.createObjectURL(await res.blob());
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = fileName;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
-
   const openFile = async (filePath: string, edit = false) => {
     if (!sessionReady) return;
     const requestId = ++fileOpenRequestRef.current;
@@ -1790,11 +1721,21 @@ export default function Home() {
   };
 
   const extractFileArchive = async (archivePath: string) => {
+    if (extractArchivePath !== null || extractingPathsRef.current.has(archivePath)) return;
+    setExtractDestination(currentPath);
+    setExtractError(null);
+    setExtractArchivePath(archivePath);
+  };
+
+  const submitArchiveExtraction = async () => {
+    const archivePath = extractArchivePath;
+    if (archivePath === null) return;
     if (extractingPathsRef.current.has(archivePath)) return;
-    const destinationDir = prompt("Giải nén vào:", currentPath)?.trim();
+    const destinationDir = extractDestination.trim();
     if (!destinationDir) return;
     extractingPathsRef.current.add(archivePath);
     setExtractingPaths([...extractingPathsRef.current]);
+    setExtractError(null);
     setFileError(null);
     const toast = notify("loading", `Đang giải nén ${archivePath}...`);
     try {
@@ -1803,9 +1744,11 @@ export default function Home() {
         body: JSON.stringify({ archivePath, destinationDir }),
       });
       replaceToast(toast, "success", `Đã giải nén vào ${destinationDir}.`);
+      setExtractArchivePath(null);
       await loadFiles(currentPath, null, "none");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Giải nén thất bại";
+      setExtractError(message);
       setFileError(message);
       replaceToast(toast, "error", message);
     } finally {
@@ -3369,7 +3312,6 @@ export default function Home() {
                           uploadFiles,
                           loadFiles,
                           openTrash,
-                          openSnapshots,
                           setShowCreateFolder,
                           setShowCreateFile,
                           setError: setFileError,
@@ -3467,16 +3409,6 @@ export default function Home() {
                         onLostFoundRestore: (item) => void lostFoundAction("restore", item),
                         onLostFoundDelete: async (id) => { const item = lostFoundItems.find(value => value.id === id); if (item && await askConfirm({ message: `Xóa vĩnh viễn lost-found "${item.name}"?`, danger: true, confirmLabel: "Xóa" })) void lostFoundAction("delete", item); },
                       }}
-                      snapshots={{
-                        open: showSnapshots,
-                        items: snapshots,
-                        path: snapshotPath,
-                        role: currentUser?.role,
-                        onClose: () => setShowSnapshots(false),
-                        onDownload: downloadSnapshot,
-                        onRestore: restoreSnapshot,
-                        onDelete: deleteSnapshot,
-                      }}
                       serviceLogs={{
                         value: serviceLogs,
                         onClose: () => setServiceLogs(null),
@@ -3526,6 +3458,48 @@ export default function Home() {
         onTextChange={setConfirmText}
         onClose={closeConfirm}
       />
+      {extractArchivePath !== null && (
+        <div
+          className="fixed inset-0 z-[130] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="extract-title"
+          aria-describedby="extract-message"
+          aria-busy={extractPending}
+          onKeyDown={(event) => {
+            event.stopPropagation();
+            if (event.key === "Escape") {
+              event.preventDefault();
+              if (!extractingPathsRef.current.has(extractArchivePath)) setExtractArchivePath(null);
+            }
+            if (event.key === "Tab") {
+              const controls = event.currentTarget.querySelectorAll<HTMLElement>("input:not(:disabled), button:not(:disabled)");
+              const first = controls[0];
+              const last = controls[controls.length - 1];
+              if (!first || (event.shiftKey && document.activeElement === first) || (!event.shiftKey && document.activeElement === last)) {
+                event.preventDefault();
+                (event.shiftKey ? last : first)?.focus();
+              }
+            }
+          }}
+        >
+          <form onSubmit={(event) => { event.preventDefault(); void submitArchiveExtraction(); }} className="app-modal w-full max-w-md max-h-[85vh] overflow-y-auto p-6 space-y-5">
+            <div>
+              <h3 id="extract-title" className="font-bold text-white">Giải nén tệp</h3>
+              <p id="extract-message" className="mt-2 text-sm leading-6 text-slate-400 break-all">Chọn thư mục đích cho <span className="font-mono">{extractArchivePath}</span>.</p>
+            </div>
+            <label htmlFor="extract-destination" className="block text-xs text-slate-400">
+              Giải nén vào
+              <input id="extract-destination" autoFocus required value={extractDestination} onChange={(event) => setExtractDestination(event.target.value)} disabled={extractPending} autoComplete="off" spellCheck={false} className="mt-2 w-full bg-black border border-white/10 rounded px-3 py-2 text-sm text-white font-mono disabled:opacity-40" />
+            </label>
+            {extractError && <p role="alert" className="text-sm text-rose-400 break-words">{extractError}</p>}
+            <div className="flex justify-end gap-2">
+              <button type="button" disabled={extractPending} onClick={() => { if (!extractingPathsRef.current.has(extractArchivePath)) setExtractArchivePath(null); }} className="px-4 py-2 text-xs border border-white/10 rounded disabled:opacity-30">Hủy</button>
+              <button type="submit" disabled={extractPending || !extractDestination.trim()} className="px-4 py-2 text-xs font-bold rounded bg-sky-500 text-black disabled:opacity-30">{extractPending ? "Đang giải nén..." : "Giải nén"}</button>
+            </div>
+          </form>
+        </div>
+      )}
       <ContextMenu
         menu={contextMenu}
         role={currentUser?.role}

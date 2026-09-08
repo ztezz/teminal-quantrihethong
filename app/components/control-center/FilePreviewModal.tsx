@@ -2,7 +2,7 @@
 
 import { useEffect, useEffectEvent, useState } from "react";
 import { createPortal } from "react-dom";
-import { AlertCircle, Download, Edit, History, Save, X } from "lucide-react";
+import { AlertCircle, Download, Edit, Save, X } from "lucide-react";
 import { API_URL, previewKind } from "./helpers";
 import { getFileIcon } from "./FileIcon";
 import { CodeEditor } from "./CodeEditor";
@@ -23,7 +23,6 @@ interface FilePreviewModalProps {
   onEditingChange: (value: boolean) => void;
   onSave: () => void;
   onReload: () => void;
-  onSnapshots: () => void;
   onClose: () => void;
   onConfirm: (options: ConfirmOptions) => Promise<boolean>;
 }
@@ -65,7 +64,7 @@ function ImagePreview({ src, alt, fileName }: { src: string; alt: string; fileNa
   );
 }
 
-export function FilePreviewModal({ role, filePath, fileContent, editorOriginal, editing, previewTicket, onContentChange, onEditingChange, onSave, onReload, onSnapshots, onClose, onConfirm }: FilePreviewModalProps) {
+export function FilePreviewModal({ role, filePath, fileContent, editorOriginal, editing, previewTicket, onContentChange, onEditingChange, onSave, onReload, onClose, onConfirm }: FilePreviewModalProps) {
   const kind = previewKind(filePath);
   const editable = kind === "text" || kind === "spreadsheet";
   const dirty = editing && fileContent !== editorOriginal;
@@ -98,7 +97,6 @@ export function FilePreviewModal({ role, filePath, fileContent, editorOriginal, 
           <span className="text-sky-400">{getFileIcon(filePath)}</span>
           <div className="min-w-0 flex-1"><h3 id="file-preview-title" className="truncate text-sm font-semibold text-white" title={filePath}>{fileName}</h3><p className="truncate text-[10px] font-mono text-slate-500" title={filePath}>{filePath}</p></div>
           <span className="rounded border border-sky-500/20 bg-sky-500/10 px-2 py-1 text-[9px] font-bold uppercase text-sky-300">{editable ? editing ? dirty ? "Chưa lưu" : "Đang sửa" : "Chỉ xem" : kind}</span>
-          <button type="button" onClick={onSnapshots} className="inline-flex items-center gap-1.5 rounded border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"><History className="h-3.5 w-3.5" />Lịch sử</button>
           {editable && editing && <><button type="button" onClick={onSave} disabled={!dirty} className="inline-flex items-center gap-1.5 rounded bg-emerald-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-35"><Save className="h-3.5 w-3.5" />Lưu</button><button type="button" onClick={() => { onEditingChange(false); onReload(); }} className="rounded border border-white/10 px-3 py-2 text-xs text-slate-300">Hủy</button></>}
           {editable && !editing && role !== "viewer" && <button type="button" onClick={() => onEditingChange(true)} className="inline-flex items-center gap-1.5 rounded bg-blue-600 px-3 py-2 text-xs font-semibold text-white"><Edit className="h-3.5 w-3.5" />Chỉnh sửa</button>}
           <button type="button" onClick={() => void close()} aria-label="Đóng xem trước" className="ml-0 inline-flex h-9 w-9 items-center justify-center rounded border border-white/10 text-slate-400 hover:bg-white/5 hover:text-white"><X className="h-4 w-4" /></button>

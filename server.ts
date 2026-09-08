@@ -34,7 +34,6 @@ const nextApp = backendOnly ? null : next({ dev });
 const handle = nextApp?.getRequestHandler();
 const FILE_MANAGER_ROOT = path.resolve(process.env.FILE_MANAGER_ROOT || process.cwd());
 const FILE_MANAGER_TRASH_DIR = path.resolve(process.env.FILE_MANAGER_TRASH_DIR || path.join(process.cwd(), '.terminal-trash'));
-const FILE_MANAGER_SNAPSHOT_DIR = path.resolve(process.env.FILE_MANAGER_SNAPSHOT_DIR || path.join(process.cwd(), '.terminal-snapshots'));
 const FILE_MANAGER_DIRECT_DELETE_PATHS = String(process.env.FILE_MANAGER_DIRECT_DELETE_PATHS || '').split(',').map(value => value.trim()).filter(Boolean);
 const SQLITE_MANAGER_ROOT = path.resolve(process.env.SQLITE_MANAGER_ROOT || FILE_MANAGER_ROOT);
 const SQLITE_BROWSER_ROOT = path.resolve(process.env.SQLITE_BROWSER_ROOT || path.parse(process.cwd()).root);
@@ -1252,7 +1251,6 @@ async function startServer() {
     log: async (event, ip, details) => audit({ category: 'file', action: details?.action || event.split(':', 1)[0].slice(0, 80), event, level: details?.level || (/xóa|metadata|quyền/i.test(event) ? 'warning' : 'info'), result: details?.result || 'success', ip, metadata: details?.metadata }),
     rootDir: FILE_MANAGER_ROOT,
     trashDir: FILE_MANAGER_TRASH_DIR,
-    snapshotDir: FILE_MANAGER_SNAPSHOT_DIR,
     directDeletePaths: FILE_MANAGER_DIRECT_DELETE_PATHS,
     deleteJobStore: db,
     deletionMetrics: { record: event => { if (event.durationMs || !event.orphaned) { fileDeletionMetrics.total++; if (!event.success) fileDeletionMetrics.failed++; fileDeletionMetrics.totalDurationMs += event.durationMs; } fileDeletionMetrics.orphans += event.orphaned || 0; }, queueDepth: value => { fileDeletionMetrics.queueDepth = value; } },

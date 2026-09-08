@@ -10,12 +10,11 @@ import { createFileManagerRouter } from './file-manager-router';
 
 type Role = 'viewer' | 'operator' | 'admin' | 'root';
 
-async function fixture(trashDir?: string, directDeletePaths?: string[]) {
+async function fixture(trashDir?: string, directDeletePaths?: string[], rootDir?: string) {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'file-manager-router-'));
-  const root = path.join(temporaryDirectory, 'root');
+  const root = rootDir || path.join(temporaryDirectory, 'root');
   const trash = trashDir || path.join(temporaryDirectory, 'trash');
-  const snapshots = path.join(temporaryDirectory, 'snapshots');
-  fs.mkdirSync(root);
+  fs.mkdirSync(root, { recursive: true });
   let role: Role = 'root';
   let stepUp = true;
   const app = express();
@@ -29,7 +28,6 @@ async function fixture(trashDir?: string, directDeletePaths?: string[]) {
   app.use('/api/files', createFileManagerRouter({
     rootDir: root,
     trashDir: trash,
-    snapshotDir: snapshots,
     directDeletePaths,
     hasSession: token => token === 'valid-token',
     sessionRole: token => token === 'valid-token' ? role : null,
@@ -69,7 +67,6 @@ async function fixture(trashDir?: string, directDeletePaths?: string[]) {
   return {
     root,
     trash,
-    snapshots,
     request,
     deletePath,
     setRole: (value: Role) => { role = value; },
@@ -93,6 +90,50 @@ function createSymlinkOrSkip(t: TestContext, target: string, link: string) {
     throw error;
   }
 }
+
+test('legacy snapshot storage remains hidden and rejects direct access', async () => {
+  const previousDirectory = process.env.FILE_MANAGER_SNAPSHOT_DIR;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'legacy-snapshot-protection-'));
+  try {
+    process.env.FILE_MANAGER_SNAPSHOT_DIR = path.relative(process.cwd(), path.join(root, 'old-archives'));
+    const context = await fixture(undefined, undefined, root);
+    try {
+      fs.mkdirSync(path.join(root, 'old-archives'));
+      fs.writeFileSync(path.join(root, 'old-archives', 'saved.data'), 'persisted archive');
+      fs.writeFileSync(path.join(root, 'old-archives-visible.txt'), 'ordinary file');
+      const listed = await context.request('/');
+      assert.equal(listed.status, 200);
+      assert.deepEqual(listed.body.files.map((file: { name: string }) => file.name), ['old-archives-visible.txt']);
+      for (const route of ['/?path=old-archives', '/read?path=old-archives/saved.data', '/download?path=old-archives/saved.data']) {
+        assert.equal((await context.request(route)).status, 403, route);
+      }
+      const write = await context.request('/write', { method: 'POST', body: JSON.stringify({ filePath: 'old-archives/saved.data', content: 'changed' }) });
+      assert.equal(write.status, 403);
+      assert.equal(fs.readFileSync(path.join(root, 'old-archives', 'saved.data'), 'utf8'), 'persisted archive');
+    } finally { await context.close(); }
+  } finally {
+    if (previousDirectory === undefined) delete process.env.FILE_MANAGER_SNAPSHOT_DIR;
+    else process.env.FILE_MANAGER_SNAPSHOT_DIR = previousDirectory;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('snapshot endpoints are no longer registered', async () => {
+  const context = await fixture();
+  try {
+    for (const [method, route] of [
+      ['GET', '/snapshots'],
+      ['GET', '/snapshots/download?id=old'],
+      ['POST', '/snapshots/restore'],
+      ['DELETE', '/snapshots']
+    ]) {
+      const response = await context.request(route, { method });
+      assert.equal(response.status, 404, `${method} ${route}`);
+    }
+  } finally {
+    await context.close();
+  }
+});
 
 test('rejects unauthenticated requests', async () => {
   const context = await fixture();
@@ -315,7 +356,6 @@ test('permanently deletes configured paths without relying on filesystem device 
     assert.equal(response.status, 200);
     assert.equal(response.body.permanentlyDeleted, true);
     assert.equal(fs.existsSync(path.join(context.root, 'network-drive', 'movies', 'video.mp4')), false);
-    assert.equal(fs.existsSync(context.snapshots), false);
     assert.deepEqual(fs.readdirSync(context.trash), []);
   } finally { await context.close(); }
 });
@@ -450,7 +490,6 @@ test('permanently deletes files when the trash directory is on another filesyste
     assert.equal(response.status, 200);
     assert.equal(response.body.permanentlyDeleted, true);
     assert.equal(fs.existsSync(path.join(context.root, 'remote-file.txt')), false);
-    assert.equal(fs.existsSync(context.snapshots), false);
   } finally {
     await context.close();
     fs.rmSync(networkTrash, { recursive: true, force: true });

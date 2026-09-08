@@ -53,7 +53,6 @@ type Options = {
   log: (event: string, ip: string, details?: { action?: string; level?: 'info' | 'warning' | 'critical'; result?: 'success' | 'failure'; metadata?: Record<string, unknown> }) => Promise<unknown>;
   rootDir?: string;
   trashDir?: string;
-  snapshotDir?: string;
   directDeletePaths?: string[];
   deleteJobStore?: {
     saveDeleteJob: (job: any) => void;
@@ -70,7 +69,6 @@ type Options = {
 };
 
 type TrashMetadata = { originalPath: string; deletedAt: string };
-type SnapshotMetadata = { id: string; originalPath: string; createdAt: string; reason: string; size: number; mode: number; mtime: string; checksum: string };
 type UploadMetadata = { id: string; targetPath: string; size: number; owner: string; createdAt: string };
 type DeletionMode = 'trash' | 'configured_direct' | 'cross_device' | 'exdev_fallback';
 type DeleteJob = {
@@ -110,11 +108,12 @@ function modeInfo(mode: number) {
   };
 }
 
-export function createFileManagerRouter({ hasSession, sessionRole, sessionUserId, hasStepUp, consumePreviewTicket, log, rootDir, trashDir, snapshotDir, directDeletePaths = [], deleteJobStore, deletionMetrics, alert, previewFrameAncestor = "'self'", onlyOffice }: Options) {
+export function createFileManagerRouter({ hasSession, sessionRole, sessionUserId, hasStepUp, consumePreviewTicket, log, rootDir, trashDir, directDeletePaths = [], deleteJobStore, deletionMetrics, alert, previewFrameAncestor = "'self'", onlyOffice }: Options) {
   const router = Router();
   const root = path.resolve(rootDir || process.cwd());
   const trashRoot = path.resolve(trashDir || path.join(process.cwd(), '.terminal-trash'));
-  const snapshotRoot = path.resolve(snapshotDir || path.join(process.cwd(), '.terminal-snapshots'));
+  // Deprecated storage setting: retain access protection for persisted archives only.
+  const legacySnapshotRoot = path.resolve(process.env.FILE_MANAGER_SNAPSHOT_DIR || path.join(process.cwd(), '.terminal-snapshots'));
   const uploadRoot = path.join(root, '.terminal-uploads');
   const directDeleteRoots = directDeletePaths.map(value => {
     const configuredPath = value.trim();
@@ -126,8 +125,6 @@ export function createFileManagerRouter({ hasSession, sessionRole, sessionUserId
   });
   const reservedUploadTargets = new Map<string, string>();
   const canonicalRoot = fs.realpathSync(root);
-  const maxSnapshotFileSize = Number(process.env.SNAPSHOT_MAX_FILE_MB || 100) * 1024 * 1024;
-  const maxSnapshotTotalSize = Number(process.env.SNAPSHOT_MAX_TOTAL_MB || 2048) * 1024 * 1024;
   const configuredOfficeConcurrency = Number(process.env.OFFICE_MAX_CONCURRENCY || 1);
   const maxOfficeConversions = Number.isSafeInteger(configuredOfficeConcurrency) && configuredOfficeConcurrency > 0 ? configuredOfficeConcurrency : 1;
   const configuredMaxUploadSize = Number(process.env.UPLOAD_MAX_FILE_MB || 10240) * 1024 * 1024;
@@ -185,7 +182,6 @@ export function createFileManagerRouter({ hasSession, sessionRole, sessionUserId
     return /^(etc|boot|usr|root|var|bin|sbin|lib|lib32|lib64)(?:\/|$)/.test(normalized);
   };
   const dangerousRequest = (req: Request) => {
-    if ((req.method === 'POST' && req.path === '/snapshots/restore') || (req.method === 'DELETE' && req.path === '/snapshots')) return true;
     if (req.method === 'PATCH' && req.path === '/metadata') return true;
     if ((req.method === 'DELETE' && req.path === '/') || (req.method === 'POST' && ['/trash', '/delete-policy', '/delete-plan'].includes(req.path))) return false;
     if ((req.method === 'DELETE' && (req.path === '/trash' || req.path === '/trash/empty')) || (req.method === 'POST' && req.path === '/trash/restore')) return true;
@@ -212,7 +208,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, sessionUserId
     assertCanonicalInsideRoot(target);
     const relativeTrash = path.relative(trashRoot, target);
     if (!allowTrash && (relativeTrash === '' || (!relativeTrash.startsWith('..' + path.sep) && relativeTrash !== '..' && !path.isAbsolute(relativeTrash)))) throw httpError(403, 'Không thể truy cập trực tiếp thùng rác');
-    const relativeSnapshots = path.relative(snapshotRoot, target);
+    const relativeSnapshots = path.relative(legacySnapshotRoot, target);
     if (relativeSnapshots === '' || (!relativeSnapshots.startsWith('..' + path.sep) && relativeSnapshots !== '..' && !path.isAbsolute(relativeSnapshots))) throw httpError(403, 'Không thể truy cập trực tiếp kho snapshot');
     const relativeUploads = path.relative(uploadRoot, target);
     if (relativeUploads === '' || (!relativeUploads.startsWith('..' + path.sep) && relativeUploads !== '..' && !path.isAbsolute(relativeUploads))) throw httpError(403, 'Không thể truy cập vùng upload tạm');
@@ -320,11 +316,6 @@ export function createFileManagerRouter({ hasSession, sessionRole, sessionUserId
     if (policy.permanentlyDeleted) {
       await removeDirect(target, shouldStop);
       return { path: policy.path, permanentlyDeleted: true, deletionMode: policy.mode };
-    }
-    try {
-      await createSnapshot(target, 'before_trash');
-    } catch (error: any) {
-      void log(`Không thể tạo snapshot trước khi xóa: ${relative(target)}`, 'system', { action: 'snapshot_create', level: 'warning', result: 'failure', metadata: { error: error.message } });
     }
     const id = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-${path.basename(target)}`;
     const metadataFile = path.join(trashRoot, `${id}.json`);
@@ -493,29 +484,6 @@ export function createFileManagerRouter({ hasSession, sessionRole, sessionUserId
     await Promise.all(workers);
     return results;
   };
-  const checksumFile = (filePath: string) => new Promise<string>((resolve, reject) => {
-    const hash = crypto.createHash('sha256'); fs.createReadStream(filePath).on('data', chunk => hash.update(chunk)).on('end', () => resolve(hash.digest('hex'))).on('error', reject);
-  });
-  const pruneSnapshots = async () => {
-    const files = await fsp.readdir(snapshotRoot).catch(() => []); const metadataFiles = files.filter(name => name.endsWith('.json'));
-    const entries = (await Promise.all(metadataFiles.map(async name => { try { const metadata = JSON.parse(await fsp.readFile(path.join(snapshotRoot, name), 'utf8')) as SnapshotMetadata; return { metadata, metadataFile: path.join(snapshotRoot, name), dataFile: path.join(snapshotRoot, `${metadata.id}.data`) }; } catch { return null; } }))).filter(Boolean) as Array<{ metadata: SnapshotMetadata; metadataFile: string; dataFile: string }>;
-    let total = entries.reduce((sum, entry) => sum + entry.metadata.size, 0);
-    for (const entry of entries.sort((a, b) => a.metadata.createdAt.localeCompare(b.metadata.createdAt))) {
-      if (total <= maxSnapshotTotalSize) break;
-      await fsp.rm(entry.dataFile, { force: true }); await fsp.rm(entry.metadataFile, { force: true }); total -= entry.metadata.size;
-    }
-  };
-  const createSnapshot = async (target: string, reason: string) => {
-    let stat: fs.Stats; try { stat = await fsp.stat(target); } catch (error: any) { if (error.code === 'ENOENT') return null; throw error; }
-    if (!stat.isFile() || stat.size > maxSnapshotFileSize) return null;
-    await fsp.mkdir(snapshotRoot, { recursive: true });
-    const id = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}`; const dataFile = path.join(snapshotRoot, `${id}.data`); const metadataFile = path.join(snapshotRoot, `${id}.json`);
-    await fsp.copyFile(target, dataFile, fs.constants.COPYFILE_EXCL);
-    const metadata: SnapshotMetadata = { id, originalPath: relative(target), createdAt: new Date().toISOString(), reason, size: stat.size, mode: stat.mode & 0o7777, mtime: stat.mtime.toISOString(), checksum: await checksumFile(dataFile) };
-    await fsp.writeFile(metadataFile, JSON.stringify(metadata), { flag: 'wx' }); await pruneSnapshots();
-    await log(`Đã tạo snapshot: ${metadata.originalPath}`, 'system', { action: 'snapshot_create', metadata: { id, reason, size: stat.size } });
-    return metadata;
-  };
 
   router.use((req, res, next) => {
     const isOnlyOfficeServerRequest = req.path.startsWith('/onlyoffice/document/') || req.path.startsWith('/onlyoffice/callback/');
@@ -550,7 +518,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, sessionUserId
       const target = resolveInsideRoot(req.query.path);
       await mustBeDirectory(target);
       const entries = await fsp.readdir(target, { withFileTypes: true });
-      const files = (await Promise.all(entries.filter(entry => ![trashRoot, snapshotRoot, uploadRoot].includes(path.join(target, entry.name))).map(entry => itemDetails(path.join(target, entry.name))))).sort((a, b) => Number(b.isDirectory) - Number(a.isDirectory) || a.name.localeCompare(b.name));
+      const files = (await Promise.all(entries.filter(entry => ![trashRoot, legacySnapshotRoot, uploadRoot].includes(path.join(target, entry.name))).map(entry => itemDetails(path.join(target, entry.name))))).sort((a, b) => Number(b.isDirectory) - Number(a.isDirectory) || a.name.localeCompare(b.name));
       const mounts = await Promise.all(directDeleteRoots.map(async mount => { const startedAt = Date.now(); try { const stat = await fsp.stat(mount); await fsp.access(mount, fs.constants.R_OK); return { path: relative(mount), available: stat.isDirectory(), readable: true, device: stat.dev.toString(), latencyMs: Date.now() - startedAt }; } catch (error: any) { return { path: relative(mount), available: false, readable: false, latencyMs: Date.now() - startedAt, error: error.code || error.message }; } }));
       return res.json({ success: true, currentPath: relative(target), parentPath: target === root ? null : relative(path.dirname(target)), platform: process.platform, files, mounts });
     } catch (error) { return fail(res, error); }
@@ -646,7 +614,6 @@ export function createFileManagerRouter({ hasSession, sessionRole, sessionUserId
         const response = await fetch(savedDocumentUrl);
         if (!response.ok || !response.body) throw httpError(502, 'Không thể tải bản tài liệu đã sửa từ OnlyOffice');
         const target = resolveInsideRoot(session.path); const stat = await fsp.stat(target);
-        await createSnapshot(target, 'before_onlyoffice_write');
         temp = path.join(path.dirname(target), `.${path.basename(target)}.${crypto.randomUUID()}.tmp`);
         const handle = await fsp.open(temp, 'wx', stat.mode);
         const stream = fs.createWriteStream('', { fd: handle.fd, autoClose: true });
@@ -720,50 +687,6 @@ export function createFileManagerRouter({ hasSession, sessionRole, sessionUserId
     }
   });
 
-  const readSnapshot = async (id: unknown) => {
-    if (!validName(id)) throw httpError(400, 'Snapshot không hợp lệ');
-    const metadata = JSON.parse(await fsp.readFile(path.join(snapshotRoot, `${id}.json`), 'utf8')) as SnapshotMetadata;
-    if (metadata.id !== id) throw httpError(400, 'Metadata snapshot không hợp lệ');
-    return { metadata, dataFile: path.join(snapshotRoot, `${id}.data`) };
-  };
-
-  router.get('/snapshots', async (req, res) => {
-    try {
-      const requestedPath = typeof req.query.path === 'string' ? req.query.path.replace(/^[/\\]+/, '') : '';
-      const files = await fsp.readdir(snapshotRoot).catch(() => []);
-      const items = (await Promise.all(files.filter(name => name.endsWith('.json')).map(async name => { try { return JSON.parse(await fsp.readFile(path.join(snapshotRoot, name), 'utf8')) as SnapshotMetadata; } catch { return null; } }))).filter((item): item is SnapshotMetadata => Boolean(item && (!requestedPath || item.originalPath === requestedPath))).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-      return res.json({ success: true, items: items.slice(0, 500), maxFileMB: maxSnapshotFileSize / 1024 / 1024, maxTotalMB: maxSnapshotTotalSize / 1024 / 1024 });
-    } catch (error) { return fail(res, error); }
-  });
-
-  router.get('/snapshots/download', async (req, res) => {
-    try {
-      const { metadata, dataFile } = await readSnapshot(req.query.id); const stat = await fsp.stat(dataFile);
-      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(metadata.originalPath))}`); res.setHeader('Content-Length', stat.size);
-      return fs.createReadStream(dataFile).on('error', error => res.destroy(error)).pipe(res);
-    } catch (error) { return fail(res, error); }
-  });
-
-  router.post('/snapshots/restore', async (req, res) => {
-    let temp: string | undefined;
-    try {
-      const { metadata, dataFile } = await readSnapshot(req.body?.id); const checksum = await checksumFile(dataFile);
-      if (checksum !== metadata.checksum) throw httpError(409, 'Snapshot hỏng hoặc đã bị thay đổi');
-      const target = resolveInsideRoot(metadata.originalPath); await fsp.mkdir(path.dirname(target), { recursive: true }); await createSnapshot(target, 'before_snapshot_restore');
-      temp = path.join(path.dirname(target), `.${path.basename(target)}.${crypto.randomUUID()}.restore`); await fsp.copyFile(dataFile, temp, fs.constants.COPYFILE_EXCL); await fsp.chmod(temp, metadata.mode); await fsp.rename(temp, target); temp = undefined;
-      await log(`Đã khôi phục snapshot: ${metadata.originalPath}`, clientIp(req), { action: 'snapshot_restore', level: 'critical', metadata: { id: metadata.id, checksum } });
-      return res.json({ success: true, path: metadata.originalPath });
-    } catch (error) { if (temp) await fsp.rm(temp, { force: true }).catch(() => undefined); return fail(res, error); }
-  });
-
-  router.delete('/snapshots', async (req, res) => {
-    try {
-      const { metadata, dataFile } = await readSnapshot(req.body?.id); await fsp.rm(dataFile); await fsp.rm(path.join(snapshotRoot, `${metadata.id}.json`));
-      await log(`Đã xóa snapshot: ${metadata.originalPath}`, clientIp(req), { action: 'snapshot_delete', level: 'critical', metadata: { id: metadata.id } });
-      return res.json({ success: true });
-    } catch (error) { return fail(res, error); }
-  });
-
   router.post('/create', async (req, res) => {
     try {
       const { dirPath, name } = req.body; if (!validName(name)) throw httpError(400, 'Tên tệp không hợp lệ');
@@ -781,7 +704,6 @@ export function createFileManagerRouter({ hasSession, sessionRole, sessionUserId
       const target = resolveInsideRoot(filePath); const stat = await fsp.stat(target);
       if (!stat.isFile()) throw httpError(400, 'Đường dẫn không phải tệp tin');
       if (!expectedMtime || stat.mtime.toISOString() !== expectedMtime) throw httpError(409, 'Tệp đã thay đổi trên máy chủ. Hãy tải lại trước khi lưu.');
-      await createSnapshot(target, 'before_write');
       temp = path.join(path.dirname(target), `.${path.basename(target)}.${crypto.randomUUID()}.tmp`);
       await fsp.writeFile(temp, content, { encoding: 'utf8', flag: 'wx', mode: stat.mode }); await fsp.rename(temp, target); temp = undefined;
       const updated = await fsp.stat(target); await log(`Đã chỉnh sửa tệp: ${relative(target)}`, clientIp(req));
@@ -865,7 +787,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, sessionUserId
     try {
       const { sourcePath, destinationDir, newName } = req.body; const source = resolveInsideRoot(sourcePath); const destination = resolveInsideRoot(destinationDir); await mustBeDirectory(destination);
       const name = newName || path.basename(source); if (!validName(name)) throw httpError(400, 'Tên mới không hợp lệ');
-      const target = path.join(destination, name); await ensureMissing(target); await createSnapshot(source, 'before_move'); await safeMove(source, target); await log(`Đã di chuyển/đổi tên: ${relative(source)} -> ${relative(target)}`, clientIp(req));
+      const target = path.join(destination, name); await ensureMissing(target); await safeMove(source, target); await log(`Đã di chuyển/đổi tên: ${relative(source)} -> ${relative(target)}`, clientIp(req));
       return res.json({ success: true, path: relative(target) });
     } catch (error) { return fail(res, error); }
   });
@@ -878,7 +800,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, sessionUserId
         const source = resolveInsideRoot(value); if (source === root) throw httpError(400, 'Không thể chuyển thư mục gốc');
         const target = path.join(destination, path.basename(source)); if (target === source || target.startsWith(source + path.sep)) throw httpError(400, 'Đích không thể nằm trong nguồn');
         await ensureMissing(target);
-        if (operation === 'copy') await fsp.cp(source, target, { recursive: true, errorOnExist: true }); else { await createSnapshot(source, 'before_bulk_move'); await safeMove(source, target); }
+        if (operation === 'copy') await fsp.cp(source, target, { recursive: true, errorOnExist: true }); else await safeMove(source, target);
         return { sourcePath: relative(source), path: relative(target) };
       });
       await log(`Đã ${operation === 'copy' ? 'sao chép' : 'di chuyển'} hàng loạt ${results.filter(item => item.success).length} mục`, clientIp(req));
@@ -910,7 +832,6 @@ export function createFileManagerRouter({ hasSession, sessionRole, sessionUserId
         if (!Number.isInteger(nextUid) || !Number.isInteger(nextGid) || nextUid < 0 || nextGid < 0) throw httpError(400, 'UID/GID không hợp lệ');
         ownership = { uid: nextUid, gid: nextGid };
       }
-      await createSnapshot(target, 'before_metadata_change');
       if (parsedMode !== undefined) await fsp.chmod(target, parsedMode);
       if (ownership) await fsp.chown(target, ownership.uid, ownership.gid);
       await log(`Đã cập nhật metadata: ${relative(target)}`, clientIp(req)); return res.json({ success: true, ...(await itemDetails(target)) });

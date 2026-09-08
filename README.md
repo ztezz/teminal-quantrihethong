@@ -118,8 +118,7 @@ Mở `http://localhost:3000`.
 | `LEGACY_DATABASE_PATH` | Backend | File JSON cũ để import một lần, mặc định `terminal_database.json` cạnh database SQLite. |
 | `FILE_MANAGER_ROOT` | Backend | Thư mục gốc hiển thị trong File Manager. Dùng `/` để quản lý toàn máy chủ. |
 | `FILE_MANAGER_TRASH_DIR` | Backend | Nơi lưu thùng rác, phải có quyền ghi. |
-| `FILE_MANAGER_SNAPSHOT_DIR` | Backend | Kho snapshot nội bộ, không đặt trong thư mục được web server phục vụ. |
-| `FILE_MANAGER_DIRECT_DELETE_PATHS` | Backend | Danh sách đường dẫn tương đối với `FILE_MANAGER_ROOT`, phân cách bằng dấu phẩy. Mọi mục trong các nhánh này luôn bị xóa trực tiếp, không snapshot và không vào thùng rác. |
+| `FILE_MANAGER_DIRECT_DELETE_PATHS` | Backend | Danh sách đường dẫn tương đối với `FILE_MANAGER_ROOT`, phân cách bằng dấu phẩy. Mọi mục trong các nhánh này luôn bị xóa trực tiếp và không vào thùng rác. |
 | `FILE_DELETE_CONCURRENCY` | Backend | Số mục được xóa đồng thời trong một request/job, giới hạn `1-10`, mặc định `4`. Nên dùng `2-4` cho rclone/FUSE. |
 | `FILE_DELETE_BACKGROUND_THRESHOLD` | Backend | Số mục từ đó thao tác xóa hàng loạt chuyển sang job nền, giới hạn `2-100`, mặc định `20`. Thư mục trên nhánh xóa trực tiếp luôn chạy nền. |
 | `FILE_DELETE_MAX_ENTRIES` | Backend | Số entry tối đa được quét/xóa trong một cây thư mục, mặc định `100000`. |
@@ -134,8 +133,6 @@ Mở `http://localhost:3000`.
 | `QUICK_SHARE_TTL_MINUTES` | Backend | Thời gian tồn tại của file truyền nhanh, mặc định và tối đa `1440` (24 giờ). |
 | `QUICK_SHARE_MAX_TOTAL_GB` | Backend | Hạn mức tổng file truyền nhanh chưa hết hạn, mặc định `20`, tối đa `200` GB. |
 | `QUICK_SHARE_MAX_PER_IP_GB` | Backend | Hạn mức file truyền nhanh chưa hết hạn cho mỗi IP, mặc định `4`, tối đa `20` GB. |
-| `SNAPSHOT_MAX_FILE_MB` | Backend | Dung lượng tối đa mỗi file được snapshot, mặc định `100`. |
-| `SNAPSHOT_MAX_TOTAL_MB` | Backend | Tổng quota snapshot, mặc định `2048`; tự xóa bản cũ nhất khi vượt quota. |
 | `LIBREOFFICE_PATH` | Backend | Binary LibreOffice, thường là `/usr/bin/libreoffice`. |
 | `OFFICE_MAX_CONCURRENCY` | Backend | Số tác vụ chuyển đổi LibreOffice tối đa chạy đồng thời, mặc định `1`. |
 | `AUTH_ENCRYPTION_KEY` | Backend | Khóa tối thiểu 32 ký tự dùng mã hóa AES-256-GCM cho TOTP secret. Không được thay đổi sau khi bật 2FA. |
@@ -152,7 +149,7 @@ Mở `http://localhost:3000`.
 
 ## Chỉnh Sửa Word Và Excel Với OnlyOffice
 
-OnlyOffice Document Server cho phép mở và chỉnh sửa trực tiếp các tệp `.docx`, `.xlsx`, `.pptx`, `.odt`, `.ods` và `.odp` từ Quản lý tệp. Backend cấp URL tài liệu ngắn hạn, xác thực callback bằng JWT và tạo snapshot trước khi nhận bản đã sửa.
+OnlyOffice Document Server cho phép mở và chỉnh sửa trực tiếp các tệp `.docx`, `.xlsx`, `.pptx`, `.odt`, `.ods` và `.odp` từ Quản lý tệp. Backend cấp URL tài liệu ngắn hạn và xác thực callback bằng JWT khi nhận bản đã sửa.
 
 Tạo secret dùng chung, tối thiểu 32 ký tự:
 
@@ -213,9 +210,6 @@ FRONTEND_ORIGIN=https://terminal.example.com
 TERMINAL_PASSWORD=mat-khau-khoi-tao-rat-manh
 FILE_MANAGER_ROOT=/
 FILE_MANAGER_TRASH_DIR=/root/.terminal-trash
-FILE_MANAGER_SNAPSHOT_DIR=/root/.terminal-snapshots
-SNAPSHOT_MAX_FILE_MB=100
-SNAPSHOT_MAX_TOTAL_MB=2048
 LIBREOFFICE_PATH=/usr/bin/libreoffice
 AUTH_ENCRYPTION_KEY='thay-bang-mot-khoa-ngau-nhien-toi-thieu-32-ky-tu'
 TOTP_ISSUER=Terminal Admin
@@ -403,17 +397,11 @@ Backend yêu cầu xác nhận lại mật khẩu và mã 2FA trước các thao
 
 Sau khi xác nhận, quyền tăng cường tồn tại trong cookie `HttpOnly` riêng và hết hạn sau 5 phút. Cookie được gắn với session hiện tại, không thể dùng lại với session khác. Nếu user đã bật 2FA thì cần cả mật khẩu và mã TOTP/recovery code; nếu chưa bật 2FA thì chỉ cần mật khẩu.
 
-## Snapshot Và Khôi Phục
+## Xóa Và Khôi Phục
 
-Backend tự tạo snapshot cho file thường trước khi chỉnh sửa, move/rename, đổi metadata hoặc chuyển vào thùng rác. Snapshot gồm nội dung file, đường dẫn gốc, mode, mtime và checksum SHA-256.
+Tính năng snapshot đã được gỡ. Kho `.terminal-snapshots` trong thư mục chạy backend, hoặc đường dẫn cũ qua `FILE_MANAGER_SNAPSHOT_DIR`, vẫn bị ẩn và chặn truy cập trực tiếp trong File Manager để bảo vệ dữ liệu đã lưu. Biến môi trường này đã deprecated, chỉ còn dùng để bảo vệ kho cũ; giữ nguyên giá trị nếu trước đây đã cấu hình. Backend không tạo, khôi phục hay tự dọn snapshot.
 
-- File trên filesystem khác với thùng rác được xóa trực tiếp, không tạo snapshot và không thể khôi phục từ thùng rác.
-- File lớn hơn `SNAPSHOT_MAX_FILE_MB` không được snapshot tự động.
-- Thư mục không được sao chép đệ quy tự động.
-- Khi tổng kho vượt `SNAPSHOT_MAX_TOTAL_MB`, bản cũ nhất bị xóa trước.
-- Khôi phục xác minh checksum, snapshot trạng thái hiện tại rồi ghi file theo cách atomic.
-- Khôi phục và xóa snapshot luôn yêu cầu step-up authorization.
-- Kho snapshot bị chặn khỏi File Manager thông thường.
+- File trên filesystem khác với thùng rác được xóa trực tiếp và không thể khôi phục từ thùng rác.
 - Trước khi xóa, frontend hỏi backend để hiển thị chính xác số mục vào thùng rác và số mục bị xóa vĩnh viễn.
 - Kế hoạch xóa trả số entry, dung lượng ước tính và policy token ngắn hạn. Backend từ chối bằng `409 FILE_CHANGED` nếu inode, device, mtime hoặc size thay đổi trước lúc xóa.
 - Xóa hàng loạt lớn và xóa trực tiếp thư mục chạy dưới dạng job nền có tiến trình và nút hủy. Hủy có thể để lại phần thư mục chưa xử lý; các mục đã xóa trước đó không thể phục hồi.

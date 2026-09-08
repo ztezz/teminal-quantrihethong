@@ -38,17 +38,6 @@ export interface ManagedUser {
   sessions: number;
 }
 
-export interface FileSnapshot {
-  id: string;
-  originalPath: string;
-  createdAt: string;
-  reason: string;
-  size: number;
-  mode: number;
-  mtime: string;
-  checksum: string;
-}
-
 export interface FileMetadata {
   path: string;
   mode: string;
