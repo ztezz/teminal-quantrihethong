@@ -1,6 +1,6 @@
-import type { RefObject } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { motion } from "motion/react";
-import { Download, Minus, Plus, Trash2 } from "lucide-react";
+import { Download, Maximize, Minimize, Minus, PanelTopClose, PanelTopOpen, Plus, Trash2 } from "lucide-react";
 
 interface TerminalWorkspaceProps {
   terminalRef: RefObject<HTMLDivElement | null>;
@@ -25,16 +25,79 @@ export function TerminalWorkspace({
   onDecreaseFontSize,
   onIncreaseFontSize,
 }: TerminalWorkspaceProps) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [minimal, setMinimal] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [fullscreenPending, setFullscreenPending] = useState(false);
+  const [displayError, setDisplayError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const syncFullscreen = () => {
+      setFullscreen(document.fullscreenElement === panelRef.current);
+    };
+    document.addEventListener("fullscreenchange", syncFullscreen);
+    return () => document.removeEventListener("fullscreenchange", syncFullscreen);
+  }, []);
+
+  const toggleFullscreen = async () => {
+    const panel = panelRef.current;
+    if (!panel || fullscreenPending) return;
+    setDisplayError(null);
+    if (!panel.requestFullscreen || !document.fullscreenEnabled) {
+      setDisplayError("Trình duyệt không hỗ trợ hoặc không cho phép toàn màn hình. Bạn vẫn có thể dùng giao diện tối giản.");
+      return;
+    }
+    setFullscreenPending(true);
+    try {
+      if (document.fullscreenElement === panel) {
+        await document.exitFullscreen();
+      } else {
+        await panel.requestFullscreen();
+      }
+    } catch {
+      if (panel.isConnected) {
+        setDisplayError("Không thể chuyển chế độ toàn màn hình. Vui lòng thử lại hoặc dùng giao diện tối giản.");
+      }
+    } finally {
+      if (panel.isConnected) setFullscreenPending(false);
+    }
+  };
+
   return (
     <motion.div
+      ref={panelRef}
       key="terminal-tab"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="w-full h-full p-3 sm:p-6 flex flex-col"
+      className={`w-full h-full min-h-0 flex flex-col bg-[#030609] fullscreen:p-2 fullscreen:sm:p-4 ${minimal ? "p-2" : "p-3 sm:p-6"}`}
     >
+      <div role="toolbar" aria-label="Chế độ hiển thị terminal" className="flex flex-wrap items-center justify-end gap-2 pb-2 shrink-0">
+        <button
+          type="button"
+          onClick={() => setMinimal((previous) => !previous)}
+          aria-pressed={minimal}
+          className="flex min-h-11 items-center gap-2 rounded-lg border border-white/10 bg-[#111116] px-3 text-xs text-slate-300 hover:bg-[#1c1c24] focus-visible:outline-2 focus-visible:outline-blue-500 cursor-pointer"
+          title={minimal ? "Khôi phục giao diện đầy đủ" : "Ẩn lệnh nhanh, hướng dẫn và điều khiển phụ"}
+        >
+          {minimal ? <PanelTopOpen aria-hidden="true" className="h-4 w-4" /> : <PanelTopClose aria-hidden="true" className="h-4 w-4" />}
+          {minimal ? "Thoát tối giản" : "Giao diện tối giản"}
+        </button>
+        <button
+          type="button"
+          onClick={toggleFullscreen}
+          aria-pressed={fullscreen}
+          disabled={fullscreenPending}
+          className="flex min-h-11 items-center gap-2 rounded-lg border border-white/10 bg-[#111116] px-3 text-xs text-slate-300 hover:bg-[#1c1c24] focus-visible:outline-2 focus-visible:outline-blue-500 disabled:opacity-50 disabled:cursor-wait cursor-pointer"
+          title={fullscreen ? "Thoát toàn màn hình (Esc)" : "Mở toàn màn hình terminal"}
+        >
+          {fullscreen ? <Minimize aria-hidden="true" className="h-4 w-4" /> : <Maximize aria-hidden="true" className="h-4 w-4" />}
+          {fullscreen ? "Thoát toàn màn hình" : "Toàn màn hình"}
+        </button>
+      </div>
+      {displayError && <p role="alert" className="mb-2 shrink-0 text-xs text-amber-400">{displayError}</p>}
       {/* Quick Commands & Info Header Bar */}
-      <div className="app-panel flex flex-col sm:flex-row items-start sm:items-center justify-between border-b-0 rounded-b-none px-4 py-3 gap-3 shrink-0">
+      <div className={`app-panel ${minimal ? "hidden" : "flex"} flex-col sm:flex-row items-start sm:items-center justify-between border-b-0 rounded-b-none px-4 py-3 gap-3 shrink-0`}>
         <div className="flex items-center gap-2 font-mono text-xs text-white">
           <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
           <span>Phiên dòng lệnh chuẩn (tty)</span>
@@ -127,14 +190,14 @@ export function TerminalWorkspace({
       </div>
 
       {/* Terminal wrapper */}
-      <div className="flex-1 min-h-0 rounded-b-2xl bg-[#030609] border border-white/10 overflow-hidden relative p-2 sm:p-4 shadow-[0_24px_70px_rgba(0,0,0,0.35)]">
+      <div className={`flex-1 min-h-0 rounded-b-2xl bg-[#030609] border border-white/10 overflow-hidden relative p-2 sm:p-4 shadow-[0_24px_70px_rgba(0,0,0,0.35)] ${minimal ? "rounded-t-2xl" : ""}`}>
         <div
           ref={terminalRef}
           className="w-full h-full [&_.xterm-viewport]:!overflow-y-auto"
           title="Chuột phải: sao chép vùng chọn hoặc dán | Ctrl+Shift+C / Ctrl+Shift+V"
         />
       </div>
-      <div className="mt-4 flex flex-col sm:flex-row items-start sm:items-center justify-between text-[11px] text-slate-500 font-mono px-1 gap-2">
+      <div className={`mt-4 ${minimal ? "hidden" : "flex"} flex-col sm:flex-row items-start sm:items-center justify-between text-[11px] text-slate-500 font-mono px-1 gap-2`}>
         <span className="text-emerald-500/80 font-semibold">
           [TTY TƯƠNG TÁC] top: P CPU, M RAM, q thoát | nano: Ctrl+O lưu,
           Ctrl+X thoát | Clipboard: Ctrl+Shift+C / Ctrl+Shift+V
