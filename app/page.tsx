@@ -30,6 +30,7 @@ import { FileWorkspace } from "./components/control-center/workspaces/FileWorksp
 import { OverviewWorkspace } from "./components/control-center/workspaces/OverviewWorkspace";
 import { JobsWorkspace } from "./components/control-center/workspaces/JobsWorkspace";
 import { NotesWorkspace } from "./components/control-center/workspaces/NotesWorkspace";
+import { AuthenticatorWorkspace } from "./components/control-center/workspaces/AuthenticatorWorkspace";
 import { apiClient } from "@/lib/client/api";
 import { applyUiPreferences } from "@/lib/client/preferences";
 import { useMetricsPolling } from "@/hooks/use-operations-data";
@@ -2849,7 +2850,7 @@ export default function Home() {
         const tab = tabs[Number(event.key) - 1];
         if (
           tab &&
-          (["files", "notes", "settings"].includes(tab) ||
+          (["files", "notes", "authenticator", "settings"].includes(tab) ||
             ["admin", "root"].includes(currentUser?.role || ""))
         ) {
           event.preventDefault();
@@ -2958,6 +2959,13 @@ export default function Home() {
       keywords: "notes passwords memo secure",
       allowed: true,
       run: () => navigateWorkspace("notes"),
+    },
+    {
+      label: "Ví 2FA",
+      hint: "",
+      keywords: "authenticator totp qr two factor codes",
+      allowed: true,
+      run: () => navigateWorkspace("authenticator"),
     },
     {
       label: "Cấu hình",
@@ -3255,6 +3263,10 @@ export default function Home() {
 
                     {activeTab === "notes" && (
                       <NotesWorkspace active={activeTab === "notes"} askConfirm={askConfirm} notify={notify} requestStepUp={requestStepUp} />
+                    )}
+
+                    {activeTab === "authenticator" && (
+                      <AuthenticatorWorkspace askConfirm={askConfirm} notify={notify} requestStepUp={requestStepUp} />
                     )}
 
                     {/* TAB 3: Admin Configurations & Security Settings */}

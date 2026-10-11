@@ -62,6 +62,7 @@ export type ActiveTab =
   | "settings"
   | "files"
   | "notes"
+  | "authenticator"
   | "system"
   | "sqlite";
 

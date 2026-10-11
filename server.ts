@@ -961,7 +961,8 @@ async function startServer() {
   });
   expressApp.get('/api/vault/items', (req, res) => {
     const context = vaultContext(req, res); if (!context) return;
-    const trash = req.query.trash === 'true'; return res.json({ success: true, items: db.listVaultItems(context.user.id, trash).map(item => vaultPublic(item)) });
+    const trash = req.query.trash === 'true'; const includeContent = req.query.content === 'true';
+    return res.json({ success: true, items: db.listVaultItems(context.user.id, trash).map(item => vaultPublic(item, includeContent)) });
   });
   expressApp.get('/api/vault/items/:id', (req, res) => {
     const context = vaultContext(req, res); if (!context) return;

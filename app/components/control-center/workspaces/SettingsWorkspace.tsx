@@ -516,7 +516,7 @@ export function SettingsWorkspace({ data, actions }: SettingsWorkspaceProps) {
                 Xác Thực Hai Lớp
               </h3>
               <p className="text-xs text-slate-500 font-mono">
-                Bảo vệ tài khoản đăng nhập ứng dụng này bằng TOTP. Để lưu tài khoản dịch vụ khác và tạo mã đăng nhập, mở Két Ghi Chú → Mã 2FA.
+                Bảo vệ tài khoản đăng nhập ứng dụng này bằng TOTP. Mã của các dịch vụ khác nằm trong Ví 2FA riêng.
               </p>
             </div>
             <span
