@@ -516,7 +516,7 @@ export function SettingsWorkspace({ data, actions }: SettingsWorkspaceProps) {
                 Xác Thực Hai Lớp
               </h3>
               <p className="text-xs text-slate-500 font-mono">
-                TOTP tương thích Google Authenticator, Authy và 1Password
+                Bảo vệ tài khoản đăng nhập ứng dụng này bằng TOTP. Để lưu tài khoản dịch vụ khác và tạo mã đăng nhập, mở Két Ghi Chú → Mã 2FA.
               </p>
             </div>
             <span
