@@ -80,6 +80,7 @@ export interface SettingsWorkspaceActions {
   startTwoFactorSetup: () => void;
   confirmTwoFactorSetup: () => void;
   disableTwoFactor: () => void;
+  regenerateRecoveryCodes: () => void;
   revokeSession: (id?: string) => void;
   setNewUser: Dispatch<SetStateAction<NewUser>>;
   createUser: () => void;
@@ -87,6 +88,7 @@ export interface SettingsWorkspaceActions {
   deleteUser: (id: string) => void;
   copyRecoveryCodes: () => void;
   resetUserPassword: (id: string) => void;
+  resetUserTwoFactor: (id: string) => void;
 }
 export interface SettingsWorkspaceProps {
   data: SettingsWorkspaceData;
@@ -139,6 +141,7 @@ export function SettingsWorkspace({ data, actions }: SettingsWorkspaceProps) {
     startTwoFactorSetup,
     confirmTwoFactorSetup,
     disableTwoFactor,
+    regenerateRecoveryCodes,
     revokeSession,
     setNewUser,
     createUser,
@@ -146,6 +149,7 @@ export function SettingsWorkspace({ data, actions }: SettingsWorkspaceProps) {
     deleteUser,
     copyRecoveryCodes,
     resetUserPassword,
+    resetUserTwoFactor,
   } = actions;
   const [quickShareDirectory, setQuickShareDirectory] = useState("");
   const [quickShareDraft, setQuickShareDraft] = useState("");
@@ -598,8 +602,7 @@ export function SettingsWorkspace({ data, actions }: SettingsWorkspaceProps) {
           ) : (
             <div className="space-y-3">
               <p className="text-xs text-slate-400">
-                Còn {securityStatus.recoveryCodesRemaining} mã khôi phục. Để tắt
-                2FA, nhập mật khẩu và mã TOTP hoặc recovery code.
+                Còn {securityStatus.recoveryCodesRemaining} mã khôi phục. Nhập mật khẩu và mã TOTP hoặc mã khôi phục để tắt 2FA hoặc tạo bộ mã khôi phục mới.
               </p>
               <div className="grid sm:grid-cols-2 gap-3">
                 <input
@@ -616,13 +619,10 @@ export function SettingsWorkspace({ data, actions }: SettingsWorkspaceProps) {
                   className="px-3 py-2 bg-black border border-white/10 rounded text-sm"
                 />
               </div>
-              <button
-                type="button"
-                onClick={disableTwoFactor}
-                className="px-4 py-2 rounded bg-red-600/80 text-white text-xs font-semibold"
-              >
-                Tắt xác thực hai lớp
-              </button>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={regenerateRecoveryCodes} disabled={!twoFactorPassword || !twoFactorCode} className="px-4 py-2 rounded bg-blue-600 text-white text-xs font-semibold disabled:opacity-40">Tạo lại mã khôi phục</button>
+                <button type="button" onClick={disableTwoFactor} disabled={!twoFactorPassword || !twoFactorCode} className="px-4 py-2 rounded bg-red-600/80 text-white text-xs font-semibold disabled:opacity-40">Tắt xác thực hai lớp</button>
+              </div>
             </div>
           )}
 
@@ -822,6 +822,7 @@ export function SettingsWorkspace({ data, actions }: SettingsWorkspaceProps) {
                         >
                           Reset MK
                         </button>
+                        {user.twoFactorEnabled && <button onClick={() => resetUserTwoFactor(user.id)} className="text-xs text-amber-400">Reset 2FA</button>}
                         <button
                           onClick={() => deleteUser(user.id)}
                           className="text-xs text-red-400"

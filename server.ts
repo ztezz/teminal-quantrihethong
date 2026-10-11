@@ -297,6 +297,10 @@ function recoveryHash(code: string): string {
   return crypto.createHash('sha256').update(code.replace(/\s|-/g, '').toUpperCase()).digest('hex');
 }
 
+function generateRecoveryCodes(): string[] {
+  return Array.from({ length: 10 }, () => `${crypto.randomBytes(3).toString('hex').toUpperCase()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`);
+}
+
 async function verifySecondFactor(code: string, user: StoredUser): Promise<boolean> {
   if (!user.totpSecret || typeof code !== 'string') return false;
   const normalized = code.replace(/\s/g, '');
@@ -1095,6 +1099,7 @@ async function startServer() {
   expressApp.post('/api/security/2fa/setup', async (req, res) => {
     const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
     try {
+      if (context.user.totpSecret) return res.status(409).json({ success: false, error: '2FA đã được bật' });
       if (!await verifyPassword(req.body?.password, context.user)) return res.status(400).json({ success: false, error: 'Mật khẩu hiện tại không đúng' });
       const secret = authenticator.generateSecret();
       const issuer = process.env.TOTP_ISSUER || 'Terminal Admin';
@@ -1108,11 +1113,15 @@ async function startServer() {
 
   expressApp.post('/api/security/2fa/confirm', async (req, res) => {
     const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    if (context.user.totpSecret) return res.status(409).json({ success: false, error: '2FA đã được bật' });
+    const rateKey = `2fa-confirm:${requestInfo(req).ip}`;
+    if (!checkRateLimit(rateKey)) return res.status(429).json({ success: false, error: 'Quá nhiều lần thử. Vui lòng đợi 15 phút.' });
     try {
       const pending = context.user.pendingTotpSecret;
       if (!pending || !authenticator.check(String(req.body?.code || ''), decryptSecret(pending))) return res.status(400).json({ success: false, error: 'Mã xác thực không hợp lệ' });
-      const recoveryCodes = Array.from({ length: 10 }, () => `${crypto.randomBytes(3).toString('hex').toUpperCase()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`);
+      const recoveryCodes = generateRecoveryCodes();
       context.user.totpSecret = pending; context.user.recoveryCodes = recoveryCodes.map(recoveryHash); delete context.user.pendingTotpSecret; db.saveUser(context.user);
+      resetRateLimit(rateKey);
       auditRequest(req, { category: 'security', action: 'two_factor_enable', event: 'Two-factor authentication enabled', level: 'critical' });
       return res.json({ success: true, recoveryCodes });
     } catch (error: any) {
@@ -1122,14 +1131,36 @@ async function startServer() {
 
   expressApp.post('/api/security/2fa/disable', async (req, res) => {
     const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    if (!context.user.totpSecret) return res.status(400).json({ success: false, error: '2FA chưa được bật' });
+    const rateKey = `2fa-manage:${requestInfo(req).ip}`;
+    if (!checkRateLimit(rateKey)) return res.status(429).json({ success: false, error: 'Quá nhiều lần thử. Vui lòng đợi 15 phút.' });
     try {
       if (!await verifyPassword(req.body?.password, context.user) || !await verifySecondFactor(req.body?.code, context.user)) return res.status(400).json({ success: false, error: 'Mật khẩu hoặc mã xác thực không đúng' });
       delete context.user.totpSecret; delete context.user.pendingTotpSecret; delete context.user.recoveryCodes; db.saveUser(context.user);
+      resetRateLimit(rateKey);
       auditRequest(req, { category: 'security', action: 'two_factor_disable', event: 'Two-factor authentication disabled', level: 'critical' });
       return res.json({ success: true });
     } catch (error: any) {
       return res.status(error.status || 500).json({ success: false, error: error.message });
     }
+  });
+
+  expressApp.post('/api/security/2fa/recovery-codes', async (req, res) => {
+    const context = authContext(req); if (!context) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    if (!context.user.totpSecret) return res.status(400).json({ success: false, error: '2FA chưa được bật' });
+    const rateKey = `2fa-manage:${requestInfo(req).ip}`;
+    if (!checkRateLimit(rateKey)) return res.status(429).json({ success: false, error: 'Quá nhiều lần thử. Vui lòng đợi 15 phút.' });
+    try {
+      if (!await verifyPassword(req.body?.password, context.user) || !await verifySecondFactor(req.body?.code, context.user)) {
+        auditRequest(req, { category: 'security', action: 'recovery_codes_regenerate', event: 'Recovery code regeneration failed', level: 'warning', result: 'failure' });
+        return res.status(401).json({ success: false, error: 'Mật khẩu hoặc mã xác thực không đúng' });
+      }
+      const recoveryCodes = generateRecoveryCodes();
+      context.user.recoveryCodes = recoveryCodes.map(recoveryHash); db.saveUser(context.user);
+      resetRateLimit(rateKey);
+      auditRequest(req, { category: 'security', action: 'recovery_codes_regenerate', event: 'Recovery codes regenerated', level: 'critical' });
+      return res.json({ success: true, recoveryCodes });
+    } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message }); }
   });
 
   expressApp.delete('/api/security/sessions/:id', (req, res) => {
@@ -1156,6 +1187,28 @@ async function startServer() {
   expressApp.get('/api/users', (req, res) => {
     if (!requireRole(req, res, 'root')) return;
     return res.json({ success: true, users: db.getUsers().map((user: StoredUser) => ({ id: user.id, username: user.username, role: user.role, enabled: user.enabled, twoFactorEnabled: Boolean(user.totpSecret), createdAt: user.createdAt, sessions: db.getSessions().filter((session: StoredSession) => session.userId === user.id).length })) });
+  });
+
+  expressApp.post('/api/users/:id/2fa/reset', async (req, res) => {
+    const context = requireRole(req, res, 'root'); if (!context) return;
+    const user = db.getUserById(req.params.id);
+    if (!user) return res.status(404).json({ success: false, error: 'Không tìm thấy user' });
+    if (user.id === context.user.id) return res.status(400).json({ success: false, error: 'Hãy quản lý 2FA của chính bạn trong phần Xác Thực Hai Lớp' });
+    if (!user.totpSecret && !user.pendingTotpSecret) return res.status(400).json({ success: false, error: 'Tài khoản chưa bật 2FA' });
+    const rateKey = `2fa-admin-reset:${requestInfo(req).ip}`;
+    if (!checkRateLimit(rateKey)) return res.status(429).json({ success: false, error: 'Quá nhiều lần thử. Vui lòng đợi 15 phút.' });
+    try {
+      if (!await verifyPassword(req.body?.password, context.user) || context.user.totpSecret && !await verifySecondFactor(req.body?.code, context.user)) {
+        auditRequest(req, { category: 'security', action: 'user_2fa_reset', event: 'User 2FA reset failed', level: 'warning', result: 'failure', metadata: { target: user.username } });
+        return res.status(401).json({ success: false, error: 'Mật khẩu hoặc mã xác thực của root không đúng' });
+      }
+      delete user.totpSecret; delete user.pendingTotpSecret; delete user.recoveryCodes; db.saveUser(user);
+      db.clearUserSessions(user.id);
+      terminalRegistry.disconnectUser(user.id, '2FA reset');
+      resetRateLimit(rateKey);
+      auditRequest(req, { category: 'security', action: 'user_2fa_reset', event: 'User 2FA reset by root', level: 'critical', metadata: { target: user.username } });
+      return res.json({ success: true });
+    } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message }); }
   });
 
   expressApp.post('/api/users', async (req, res) => {

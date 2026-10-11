@@ -2154,6 +2154,23 @@ export default function Home() {
     }
   };
 
+  const regenerateRecoveryCodes = async () => {
+    if (!(await askConfirm({ message: "Tạo bộ mã khôi phục mới? Tất cả mã cũ sẽ hết hiệu lực.", danger: true, confirmLabel: "Tạo mã mới" }))) return;
+    try {
+      const data = await securityRequest("/api/security/2fa/recovery-codes", {
+        method: "POST",
+        body: JSON.stringify({ password: twoFactorPassword, code: twoFactorCode }),
+      });
+      setRecoveryCodes(data.recoveryCodes);
+      setTwoFactorPassword("");
+      setTwoFactorCode("");
+      setSecurityMessage("Đã tạo mã khôi phục mới. Các mã cũ không còn hiệu lực.");
+      await loadSecurity();
+    } catch (err: any) {
+      setSecurityMessage(err.message);
+    }
+  };
+
   const revokeSession = async (id?: string) => {
     try {
       await securityRequest(
@@ -2223,6 +2240,23 @@ export default function Home() {
   const resetUserPassword = (id: string) => {
     const password = prompt("Mật khẩu mới (ít nhất 12 ký tự):");
     if (password) updateUser(id, { password });
+  };
+
+  const resetUserTwoFactor = async (id: string) => {
+    const user = managedUsers.find((item) => item.id === id);
+    if (!user || !(await askConfirm({ message: `Đặt lại 2FA của ${user.username}? Các phiên đăng nhập của tài khoản này sẽ bị thu hồi.`, danger: true, requiredText: user.username, confirmLabel: "Đặt lại 2FA" }))) return;
+    const password = prompt("Nhập mật khẩu của tài khoản root để xác nhận:");
+    if (!password) return;
+    const code = securityStatus?.twoFactorEnabled ? prompt("Nhập mã 2FA hoặc mã khôi phục của root:") : "";
+    if (securityStatus?.twoFactorEnabled && !code) return;
+    try {
+      await securityRequest(`/api/users/${id}/2fa/reset`, { method: "POST", body: JSON.stringify({ password, code }) });
+      setSecurityMessage(`Đã đặt lại 2FA của ${user.username}. Người dùng cần thiết lập lại để tiếp tục bảo vệ tài khoản.`);
+      await loadUsers();
+      await loadSecurity();
+    } catch (err: any) {
+      setSecurityMessage(err.message);
+    }
   };
 
   useEffect(() => {
@@ -3265,6 +3299,7 @@ export default function Home() {
                           startTwoFactorSetup,
                           confirmTwoFactorSetup,
                           disableTwoFactor,
+                          regenerateRecoveryCodes,
                           revokeSession,
                           setNewUser,
                           createUser,
@@ -3275,6 +3310,7 @@ export default function Home() {
                               recoveryCodes.join("\n"),
                             ),
                           resetUserPassword,
+                          resetUserTwoFactor,
                         }}
                       />
                     )}
