@@ -139,7 +139,7 @@ const socketTickets = new Map<string, { expiresAt: number; userId: string; sessi
 const loginChallenges = new Map<string, { expiresAt: number; ip: string; userAgent: string; userId: string }>();
 const quickShareAttempts = new Map<string, { count: number; resetAt: number }>();
 const quickShareDownloadAttempts = new Map<string, { count: number; resetAt: number }>();
-type QuickShare = { code: string; name: string; size: number; offset: number; createdAt: string; expiresAt: number; ready: boolean; uploadTokenHash: string; ipHash: string; checksum?: string };
+type QuickShare = { code: string; name: string; size: number; offset: number; createdAt: string; expiresAt: number; ready: boolean; public?: boolean; uploadTokenHash: string; ipHash: string; checksum?: string };
 function createTicket<T extends { expiresAt: number }>(store: Map<string, T>, value: T): string {
   const now = Date.now();
   for (const [key, entry] of store) if (entry.expiresAt <= now) store.delete(key);
@@ -641,6 +641,35 @@ async function startServer() {
   });
 
   // Public, short-lived transfer channel. It is deliberately isolated from File Manager.
+  expressApp.get('/api/quick-share/public', async (_req, res) => {
+    try {
+      const entries = await fs.promises.readdir(QUICK_SHARE_DIR).catch(() => []);
+      const files = await Promise.all(entries.filter(name => /^\d{4}\.json$/.test(name)).map(async name => {
+        try {
+          const { share, data } = await readQuickShare(name.slice(0, -5));
+          if (!share.public || !share.ready || share.offset !== share.size) return null;
+          const stat = await fs.promises.stat(data);
+          if (stat.size !== share.size) return null;
+          return { code: share.code, name: share.name, size: share.size, createdAt: share.createdAt, expiresAt: share.expiresAt };
+        } catch { return null; }
+      }));
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ success: true, files: files.filter(file => file !== null).sort((a, b) => b.createdAt.localeCompare(a.createdAt)) });
+    } catch (error: any) { return res.status(500).json({ success: false, error: error.message }); }
+  });
+
+  expressApp.get('/api/quick-share/public/:code', async (req, res) => {
+    try {
+      const { share, data } = await readQuickShare(req.params.code);
+      if (!share.public || !share.ready || share.offset !== share.size || (await fs.promises.stat(data)).size !== share.size) return res.status(404).json({ success: false, error: 'File không tồn tại hoặc chưa sẵn sàng' });
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Length', share.size);
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(share.name)}`);
+      return fs.createReadStream(data).on('error', error => res.destroy(error)).pipe(res);
+    } catch (error: any) { return res.status(error.status || (error.code === 'ENOENT' ? 404 : 500)).json({ success: false, error: error.message }); }
+  });
+
   expressApp.post('/api/quick-share', async (req, res) => {
     try {
       if (!allowQuickShareUpload(requestInfo(req).ip)) return res.status(429).json({ success: false, error: 'Đã đạt giới hạn 10 file trong 15 phút. Vui lòng thử lại sau.' });
@@ -662,7 +691,8 @@ async function startServer() {
       if (!code) throw Object.assign(new Error('Không thể tạo mã truyền file, vui lòng thử lại'), { status: 503 });
       const paths = quickSharePaths(code); const now = Date.now();
       const uploadToken = crypto.randomBytes(32).toString('base64url');
-      const share: QuickShare = { code, name, size, offset: 0, createdAt: new Date(now).toISOString(), expiresAt: now + QUICK_SHARE_TTL_MS, ready: false, uploadTokenHash: crypto.createHash('sha256').update(uploadToken).digest('hex'), ipHash };
+       const isPublic = req.body?.public === true;
+       const share: QuickShare = { code, name, size, offset: 0, createdAt: new Date(now).toISOString(), expiresAt: now + (isPublic ? 60 * 60_000 : QUICK_SHARE_TTL_MS), ready: false, public: isPublic, uploadTokenHash: crypto.createHash('sha256').update(uploadToken).digest('hex'), ipHash };
       await fs.promises.writeFile(paths.metadata, JSON.stringify(share), { flag: 'wx', mode: 0o600 });
       return res.status(201).json({ success: true, code, uploadToken, chunkSize: 8 * 1024 * 1024, expiresAt: share.expiresAt });
     } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message }); }
@@ -686,7 +716,9 @@ async function startServer() {
       const { share, data, metadata } = await readQuickShare(req.params.code);
       if (!ownsQuickShare(req, share)) return res.status(403).json({ success: false, error: 'Token upload không hợp lệ' });
       if (share.offset !== share.size) return res.status(409).json({ success: false, error: 'File chưa được tải lên đầy đủ' });
-      share.checksum = await sha256File(data); share.ready = true; await fs.promises.writeFile(metadata, JSON.stringify(share), { mode: 0o600 });
+       share.checksum = await sha256File(data); share.ready = true;
+       if (share.public) { share.createdAt = new Date().toISOString(); share.expiresAt = Date.now() + 60 * 60_000; }
+       await fs.promises.writeFile(metadata, JSON.stringify(share), { mode: 0o600 });
       audit({ category: 'quick_share', action: 'upload_complete', event: 'Public quick-share upload completed', ip: requestInfo(req).ip, metadata: { size: share.size } });
       return res.json({ success: true, code: share.code, checksum: share.checksum, expiresAt: share.expiresAt });
     } catch (error: any) { return res.status(error.status || (error.code === 'ENOENT' ? 404 : 500)).json({ success: false, error: error.message }); }
@@ -704,6 +736,7 @@ async function startServer() {
     try {
       if (!allowQuickShareDownload(requestInfo(req).ip)) return res.status(429).json({ success: false, error: 'Đã đạt giới hạn thử mã. Vui lòng thử lại sau 15 phút.' });
       const { share, data, metadata } = await readQuickShare(req.params.code);
+      if (share.public) return res.status(404).json({ success: false, error: 'File không tồn tại' });
       if (!share.ready || share.offset !== share.size) return res.status(404).json({ success: false, error: 'File chưa sẵn sàng hoặc đã được nhận' });
       const sending = `${data}.${crypto.randomUUID()}.sending`;
       await fs.promises.rename(data, sending); await fs.promises.rm(metadata, { force: true });

@@ -16,7 +16,7 @@
 - Xem CPU, RAM và dung lượng ổ đĩa.
 - Quản lý systemd service, journal logs và Linux processes.
 - Nhật ký đăng nhập và thao tác quản trị.
-- Truyền file nhanh tại `/share` không cần đăng nhập: mã 4 chữ số, tối đa 2 GB, hết hạn sau 24 giờ và xóa sau lần tải đầu tiên.
+- Truyền file nhanh tại `/share` không cần đăng nhập: kéo thả nhiều file để chia sẻ công khai và tải trực tiếp từ danh sách trong 60 phút; hoặc gửi riêng bằng mã 4 chữ số, tối đa 2 GB, hết hạn sau 24 giờ và xóa sau lần tải đầu tiên.
 - Trình chỉnh sửa tệp văn bản với kiểm tra xung đột khi lưu.
 - Xem trước video, âm thanh, hình ảnh và PDF.
 - Chuyển tài liệu Office sang PDF để xem bằng LibreOffice.

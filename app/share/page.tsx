@@ -1,15 +1,21 @@
 "use client";
 
-import { ChangeEvent, useEffect, useState } from "react";
+import { ChangeEvent, DragEvent, useCallback, useEffect, useState } from "react";
 import { Check, Clipboard, Download, FileUp, KeyRound, LockKeyhole, RotateCcw, Send, ShieldCheck, Timer, Upload } from "lucide-react";
 import { apiClient } from "@/lib/client/api";
 
 type UploadSession = { code: string; uploadToken: string; name: string; size: number };
+type PublicFile = { code: string; name: string; size: number; createdAt: string; expiresAt: number };
 const UPLOAD_SESSION_KEY = "nodeshell_quick_share_upload";
 
 function fileSize(bytes: number) {
   if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(bytes >= 1024 * 1024 * 1024 ? 0 : 1)} ${bytes >= 1024 * 1024 * 1024 ? "GB" : "MB"}`;
+}
+
+function timeLeft(expiresAt: number, now: number) {
+  const seconds = Math.max(0, Math.ceil((expiresAt - now) / 1000));
+  return `${Math.floor(seconds / 60)}p ${String(seconds % 60).padStart(2, "0")}s`;
 }
 
 export default function QuickSharePage() {
@@ -21,6 +27,26 @@ export default function QuickSharePage() {
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [resumeSession, setResumeSession] = useState<UploadSession | null>(null);
+  const [publicFiles, setPublicFiles] = useState<PublicFile[]>([]);
+  const [publicStatus, setPublicStatus] = useState("");
+  const [publicBusy, setPublicBusy] = useState(false);
+  const [publicProgress, setPublicProgress] = useState<number | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+
+  const refreshPublicFiles = useCallback(async () => {
+    try {
+      const result = await apiClient.request<{ files: PublicFile[] }>("/api/quick-share/public", { cache: "no-store" });
+      setPublicFiles(result.files);
+    } catch (error) { setPublicStatus(error instanceof Error ? error.message : "Không thể tải danh sách file."); }
+  }, []);
+
+  useEffect(() => {
+    const initial = window.setTimeout(() => void refreshPublicFiles(), 0);
+    const clock = window.setInterval(() => setNow(Date.now()), 1000);
+    const refresh = window.setInterval(() => void refreshPublicFiles(), 30_000);
+    return () => { window.clearTimeout(initial); window.clearInterval(clock); window.clearInterval(refresh); };
+  }, [refreshPublicFiles]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -59,6 +85,35 @@ export default function QuickSharePage() {
     } catch (error) { setStatus(error instanceof Error ? error.message : "Không thể tạo kênh truyền file."); }
   }
 
+  async function uploadPublicFiles(files: File[]) {
+    if (!files.length || publicBusy) return;
+    setPublicBusy(true); setPublicStatus("");
+    let uploaded = 0;
+    try {
+      for (const current of files) {
+        setPublicProgress(0);
+        setPublicStatus(`Đang tải lên ${current.name} (${uploaded + 1}/${files.length})...`);
+        const initialized = await apiClient.request<{ code: string; uploadToken: string }>("/api/quick-share", { method: "POST", body: { name: current.name, size: current.size, public: true } });
+        for (let offset = 0; offset < current.size;) {
+          const chunk = await current.slice(offset, offset + 8 * 1024 * 1024).arrayBuffer();
+          const result = await apiClient.request<{ offset: number }>(`/api/quick-share/${initialized.code}`, { method: "PUT", headers: { "content-type": "application/octet-stream", "x-upload-offset": String(offset), "x-quick-share-token": initialized.uploadToken }, body: chunk });
+          offset = result.offset;
+          setPublicProgress(Math.round(offset / current.size * 100));
+        }
+        await apiClient.request(`/api/quick-share/${initialized.code}/complete`, { method: "POST", headers: { "x-quick-share-token": initialized.uploadToken } });
+        uploaded++;
+        await refreshPublicFiles();
+      }
+      setPublicStatus(`Đã tải lên ${uploaded} file. Mọi người có thể tải trong 60 phút.`);
+    } catch (error) { setPublicStatus(`${uploaded ? `Đã tải lên ${uploaded}/${files.length} file. ` : ""}${error instanceof Error ? error.message : "Không thể tải file lên."}`); }
+    finally { setPublicBusy(false); setPublicProgress(null); }
+  }
+
+  function dropPublicFiles(event: DragEvent<HTMLElement>) {
+    event.preventDefault(); setDragging(false);
+    void uploadPublicFiles(Array.from(event.dataTransfer.files));
+  }
+
   async function resume() {
     if (!file || !resumeSession) return;
     if (file.name !== resumeSession.name || file.size !== resumeSession.size) return setStatus("Chọn đúng file cũ để tiếp tục upload.");
@@ -75,7 +130,14 @@ export default function QuickSharePage() {
   async function copyCode() { await navigator.clipboard.writeText(code); setCopied(true); window.setTimeout(() => setCopied(false), 1800); }
 
   return <main className="quick-share-shell"><div className="quick-share-orb is-one" /><div className="quick-share-orb is-two" /><div className="quick-share-wrap">
-    <header className="quick-share-hero"><div className="quick-share-mark"><Send /></div><div><p>NODE SHELL / QUICK SHARE</p><h1>Gửi file. Nhận bằng <em>4 số.</em></h1><span>Không cần tài khoản, không có thư mục công khai.</span></div><div className="quick-share-hero-meta"><b><Timer />24 giờ</b><b><ShieldCheck />Tối đa 2 GB</b></div></header>
+    <header className="quick-share-hero"><div className="quick-share-mark"><Send /></div><div><p>NODE SHELL / QUICK SHARE</p><h1>Chia sẻ file <em>nhanh chóng.</em></h1><span>Kéo thả để chia sẻ công khai hoặc gửi riêng bằng mã 4 số.</span></div><div className="quick-share-hero-meta"><b><Timer />Công khai 60 phút</b><b><ShieldCheck />Tối đa 2 GB</b></div></header>
+    <section className="quick-share-card quick-share-public"><div className="quick-share-card-heading"><span className="quick-share-step">★</span><div><p>CHIA SẺ KHÔNG CẦN MÃ</p><h2>Kéo thả file vào đây</h2></div><FileUp /></div>
+      <label className={`quick-share-drop ${dragging ? "is-dragging" : ""}`} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { event.preventDefault(); setDragging(false); }} onDrop={dropPublicFiles}><input type="file" multiple disabled={publicBusy} onChange={(event) => { void uploadPublicFiles(Array.from(event.target.files || [])); event.target.value = ""; }} /><Upload /><strong>{publicBusy ? "Đang tải file lên..." : "Thả file hoặc bấm để chọn file"}</strong><span>File hiển thị bên dưới trong 60 phút, ai mở trang này cũng có thể tải xuống.</span></label>
+      {publicProgress !== null && <div className="quick-share-progress"><div><span>{publicStatus}</span><strong>{publicProgress}%</strong></div><i><b style={{ width: `${publicProgress}%` }} /></i></div>}
+      {publicStatus && <p role="status" className="quick-share-status">{publicStatus}</p>}
+      <div className="quick-share-list-heading"><h2>File đang chia sẻ</h2><span>{publicFiles.filter(item => item.expiresAt > now).length} file</span></div>
+      <div className="quick-share-files">{publicFiles.filter(item => item.expiresAt > now).map(item => <div className="quick-share-file" key={item.code}><FileUp /><div><strong title={item.name}>{item.name}</strong><span>{fileSize(item.size)} · Còn {timeLeft(item.expiresAt, now)}</span></div><a href={`${apiClient.baseUrl}/api/quick-share/public/${item.code}`} aria-label={`Tải ${item.name}`} title={`Tải ${item.name}`}><Download />Tải xuống</a></div>)}{!publicFiles.some(item => item.expiresAt > now) && <p className="quick-share-empty">Chưa có file nào. Kéo thả file để bắt đầu chia sẻ.</p>}</div>
+    </section>
     <section className="quick-share-grid">
       <article className="quick-share-card is-send"><div className="quick-share-card-heading"><span className="quick-share-step">01</span><div><p>GỬI FILE</p><h2>Đặt file vào kênh</h2></div><FileUp /></div>
         <label className={`quick-share-drop ${file ? "has-file" : ""}`}><input type="file" onChange={selectFile} disabled={busy} /><Upload /><strong>{file?.name || "Chọn một file để bắt đầu"}</strong><span>{file ? `${fileSize(file.size)} · sẵn sàng truyền` : "Bấm để duyệt file từ thiết bị"}</span></label>
