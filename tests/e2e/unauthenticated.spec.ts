@@ -51,3 +51,20 @@ test("keeps login controls usable on a narrow viewport", async ({ page }) => {
   expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(375);
   await expect(page.getByRole("button", { name: "Đăng nhập hệ thống" })).toBeInViewport();
 });
+
+test("shows an invalid share code inline without leaving the page", async ({ page }) => {
+  await page.route("**/api/quick-share/public", (route) =>
+    route.fulfill({ contentType: "application/json", body: JSON.stringify({ success: true, files: [] }) }),
+  );
+  await page.route("**/api/quick-share/1234/status", (route) =>
+    route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ success: false, error: "Mã không đúng" }) }),
+  );
+  const loaded = page.waitForResponse((response) => response.url().endsWith("/api/quick-share/public"));
+  await page.goto("/share");
+  await loaded;
+  await page.getByLabel("MÃ NHẬN FILE").fill("1234");
+  await page.getByRole("button", { name: "Nhận và tải file" }).click();
+
+  await expect(page.locator("#receive-error")).toContainText("Mã không đúng");
+  await expect(page).toHaveURL(/\/share\/?$/);
+});
