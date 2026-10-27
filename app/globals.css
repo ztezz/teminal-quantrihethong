@@ -40,9 +40,11 @@ body {
 .quick-share-hero h1 { margin: .4rem 0 .3rem; color: #eff9f8; font-size: clamp(1.8rem, 4vw, 3rem); letter-spacing: -.06em; line-height: 1; }
 .quick-share-hero h1 em { color: #93e9df; font-style: normal; }
 .quick-share-hero > div > span { color: #78909a; font-size: .85rem; }
-.quick-share-hero-meta { display: flex; gap: .5rem; }
+.quick-share-hero-meta { display: flex; flex-wrap: wrap; gap: .5rem; }
 .quick-share-hero-meta b { display: flex; align-items: center; gap: .35rem; padding: .55rem .65rem; color: #a4c1c5; background: rgba(255,255,255,.035); border: 1px solid rgba(173, 221, 222, .12); border-radius: 8px; font: 700 10px ui-monospace, monospace; }
 .quick-share-hero-meta svg { width: 13px; color: #8ee7d9; }
+.quick-share-install { display: flex; align-items: center; gap: .35rem; padding: .55rem .65rem; border: 1px solid rgba(147, 233, 223, .35); border-radius: 8px; color: #b9f5ee; background: rgba(147, 233, 223, .1); font: 700 10px ui-monospace, monospace; cursor: pointer; }
+.quick-share-install:hover { background: rgba(147, 233, 223, .2); }
 .quick-share-grid { display: grid; grid-template-columns: 1.07fr .93fr; gap: 1rem; }
 .quick-share-public { margin-bottom: 1rem; }
 .quick-share-public .quick-share-drop { min-height: 150px; margin-top: 1.25rem; }

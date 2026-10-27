@@ -3,6 +3,7 @@
 import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState } from "react";
 import { Check, Clipboard, Download, FileUp, KeyRound, LockKeyhole, RotateCcw, Send, ShieldCheck, Timer, Trash2, Upload } from "lucide-react";
 import { ApiError, apiClient } from "@/lib/client/api";
+import { InstallShareButton } from "./install-share-button";
 
 type UploadSession = { code: string; uploadToken: string; name: string; size: number };
 type PublicFile = { code: string; name: string; size: number; createdAt: string; expiresAt: number };
@@ -246,7 +247,7 @@ export default function QuickSharePage() {
   async function copyCode() { await navigator.clipboard.writeText(code); setCopied(true); window.setTimeout(() => setCopied(false), 1800); }
 
   return <main className="quick-share-shell"><div className="quick-share-orb is-one" /><div className="quick-share-orb is-two" /><div className="quick-share-wrap">
-    <header className="quick-share-hero"><div className="quick-share-mark"><Send /></div><div><p>NODE SHELL / QUICK SHARE</p><h1>Chia sẻ file <em>nhanh chóng.</em></h1><span>Kéo thả để chia sẻ công khai hoặc gửi riêng bằng mã 4 số.</span></div><div className="quick-share-hero-meta"><b><Timer />Công khai 60 phút</b><b><ShieldCheck />Tối đa 2 GB</b></div></header>
+    <header className="quick-share-hero"><div className="quick-share-mark"><Send /></div><div><p>NODE SHELL / QUICK SHARE</p><h1>Chia sẻ file <em>nhanh chóng.</em></h1><span>Kéo thả để chia sẻ công khai hoặc gửi riêng bằng mã 4 số.</span></div><div className="quick-share-hero-meta"><b><Timer />Công khai 60 phút</b><b><ShieldCheck />Tối đa 2 GB</b><InstallShareButton /></div></header>
     <section className="quick-share-card quick-share-public"><div className="quick-share-card-heading"><span className="quick-share-step">★</span><div><p>CHIA SẺ KHÔNG CẦN MÃ</p><h2>Kéo thả file vào đây</h2></div><FileUp /></div>
       <label className={`quick-share-drop ${dragging ? "is-dragging" : ""}`} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { event.preventDefault(); setDragging(false); }} onDrop={dropPublicFiles}><input type="file" multiple disabled={publicBusy} onChange={(event) => { void uploadPublicFiles(Array.from(event.target.files || [])); event.target.value = ""; }} /><Upload /><strong>{publicBusy ? "Đang tải file lên..." : "Thả file hoặc bấm để chọn file"}</strong><span>File hiển thị bên dưới trong 60 phút, ai mở trang này cũng có thể tải xuống.</span></label>
       {publicProgress !== null && <div className="quick-share-progress"><div><span>{publicStatus}</span><strong>{publicProgress}%</strong></div><i><b style={{ width: `${publicProgress}%` }} /></i></div>}
