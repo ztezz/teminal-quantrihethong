@@ -1,10 +1,19 @@
-const CACHE_NAME = "nodeshell-share-v1";
+const CACHE_NAME = "nodeshell-share-7be57cf27c45";
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll([
-    "/share", "/share/icon-192.png", "/share/icon-512.png", "/share/manifest.webmanifest",
-  ])));
-  self.skipWaiting();
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE_NAME);
+    await cache.addAll(["/share", "/share/icon-192.png", "/share/icon-512.png", "/share/manifest.webmanifest"]);
+    const shell = await cache.match("/share");
+    const html = await shell.text();
+    const assets = [...html.matchAll(/(?:src|href)="(\/_next\/static\/[^\"]+)"/g)]
+      .map((match) => match[1].replaceAll("&amp;", "&"));
+    await cache.addAll([...new Set(assets)]);
+  })());
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") self.skipWaiting();
 });
 
 self.addEventListener("activate", (event) => {

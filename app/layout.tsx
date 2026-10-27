@@ -6,7 +6,6 @@ export const metadata: Metadata = {
   title: 'NodeShell Control Center',
   description: 'Trung tâm quản trị, giám sát và vận hành server',
   applicationName: 'NodeShell Control Center',
-  manifest: '/manifest.webmanifest',
   appleWebApp: {
     capable: true,
     title: 'NodeShell',

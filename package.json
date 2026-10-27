@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "prebuild": "node scripts/stamp-share-sw.mjs",
     "dev": "tsx server.ts",
     "backend": "tsx server.ts --backend",
     "build": "next build",

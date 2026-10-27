@@ -28,6 +28,11 @@ body {
 }
 
 .quick-share-shell { position: relative; min-height: 100vh; overflow: hidden; background: #071018; color: #d9e7ed; isolation: isolate; }
+.quick-share-pwa-status { position: fixed; z-index: 20; top: 1rem; left: 50%; width: min(540px, calc(100% - 2rem)); transform: translateX(-50%); }
+.quick-share-pwa-status:empty { display: none; }
+.quick-share-pwa-status p { margin: 0 0 .5rem; padding: .8rem 1rem; border: 1px solid rgba(147, 233, 223, .35); border-radius: 10px; color: #e7fffa; background: #12312e; box-shadow: 0 12px 32px rgba(0, 0, 0, .35); font-size: .8rem; text-align: center; }
+.quick-share-pwa-status button { margin-left: .5rem; padding: .3rem .55rem; border: 1px solid #93e9df; border-radius: 6px; color: #071018; background: #93e9df; font-weight: 700; cursor: pointer; }
+.quick-share-pwa-status button:disabled { opacity: .6; cursor: wait; }
 .quick-share-shell::before { position: absolute; z-index: -1; inset: 0; content: ""; opacity: .38; background-image: linear-gradient(rgba(176, 211, 221, .06) 1px, transparent 1px), linear-gradient(90deg, rgba(176, 211, 221, .06) 1px, transparent 1px); background-size: 34px 34px; mask-image: linear-gradient(to bottom, black, transparent 72%); }
 .quick-share-orb { position: absolute; z-index: -1; border-radius: 999px; filter: blur(5px); pointer-events: none; }
 .quick-share-orb.is-one { top: -22rem; left: -12rem; width: 45rem; height: 45rem; background: radial-gradient(circle, rgba(14, 165, 233, .2), transparent 67%); }
