@@ -72,4 +72,13 @@ test('creates a timed 2FA link and shows its live code to the recipient', async 
   await page.goto(link);
   await expect(page.getByRole('heading', { name: 'Mã 2FA được chia sẻ' })).toBeVisible();
   await expect(page.getByText('123456')).toBeVisible();
+  await expect(page.getByRole('timer')).toBeVisible();
+});
+
+test('shows a clear end state for an expired or revoked 2FA link', async ({ page }) => {
+  await page.route('**/api/vault/shared/*', route => route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ success: false, error: 'Link không tồn tại hoặc đã hết hạn.' }) }));
+  await page.goto(`/vault-share#token=${'a'.repeat(43)}`);
+  await expect(page.getByRole('heading', { name: 'Link không còn hiệu lực' })).toBeVisible();
+  await expect(page.getByText('Hãy liên hệ người chia sẻ để xin link mới.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Sao chép mã 2FA' })).toHaveCount(0);
 });
