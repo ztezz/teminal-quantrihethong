@@ -11,6 +11,7 @@ export type AuditEntry = { id: number; category: string; action: string; event: 
 export type StoredDeleteJob = { id: string; owner: string; state: string; progress: number; completed: number; total: number; message: string; paths: unknown[]; results: Record<string, unknown>[]; createdAt: string; finishedAt?: string; cancelRequested: boolean; idempotencyKey?: string };
 export type StoredNote = { id: string; userId: string; titleCipher: string; contentCipher: string; pinned: boolean; createdAt: string; updatedAt: string };
 export type VaultItem = { id: string; userId: string; envelope: string; content: string; version: number; pinned: boolean; deletedAt?: string; createdAt: string; updatedAt: string };
+export type VaultShare = { id: string; userId: string; itemId: string; tokenHash: string; createdAt: number; expiresAt: number };
 
 type LegacyData = {
   settings?: Record<string, string>;
@@ -108,6 +109,12 @@ export class SqliteDatabase {
         user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, fingerprint TEXT NOT NULL,
         first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, PRIMARY KEY(user_id, fingerprint)
       );
+      CREATE TABLE IF NOT EXISTS vault_shares (
+        id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        item_id TEXT NOT NULL REFERENCES vault_items(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS vault_shares_item_idx ON vault_shares(user_id, item_id, expires_at);
     `);
   }
 
@@ -284,6 +291,11 @@ export class SqliteDatabase {
   getVaultConfig(userId: string) { const row = this.database.prepare('SELECT * FROM vault_config WHERE user_id = ?').get(userId) as Record<string, unknown> | undefined; return row ? { salt: String(row.salt), checkCipher: String(row.check_cipher), iterations: Number(row.iterations), createdAt: String(row.created_at) } : undefined; }
   createVaultConfig(userId: string, salt: string, checkCipher: string, iterations: number) { this.database.prepare('INSERT INTO vault_config (user_id, salt, check_cipher, iterations, created_at) VALUES (?, ?, ?, ?, ?)').run(userId, salt, checkCipher, iterations, new Date().toISOString()); }
   resetManagedVault(userId: string, wrappedKey: string) { this.database.exec('BEGIN IMMEDIATE'); try { this.database.prepare('DELETE FROM secure_notes WHERE user_id=?').run(userId); this.database.prepare('DELETE FROM vault_items WHERE user_id=?').run(userId); this.database.prepare('DELETE FROM vault_config WHERE user_id=?').run(userId); this.database.prepare('INSERT INTO vault_config (user_id,salt,check_cipher,iterations,created_at) VALUES (?,\'managed-v1\',?,0,?)').run(userId,wrappedKey,new Date().toISOString()); this.database.exec('COMMIT'); } catch (error) { this.database.exec('ROLLBACK'); throw error; } }
+  createVaultShare(share: VaultShare) { this.database.prepare('INSERT INTO vault_shares (id,user_id,item_id,token_hash,created_at,expires_at) VALUES (?,?,?,?,?,?)').run(share.id, share.userId, share.itemId, share.tokenHash, share.createdAt, share.expiresAt); }
+  listVaultShares(userId: string, itemId: string) { return this.database.prepare('SELECT id, created_at AS createdAt, expires_at AS expiresAt FROM vault_shares WHERE user_id=? AND item_id=? AND expires_at>? ORDER BY created_at DESC').all(userId, itemId, Date.now()) as Array<{ id: string; createdAt: number; expiresAt: number }>; }
+  getVaultShareByTokenHash(tokenHash: string) { const row = this.database.prepare('SELECT id, user_id AS userId, item_id AS itemId, token_hash AS tokenHash, created_at AS createdAt, expires_at AS expiresAt FROM vault_shares WHERE token_hash=? AND expires_at>?').get(tokenHash, Date.now()) as VaultShare | undefined; return row; }
+  revokeVaultShare(userId: string, itemId: string, id: string) { return Number(this.database.prepare('DELETE FROM vault_shares WHERE user_id=? AND item_id=? AND id=?').run(userId, itemId, id).changes) > 0; }
+  pruneVaultShares() { return Number(this.database.prepare('DELETE FROM vault_shares WHERE expires_at<=?').run(Date.now()).changes); }
   vaultUsage(userId: string) { const row = this.database.prepare('SELECT COUNT(*) AS items, COALESCE(SUM(length(envelope)+length(content)),0) AS bytes FROM vault_items WHERE user_id=?').get(userId) as { items: number; bytes: number }; const versions = this.database.prepare('SELECT COUNT(*) AS versions, COALESCE(SUM(length(envelope)+length(content)),0) AS bytes FROM vault_versions WHERE user_id=?').get(userId) as { versions: number; bytes: number }; return { items: Number(row.items), versions: Number(versions.versions), bytes: Number(row.bytes) + Number(versions.bytes) }; }
   recordVaultAccess(userId: string, fingerprint: string) { const existing = this.database.prepare('SELECT 1 FROM vault_access WHERE user_id=? AND fingerprint=?').get(userId,fingerprint); const now = new Date().toISOString(); this.database.prepare('INSERT INTO vault_access (user_id,fingerprint,first_seen,last_seen) VALUES (?,?,?,?) ON CONFLICT(user_id,fingerprint) DO UPDATE SET last_seen=excluded.last_seen').run(userId,fingerprint,now,now); return !existing; }
   listVaultItems(userId: string, trash = false) { return (this.database.prepare(`SELECT * FROM vault_items WHERE user_id = ? AND deleted_at IS ${trash ? 'NOT ' : ''}NULL ORDER BY pinned DESC, updated_at DESC`).all(userId) as Record<string, unknown>[]).map(row => ({ id: String(row.id), userId: String(row.user_id), envelope: String(row.envelope), content: String(row.content), version: Number(row.version), pinned: Boolean(row.pinned), deletedAt: row.deleted_at ? String(row.deleted_at) : undefined, createdAt: String(row.created_at), updatedAt: String(row.updated_at) } satisfies VaultItem)); }

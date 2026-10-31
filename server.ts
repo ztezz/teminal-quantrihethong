@@ -25,6 +25,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { createCorsMiddleware } from './lib/cors-config';
 import { decryptNoteText, encryptNoteText, noteEncryptionKey } from './lib/secure-notes';
+import { generateSharedTotp, readSharedTotp } from './lib/vault-share';
 
 dotenv.config({ path: path.join(process.cwd(), '.env'), override: false, quiet: true });
 
@@ -494,6 +495,7 @@ async function startServer() {
   auditPruneTimer.unref();
   const pruneVaultTrash = () => {
     const removed = db.pruneVaultTrash(new Date(Date.now() - 30 * 86_400_000).toISOString());
+    db.pruneVaultShares();
     if (removed) console.log(`[VAULT] Permanently removed ${removed} expired trash items.`);
   };
   pruneVaultTrash();
@@ -1002,6 +1004,60 @@ async function startServer() {
   };
   const validCipher = (value: unknown, max = 200_000) => typeof value === 'string' && value.length >= 16 && value.length <= max;
   const vaultPublic = (item: ReturnType<typeof db.listVaultItems>[number], includeContent = false) => ({ id: item.id, envelope: item.envelope, ...(includeContent ? { content: item.content } : {}), version: item.version, pinned: item.pinned, deletedAt: item.deletedAt, createdAt: item.createdAt, updatedAt: item.updatedAt });
+
+  const shareAttempts = new Map<string, { count: number; resetAt: number }>();
+  expressApp.get('/api/vault/shared/:token', (req, res) => {
+    const ip = requestInfo(req).ip;
+    const now = Date.now();
+    if (shareAttempts.size >= 10_000) for (const [key, value] of shareAttempts) if (value.resetAt <= now) shareAttempts.delete(key);
+    while (shareAttempts.size >= 20_000) shareAttempts.delete(shareAttempts.keys().next().value!);
+    const attempts = shareAttempts.get(ip);
+    if (!attempts || attempts.resetAt <= now) shareAttempts.set(ip, { count: 1, resetAt: now + 60_000 });
+    else if (++attempts.count > 120) return res.status(429).json({ success: false, error: 'Quá nhiều yêu cầu. Vui lòng thử lại sau.' });
+    const token = req.params.token;
+    if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) return res.status(404).json({ success: false, error: 'Link không tồn tại hoặc đã hết hạn.' });
+    const share = db.getVaultShareByTokenHash(crypto.createHash('sha256').update(token).digest('hex'));
+    const owner = share && db.getUserById(share.userId);
+    const item = share && db.getVaultItem(share.userId, share.itemId);
+    const config = share && db.getVaultConfig(share.userId);
+    if (!share || !owner?.enabled || !item || item.deletedAt || config?.salt !== 'managed-v1') return res.status(404).json({ success: false, error: 'Link không tồn tại hoặc đã hết hạn.' });
+    try {
+      const totp = readSharedTotp(item, decryptSecret(config.checkCipher));
+      const expiresAt = share.expiresAt;
+      const serverTime = Date.now();
+      if (serverTime >= expiresAt) return res.status(404).json({ success: false, error: 'Link không tồn tại hoặc đã hết hạn.' });
+      return res.json({ success: true, title: totp.title, account: totp.account, code: generateSharedTotp(totp, serverTime), period: totp.period, expiresAt, serverTime });
+    } catch { return res.status(404).json({ success: false, error: 'Link không tồn tại hoặc đã hết hạn.' }); }
+  });
+
+  expressApp.get('/api/vault/items/:id/shares', (req, res) => {
+    const context = vaultContext(req, res); if (!context) return;
+    const item = db.getVaultItem(context.user.id, req.params.id);
+    if (!item || item.deletedAt) return res.status(404).json({ success: false, error: 'Không tìm thấy mã 2FA.' });
+    return res.json({ success: true, shares: db.listVaultShares(context.user.id, item.id) });
+  });
+  expressApp.post('/api/vault/items/:id/shares', (req, res) => {
+    const context = vaultContext(req, res, true); if (!context) return;
+    const durationMinutes = req.body?.durationMinutes;
+    if (![5, 15, 60, 360, 1440].includes(durationMinutes)) return res.status(400).json({ success: false, error: 'Thời gian chia sẻ không hợp lệ.' });
+    const item = db.getVaultItem(context.user.id, req.params.id);
+    const config = db.getVaultConfig(context.user.id);
+    if (!item || item.deletedAt || config?.salt !== 'managed-v1') return res.status(404).json({ success: false, error: 'Không tìm thấy mã 2FA.' });
+    if (db.listVaultShares(context.user.id, item.id).length >= 10) return res.status(409).json({ success: false, error: 'Đã có 10 link đang hoạt động. Hãy thu hồi một link trước.' });
+    try { readSharedTotp(item, decryptSecret(config.checkCipher)); }
+    catch { return res.status(400).json({ success: false, error: 'Mục này không phải mã 2FA hợp lệ.' }); }
+    const token = crypto.randomBytes(32).toString('base64url');
+    const share = { id: crypto.randomUUID(), userId: context.user.id, itemId: item.id, tokenHash: crypto.createHash('sha256').update(token).digest('hex'), createdAt: Date.now(), expiresAt: Date.now() + durationMinutes * 60_000 };
+    db.createVaultShare(share);
+    auditRequest(req, { category: 'vault', action: 'share_create', event: '2FA share link created', level: 'warning', metadata: { itemId: item.id, shareId: share.id, expiresAt: share.expiresAt } });
+    return res.status(201).json({ success: true, share: { id: share.id, createdAt: share.createdAt, expiresAt: share.expiresAt }, token });
+  });
+  expressApp.delete('/api/vault/items/:id/shares/:shareId', (req, res) => {
+    const context = vaultContext(req, res); if (!context) return;
+    if (!db.revokeVaultShare(context.user.id, req.params.id, req.params.shareId)) return res.status(404).json({ success: false, error: 'Không tìm thấy link chia sẻ.' });
+    auditRequest(req, { category: 'vault', action: 'share_revoke', event: '2FA share link revoked', metadata: { itemId: req.params.id, shareId: req.params.shareId } });
+    return res.json({ success: true });
+  });
 
   expressApp.get('/api/vault/config', (req, res) => {
     const context = vaultContext(req, res); if (!context) return;
