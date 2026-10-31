@@ -131,8 +131,18 @@
 .codeTop, .codeRow { display: flex; align-items: center; justify-content: space-between; gap: .6rem; }
 .codeTimer { color: #80e3ca; font: 700 .7rem ui-monospace, SFMono-Regular, Consolas, monospace; }
 .codeRow { margin: .85rem 0 1rem; }
+.codeStage { position: relative; flex: 1; min-width: 0; }
 .code { overflow: hidden; margin: 0; color: #b8ffe5; font: 800 clamp(1.6rem, 7vw, 3.1rem) ui-monospace, SFMono-Regular, Consolas, monospace; font-variant-numeric: tabular-nums; letter-spacing: .12em; line-height: 1.1; text-shadow: 0 0 28px rgba(109, 239, 193, .23); white-space: nowrap; }
 .codeWide { font-size: clamp(1.35rem, 6vw, 2.2rem); letter-spacing: .04em; }
+.codeMasked { color: rgba(154, 222, 218, .2); text-shadow: none; }
+.codeReveal { position: relative; animation: blueReveal .85s cubic-bezier(.16,.78,.2,1) both; }
+.codeReveal::after { position: absolute; top: -10%; left: -15%; width: 22%; height: 120%; content: ''; pointer-events: none; background: linear-gradient(90deg, transparent, rgba(108, 211, 255, .7), transparent); filter: blur(8px); animation: blueSweep .8s ease-out both; }
+.dustCloud { position: absolute; z-index: 2; inset: -.8rem 1rem -.8rem -.3rem; overflow: hidden; pointer-events: none; }
+.dustCloud::before { position: absolute; top: 38%; left: 2%; width: 75%; height: 25%; content: ''; background: linear-gradient(90deg, rgba(133, 218, 217, .28), rgba(103, 174, 223, .18), transparent); filter: blur(9px); animation: dustHaze .58s ease-out both; }
+.dustCloud i { position: absolute; width: 3px; height: 3px; border-radius: 50%; background: #b2e5ed; box-shadow: 0 0 6px 1px rgba(124, 215, 242, .65); animation: dustFlight .5s ease-out both; }
+.dustCloud i:nth-child(3n) { width: 2px; height: 2px; background: #a9ffd6; }
+.dustCloud i:nth-child(2n) { --drift: 32px; }
+.dustCloud i:nth-child(2n + 1) { --drift: -26px; }
 .copyButton { display: grid; flex: none; width: 2.65rem; height: 2.65rem; place-items: center; border: 1px solid rgba(138, 238, 217, .23); border-radius: .75rem; color: #a8f5df; background: rgba(124, 232, 206, .1); cursor: pointer; transition: background .2s, transform .2s; }
 .copyButton:hover:not(:disabled) { transform: translateY(-2px); background: rgba(124, 232, 206, .2); }
 .copyButton:disabled { cursor: not-allowed; opacity: .45; }
@@ -155,6 +165,10 @@
 @keyframes livePulse { 50% { opacity: .45; box-shadow: 0 0 3px #5df2ab; } }
 @keyframes sheen { 0%, 72% { transform: translateX(-120%); } 100% { transform: translateX(120%); } }
 @keyframes cardEnter { from { opacity: 0; transform: translateY(16px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes dustFlight { 0% { opacity: 0; transform: translate3d(0, 8px, 0) scale(1.6); } 16% { opacity: .95; } 100% { opacity: 0; transform: translate3d(var(--drift), -32px, 0) scale(.15); } }
+@keyframes dustHaze { from { opacity: .8; transform: scaleX(.7); } to { opacity: 0; transform: translate3d(28px, -20px, 0) scaleX(1.3); } }
+@keyframes blueReveal { 0% { opacity: 0; filter: blur(11px); transform: translateY(10px) scale(.96); color: #76bbff; text-shadow: 0 0 38px rgba(73, 165, 255, .95); } 48% { opacity: 1; filter: blur(0); color: #a4ddff; text-shadow: 0 0 28px rgba(80, 173, 255, .8); } 100% { opacity: 1; transform: translateY(0) scale(1); color: #b8ffe5; text-shadow: 0 0 28px rgba(109, 239, 193, .23); } }
+@keyframes blueSweep { from { opacity: 0; transform: translateX(0); } 30% { opacity: 1; } to { opacity: 0; transform: translateX(460%); } }
 
 @media (max-width: 420px) {
   .scene { padding: 1.25rem .75rem; }
@@ -168,6 +182,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .grid, .orb, .rings span, .live span, .codePanel::before, .card { animation: none; }
+  .grid, .orb, .rings span, .live span, .codePanel::before, .card, .codeReveal, .codeReveal::after, .dustCloud::before, .dustCloud i { animation: none; }
+  .dustCloud { display: none; }
   .copyButton, .progressTrack span { transition: none; }
 }
