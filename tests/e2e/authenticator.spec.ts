@@ -61,8 +61,12 @@ test('creates a timed 2FA link and shows its live code to the recipient', async 
   await page.route(`**/api/vault/shared/${'a'.repeat(43)}`, route => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ success: true, title: 'GitHub', account: 'alice@example.com', code: '123456', period: 30, expiresAt: Date.now() + 300_000, serverTime: Date.now() }) }));
   await page.goto('/');
   await page.getByRole('button', { name: 'Chia sẻ' }).click();
+  await expect(page.getByRole('dialog', { name: 'Chia sẻ mã GitHub' })).toBeVisible();
   await page.getByLabel('Thời gian chia sẻ').selectOption('5');
   await page.getByRole('button', { name: 'Tạo link chia sẻ' }).click();
+  await expect(page.getByRole('dialog', { name: 'Xác nhận chia sẻ mã 2FA' })).toBeVisible();
+  await page.getByRole('button', { name: 'Xác nhận chia sẻ' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Đã tạo link chia sẻ GitHub' })).toBeVisible();
   const link = await page.getByRole('textbox', { name: 'Link chia sẻ mới' }).inputValue();
   expect(link).toContain(`/vault-share#token=${'a'.repeat(43)}`);
   await page.goto(link);
