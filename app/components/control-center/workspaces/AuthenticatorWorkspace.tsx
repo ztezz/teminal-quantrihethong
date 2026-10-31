@@ -19,6 +19,12 @@ type Props = { askConfirm: (options: ConfirmOptions) => Promise<boolean>; notify
 const emptyConfig = (): TotpConfig => ({ secret: "", issuer: "", account: "", algorithm: "SHA1", digits: 6, period: 30 });
 const emptyDraft = (): Draft => ({ title: "", config: emptyConfig(), version: 0, pinned: false });
 const inputClass = "w-full rounded-lg border border-white/10 bg-[#09111d] px-3 py-2.5 text-sm text-white outline-none focus:border-emerald-400/50";
+const cameraErrorMessage = (caught: unknown) => {
+  if (caught instanceof Error && ['NotAllowedError', 'PermissionDeniedError', 'SecurityError'].includes(caught.name)) return 'Camera bị từ chối. Hãy cho phép quyền Camera cho trang này trong biểu tượng ổ khóa của trình duyệt, rồi tải lại trang.';
+  if (caught instanceof Error && caught.name === 'NotFoundError') return 'Không tìm thấy camera trên thiết bị này.';
+  if (caught instanceof Error && caught.name === 'NotReadableError') return 'Camera đang được ứng dụng khác sử dụng. Hãy đóng ứng dụng đó rồi thử lại.';
+  return caught instanceof Error ? caught.message : 'Không thể mở camera.';
+};
 
 export function AuthenticatorWorkspace({ askConfirm, notify, requestStepUp }: Props) {
   const keyRef = useRef<CryptoKey | null>(null);
@@ -130,7 +136,8 @@ export function AuthenticatorWorkspace({ askConfirm, notify, requestStepUp }: Pr
     let scanning = false;
     const start = async () => {
       try {
-        if (!navigator.mediaDevices?.getUserMedia) throw new Error("Camera cần quyền truy cập và kết nối HTTPS.");
+        if (!window.isSecureContext) throw new Error('Camera chỉ hoạt động trên HTTPS hoặc localhost.');
+        if (!navigator.mediaDevices?.getUserMedia) throw new Error("Trình duyệt không hỗ trợ camera hoặc camera đang bị chặn.");
         stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
         if (cancelled) { stream.getTracks().forEach(track => track.stop()); return; }
         const activeVideo = videoRef.current;
@@ -146,7 +153,7 @@ export function AuthenticatorWorkspace({ askConfirm, notify, requestStepUp }: Pr
           } catch (caught) { if (!cancelled) { setError(caught instanceof Error ? caught.message : "Không thể quét QR."); setCameraOpen(false); } }
           finally { scanning = false; }
         }, 300);
-      } catch (caught) { if (!cancelled) { setError(caught instanceof Error ? caught.message : "Không thể mở camera."); setCameraOpen(false); } }
+      } catch (caught) { if (!cancelled) { setError(cameraErrorMessage(caught)); setCameraOpen(false); } }
     };
     void start();
     return () => { cancelled = true; if (timer !== null) window.clearInterval(timer); stream?.getTracks().forEach(track => track.stop()); if (video) video.srcObject = null; };
