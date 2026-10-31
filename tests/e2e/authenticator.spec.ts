@@ -21,11 +21,25 @@ test("shows multiple 2FA codes in a separate wallet", async ({ page }) => {
   await page.route("**/api/auth/verify", route => route.fulfill({ contentType: "application/json", body: JSON.stringify({ success: true, user: { id: "root", username: "root", role: "root" } }) }));
   await page.route("**/api/vault/config", route => route.fulfill({ contentType: "application/json", body: JSON.stringify({ success: true, key: keyText }) }));
   await page.route("**/api/vault/items?*", route => route.fulfill({ contentType: "application/json", body: JSON.stringify({ success: true, items }) }));
+  let revoked = false;
+  await page.route('**/api/vault/shares', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ success: true, shares: revoked ? [] : [{ id: 'share-1', itemId: items[0].id, createdAt: Date.now(), expiresAt: Date.now() + 300_000 }] }) }));
+  await page.route(`**/api/vault/items/${items[0].id}/shares/share-1`, route => { revoked = true; return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ success: true }) }); });
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Ví 2FA" })).toBeVisible();
   await expect(page.locator("article")).toHaveCount(2);
   await expect(page.locator("article").filter({ hasText: "GitHub" }).locator(".font-mono")).toHaveText(/^\d{6}$/);
   await expect(page.locator("article").filter({ hasText: "Cloudflare" }).locator(".font-mono")).toHaveText(/^\d{6}$/);
+  await page.locator("article").filter({ hasText: "GitHub" }).getByRole('button', { name: 'Sửa' }).click();
+  await expect(page.getByRole('dialog', { name: 'Sửa mã 2FA' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog', { name: 'Sửa mã 2FA' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Thêm mã' }).click();
+  await expect(page.getByRole('dialog', { name: 'Thêm mã 2FA' })).toBeVisible();
+  await page.getByRole('button', { name: 'Hủy' }).click();
+  await page.getByRole('button', { name: 'Quản lý link' }).click();
+  await expect(page.getByRole('heading', { name: 'Quản lý link chia sẻ' })).toBeVisible();
+  await page.getByRole('button', { name: 'Thu hồi' }).click();
+  await expect(page.getByText('Chưa có link chia sẻ nào còn hiệu lực.')).toBeVisible();
   await expect(page.getByRole("button", { name: "Sổ Ghi Chú" })).toBeVisible();
 });
 

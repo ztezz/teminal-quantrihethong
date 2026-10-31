@@ -36,14 +36,17 @@ test('vault share token lookup, expiry, revocation, and item deletion', () => {
   db.createVaultShare(share);
   assert.equal(db.getVaultShareByTokenHash(share.tokenHash)?.id, share.id);
   assert.equal(db.listVaultShares(user.id, 'item').length, 1);
+  assert.deepEqual(db.listActiveVaultShares(user.id).map(value => value.id), ['share']);
   assert.equal(db.revokeVaultShare('other', 'item', share.id), false);
   assert.equal(db.revokeVaultShare(user.id, 'item', share.id), true);
   assert.equal(db.getVaultShareByTokenHash(share.tokenHash), undefined);
+  assert.deepEqual(db.listActiveVaultShares(user.id), []);
   db.createVaultShare({ ...share, id: 'expired', expiresAt: Date.now() - 1 });
   assert.equal(db.getVaultShareByTokenHash(share.tokenHash), undefined);
   assert.equal(db.pruneVaultShares(), 1);
   db.createVaultShare(share);
   db.trashVaultItem(user.id, 'item');
+  assert.deepEqual(db.listActiveVaultShares(user.id), []);
   db.purgeVaultItem(user.id, 'item');
   assert.equal(db.getVaultShareByTokenHash(share.tokenHash), undefined);
   db.close();

@@ -1030,6 +1030,11 @@ async function startServer() {
     } catch { return res.status(404).json({ success: false, error: 'Link không tồn tại hoặc đã hết hạn.' }); }
   });
 
+  expressApp.get('/api/vault/shares', (req, res) => {
+    const context = vaultContext(req, res); if (!context) return;
+    return res.json({ success: true, shares: db.listActiveVaultShares(context.user.id) });
+  });
+
   expressApp.get('/api/vault/items/:id/shares', (req, res) => {
     const context = vaultContext(req, res); if (!context) return;
     const item = db.getVaultItem(context.user.id, req.params.id);
