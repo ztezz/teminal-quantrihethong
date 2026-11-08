@@ -1,3 +1,5 @@
+
+import { authenticatedFetch as fetch } from "@/lib/client/auth";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiClient } from "@/lib/client/api";
 import type { LogEntry } from "@/app/components/control-center/types";

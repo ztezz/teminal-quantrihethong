@@ -32,6 +32,7 @@ import { JobsWorkspace } from "./components/control-center/workspaces/JobsWorksp
 import { NotesWorkspace } from "./components/control-center/workspaces/NotesWorkspace";
 import { AuthenticatorWorkspace } from "./components/control-center/workspaces/AuthenticatorWorkspace";
 import { apiClient } from "@/lib/client/api";
+import { authenticatedFetch as fetch, authHeaders, setSessionToken, setStepUpToken, clearSessionTokens } from "@/lib/client/auth";
 import { applyUiPreferences } from "@/lib/client/preferences";
 import { useMetricsPolling } from "@/hooks/use-operations-data";
 import { useAuditLog } from "@/hooks/use-audit-log";
@@ -1306,7 +1307,9 @@ export default function Home() {
           const chunk = file.slice(offset, Math.min(offset + chunkSize, file.size));
           await new Promise<void>((resolve, reject) => {
             const xhr = new XMLHttpRequest();
-            xhr.open("PUT", `${API_URL}/api/files/upload/${uploadId}`);
+            const uploadUrl = `${API_URL}/api/files/upload/${uploadId}`;
+            xhr.open("PUT", uploadUrl);
+            authHeaders(uploadUrl).forEach((value, key) => xhr.setRequestHeader(key, value));
             xhr.withCredentials = true;
             xhr.setRequestHeader("Content-Type", "application/octet-stream");
             xhr.setRequestHeader("X-Upload-Offset", String(offset));
@@ -1813,6 +1816,7 @@ export default function Home() {
       });
       const data = await res.json();
       if (!data.success) throw new Error(data.error || "Xác nhận thất bại");
+      setStepUpToken(data.stepUpToken);
       settleStepUp(true);
     } catch (err: any) {
       setStepUpError(err.message);
@@ -2023,6 +2027,7 @@ export default function Home() {
           setPassword("");
           return;
         }
+        setSessionToken(data.token);
         setSessionReady(true);
         setCurrentUser(data.user);
         setIsAuthenticated(true);
@@ -2054,6 +2059,7 @@ export default function Home() {
       const data = await res.json();
       if (!data.success)
         throw new Error(data.error || "Mã xác thực không hợp lệ");
+      setSessionToken(data.token);
       setTwoFactorChallenge(null);
       setTwoFactorCode("");
       setCurrentUser(data.user);
@@ -2304,6 +2310,7 @@ export default function Home() {
       const data = await res.json();
 
       if (data.success) {
+        setSessionToken(data.token);
         setPwdSuccess("Master password changed successfully!");
         setCurrentPassword("");
         setNewPassword("");
@@ -2337,6 +2344,7 @@ export default function Home() {
       console.error(e);
     }
 
+    clearSessionTokens();
     setSessionReady(false);
     setCurrentUser(null);
     setIsAuthenticated(false);

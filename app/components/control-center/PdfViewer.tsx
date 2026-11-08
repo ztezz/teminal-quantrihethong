@@ -1,5 +1,7 @@
 "use client";
 
+import { authenticatedFetch as fetch } from "@/lib/client/auth";
+
 import { useEffect, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import { Download, Minus, Plus, RotateCw, ChevronLeft, ChevronRight, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";

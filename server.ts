@@ -24,6 +24,7 @@ import fs from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { createCorsMiddleware } from './lib/cors-config';
+import { cookieValue, sessionCredential, StepUpGrants } from './lib/auth-credentials';
 import { decryptNoteText, encryptNoteText, noteEncryptionKey } from './lib/secure-notes';
 import { generateSharedTotp, readSharedTotp } from './lib/vault-share';
 
@@ -72,17 +73,8 @@ function hasSession(token: string): boolean {
 }
 function sessionRole(token: string): Role | null { const session = db?.getSession(token); return session ? db.getUserById(session.userId)?.role || null : null; }
 
-function cookieValue(cookieHeader: string | undefined, targetName: string): string {
-  const cookies = String(cookieHeader || '').split(';');
-  for (const cookie of cookies) {
-    const [name, ...value] = cookie.trim().split('=');
-    if (name === targetName) return decodeURIComponent(value.join('='));
-  }
-  return '';
-}
-
 function sessionToken(req: express.Request): string {
-  return cookieValue(req.headers.cookie, SESSION_COOKIE);
+  return sessionCredential(req.headers.authorization, req.headers.cookie);
 }
 
 function authenticated(req: express.Request): boolean {
@@ -112,27 +104,24 @@ function requireCapability(req: express.Request, res: express.Response, capabili
 
 function setSessionCookie(res: express.Response, token: string) {
   const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
-  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL_MS / 1000}${secure}`);
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=${SESSION_TTL_MS / 1000}${secure}`);
 }
 
 function clearSessionCookie(res: express.Response) {
   const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
-  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`);
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=0${secure}`);
 }
 
-const stepUpGrants = new Map<string, { sessionHash: string; expiresAt: number }>();
-function setStepUpCookie(req: express.Request, res: express.Response) {
-  const grant = crypto.randomBytes(32).toString('base64url'); const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
-  const now = Date.now();
-  for (const [key, entry] of stepUpGrants) if (entry.expiresAt <= now) stepUpGrants.delete(key);
-  while (stepUpGrants.size >= 10_000) stepUpGrants.delete(stepUpGrants.keys().next().value!);
-  stepUpGrants.set(grant, { sessionHash: crypto.createHash('sha256').update(sessionToken(req)).digest('hex'), expiresAt: Date.now() + STEP_UP_TTL_MS });
-  res.setHeader('Set-Cookie', `${STEP_UP_COOKIE}=${encodeURIComponent(grant)}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=${STEP_UP_TTL_MS / 1000}${secure}`);
+const stepUpGrants = new StepUpGrants(STEP_UP_TTL_MS);
+function setStepUpCookie(req: express.Request, res: express.Response): string {
+  const grant = stepUpGrants.issue(sessionToken(req));
+  res.setHeader('Set-Cookie', `${STEP_UP_COOKIE}=${encodeURIComponent(grant)}; Path=/api; HttpOnly; SameSite=None; Secure; Max-Age=${STEP_UP_TTL_MS / 1000}`);
+  return grant;
 }
 function hasStepUp(req: express.Request): boolean {
-  const grant = cookieValue(req.headers.cookie, STEP_UP_COOKIE);
-  const entry = grant ? stepUpGrants.get(grant) : undefined; const token = sessionToken(req);
-  return Boolean(entry && token && entry.expiresAt > Date.now() && entry.sessionHash === crypto.createHash('sha256').update(token).digest('hex'));
+  const grant = req.headers['x-step-up-token'];
+  const selected = grant !== undefined ? (typeof grant === 'string' ? grant : '') : cookieValue(req.headers.cookie, STEP_UP_COOKIE);
+  return stepUpGrants.valid(selected, sessionToken(req));
 }
 
 const previewTickets = new Map<string, { path: string; expiresAt: number; maxExpiresAt: number; remainingUses: number }>();
@@ -292,6 +281,7 @@ function createSession(req: express.Request, res: express.Response, userId: stri
   const { ip, userAgent } = requestInfo(req);
   db.addSession(token, userId, ip, userAgent);
   setSessionCookie(res, token);
+  return token;
 }
 
 function recoveryHash(code: string): string {
@@ -407,9 +397,10 @@ async function startServer() {
   console.log(`[SECURITY] AUTH_ENCRYPTION_KEY: ${authKeyLength >= 32 ? 'configured' : authKeyLength ? `invalid (${authKeyLength} characters)` : 'missing'}`);
   
   // Set up socket.io server
+  const allowedOriginsList = runtimeConfig.frontendOrigin ? runtimeConfig.frontendOrigin.split(',').map(s => s.trim()).filter(Boolean) : [];
   const io = new Server(httpServer, {
     cors: {
-      origin: runtimeConfig.frontendOrigin || false,
+      origin: allowedOriginsList.length > 0 ? (allowedOriginsList.length === 1 ? allowedOriginsList[0] : allowedOriginsList) : false,
       credentials: true,
       methods: ['GET', 'POST', 'PATCH', 'DELETE']
     }
@@ -602,9 +593,9 @@ async function startServer() {
           const challenge = createTicket(loginChallenges, { expiresAt: Date.now() + 5 * 60_000, userId: user.id, ...requestInfo(req) });
           return res.json({ success: true, requiresTwoFactor: true, challenge });
         }
-        createSession(req, res, user.id);
+        const token = createSession(req, res, user.id);
         audit({ category: 'auth', action: 'login', event: 'Login successful - Session started', ip: clientIp, metadata: { username: user.username } });
-        return res.json({ success: true, user: { username: user.username, role: user.role } });
+        return res.json({ success: true, token, user: { username: user.username, role: user.role } });
       } else {
         audit({ category: 'auth', action: 'login', event: 'Login failed: Incorrect password attempt', level: 'warning', result: 'failure', ip: clientIp });
         return res.status(401).json({ success: false, error: 'Incorrect password!' });
@@ -625,9 +616,9 @@ async function startServer() {
       if (!user?.enabled || !await verifySecondFactor(code, user)) return res.status(401).json({ success: false, error: 'Mã xác thực không hợp lệ' });
       loginChallenges.delete(challenge);
       resetRateLimit(`2fa:${entry.ip}`);
-      createSession(req, res, user.id);
+      const token = createSession(req, res, user.id);
       audit({ category: 'auth', action: 'two_factor_login', event: 'Two-factor login successful', ip: entry.ip });
-      return res.json({ success: true, user: { username: user.username, role: user.role } });
+      return res.json({ success: true, token, user: { username: user.username, role: user.role } });
     } catch (error: any) {
       return res.status(error.status || 500).json({ success: false, error: error.message });
     }
@@ -908,7 +899,7 @@ async function startServer() {
       const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
       audit({ category: 'security', action: 'password_change', event: 'Master password was changed successfully', level: 'critical', ip: clientIp });
 
-      return res.json({ success: true, message: 'Password updated successfully' });
+      return res.json({ success: true, token: nextToken, message: 'Password updated successfully' });
     } catch (error: any) {
       return res.status(500).json({ success: false, error: error.message });
     }
@@ -1193,15 +1184,15 @@ async function startServer() {
       const rateKey = `step-up:${requestInfo(req).ip}`;
       if (!checkRateLimit(rateKey)) return res.status(429).json({ success: false, error: 'Quá nhiều lần thử. Vui lòng đợi 15 phút.' });
       const passwordValid = await verifyPassword(String(req.body?.password || ''), context.user);
-      const secondFactorValid = !context.user.totpSecret || await verifySecondFactor(String(req.body?.code || ''), context.user);
+      const secondFactorValid = passwordValid && (!context.user.totpSecret || await verifySecondFactor(String(req.body?.code || ''), context.user));
       if (!passwordValid || !secondFactorValid) {
         auditRequest(req, { category: 'security', action: 'step_up', event: 'Step-up authorization failed', level: 'warning', result: 'failure' });
         return res.status(401).json({ success: false, error: 'Mật khẩu hoặc mã xác thực không đúng' });
       }
       resetRateLimit(rateKey);
-      setStepUpCookie(req, res);
+      const grant = setStepUpCookie(req, res);
       auditRequest(req, { category: 'security', action: 'step_up', event: 'Step-up authorization granted', level: 'critical' });
-      return res.json({ success: true, expiresIn: STEP_UP_TTL_MS / 1000 });
+      return res.json({ success: true, stepUpToken: grant, expiresIn: STEP_UP_TTL_MS / 1000 });
     } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message }); }
   });
 
@@ -1437,7 +1428,7 @@ async function startServer() {
     deleteJobStore: db,
     deletionMetrics: { record: event => { if (event.durationMs || !event.orphaned) { fileDeletionMetrics.total++; if (!event.success) fileDeletionMetrics.failed++; fileDeletionMetrics.totalDurationMs += event.durationMs; } fileDeletionMetrics.orphans += event.orphaned || 0; }, queueDepth: value => { fileDeletionMetrics.queueDepth = value; } },
     alert: (event, details) => jobManager.sendOperationalAlert(event, details),
-    previewFrameAncestor: runtimeConfig.frontendOrigin || "'self'",
+    previewFrameAncestor: (runtimeConfig.frontendOrigin ? runtimeConfig.frontendOrigin.split(',').join(' ') : "'self'"),
     onlyOffice
   }));
 

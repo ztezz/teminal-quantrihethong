@@ -1,5 +1,7 @@
 "use client";
 
+import { authenticatedFetch as fetch } from "@/lib/client/auth";
+
 import { useEffect, useEffectEvent, useState } from "react";
 import { createPortal } from "react-dom";
 import { AlertCircle, Download, Edit, Save, X } from "lucide-react";

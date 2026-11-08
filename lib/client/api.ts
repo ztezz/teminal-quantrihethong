@@ -1,3 +1,4 @@
+import { authHeaders } from "./auth";
 import { publicApiUrl } from "@/lib/security-utils";
 
 export type ApiErrorBody = {
@@ -64,11 +65,13 @@ export function createApiClient(options: ApiClientOptions = {}) {
       headers.set("content-type", "application/json");
     }
 
+    const authenticatedHeaders = authHeaders(url, headers);
     const response = await fetcher(url, {
       ...init,
       body: requestBody,
       credentials: init.credentials ?? "include",
-      headers,
+      headers: authenticatedHeaders,
+      ...(authenticatedHeaders.has("Authorization") || authenticatedHeaders.has("X-Step-Up-Token") ? { redirect: "error" as const } : {}),
     });
     if (response.status === 204) return undefined as TResponse;
 

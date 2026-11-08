@@ -6,6 +6,8 @@ import { CORS_ALLOWED_HEADERS, createCorsMiddleware } from './cors-config';
 
 test('CORS allows deletion safety headers', () => {
   const headers = new Set(CORS_ALLOWED_HEADERS.map(header => header.toLowerCase()));
+  assert.equal(headers.has('authorization'), true);
+  assert.equal(headers.has('x-step-up-token'), true);
   assert.equal(headers.has('idempotency-key'), true);
   assert.equal(headers.has('x-policy-token'), true);
 });
@@ -23,6 +25,8 @@ test('CORS preflight exposes deletion safety headers', async () => {
     assert.equal(response.headers.get('access-control-allow-origin'), 'https://ssh.luugame.fun');
     assert.equal(response.headers.get('access-control-allow-credentials'), 'true');
     const allowed = response.headers.get('access-control-allow-headers')?.toLowerCase() || '';
+    assert.match(allowed, /authorization/);
+    assert.match(allowed, /x-step-up-token/);
     assert.match(allowed, /idempotency-key/);
     assert.match(allowed, /x-policy-token/);
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }

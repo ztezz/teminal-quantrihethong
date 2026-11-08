@@ -1,5 +1,7 @@
 "use client";
 
+import { authenticatedFetch as fetch } from "@/lib/client/auth";
+
 import { useEffect, useId, useState } from "react";
 import { API_URL } from "./helpers";
 

@@ -60,12 +60,17 @@ export type RuntimeConfig = { frontendOrigin?: string; encryptionKey?: string; t
 export function validateRuntimeConfig(config: RuntimeConfig): { frontendOrigin?: string } {
   let frontendOrigin: string | undefined;
   if (config.frontendOrigin?.trim()) {
-    let url: URL;
-    try { url = new URL(config.frontendOrigin.trim()); }
-    catch { throw new Error('FRONTEND_ORIGIN phải là HTTP(S) origin hợp lệ'); }
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('FRONTEND_ORIGIN chỉ được chứa scheme, host và port');
-    if (config.production && url.protocol !== 'https:') throw new Error('FRONTEND_ORIGIN phải dùng HTTPS trong production');
-    frontendOrigin = url.origin;
+    const rawOrigins = config.frontendOrigin.split(',').map(s => s.trim()).filter(Boolean);
+    const origins: string[] = [];
+    for (const raw of rawOrigins) {
+      let url: URL;
+      try { url = new URL(raw); }
+      catch { throw new Error('FRONTEND_ORIGIN phải là HTTP(S) origin hợp lệ'); }
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('FRONTEND_ORIGIN chỉ được chứa scheme, host và port');
+      if (config.production && url.protocol !== 'https:') throw new Error('FRONTEND_ORIGIN phải dùng HTTPS trong production');
+      origins.push(url.origin);
+    }
+    frontendOrigin = origins.join(',');
   } else if (config.backendOnly) {
     throw new Error('FRONTEND_ORIGIN is required in backend-only mode');
   }

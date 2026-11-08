@@ -1,4 +1,5 @@
 import { Router, raw, type Request, type Response } from 'express';
+import { sessionCredential } from './auth-credentials';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
@@ -166,10 +167,7 @@ export function createFileManagerRouter({ hasSession, sessionRole, sessionUserId
     } catch { return null; }
   };
 
-  const cookieToken = (req: Request) => {
-    const encodedToken = String(req.headers.cookie || '').split(';').map(cookie => cookie.trim().split('=')).find(([name]) => name === 'terminal_session')?.slice(1).join('=') || '';
-    return encodedToken ? decodeURIComponent(encodedToken) : '';
-  };
+  const cookieToken = (req: Request) => sessionCredential(req.headers.authorization, req.headers.cookie);
   const authenticate = (req: Request) => { const token = cookieToken(req); return Boolean(token && hasSession(token)); };
   const uploadOwner = (req: Request) => crypto.createHash('sha256').update(cookieToken(req)).digest('hex');
   const deletionOwner = (req: Request) => sessionUserId?.(cookieToken(req)) || uploadOwner(req);

@@ -1,3 +1,4 @@
+import { downloadAuthenticated } from "@/lib/client/auth";
 import type { Dispatch, MouseEvent, PointerEvent, SetStateAction } from "react";
 import { motion } from "motion/react";
 import {
@@ -1180,6 +1181,7 @@ export function SQLiteWorkspace({ data, actions }: SQLiteWorkspaceProps) {
                           {selectedSqliteTable && (
                             <a
                               href={`${API_URL}/api/sqlite/export?path=${encodeURIComponent(selectedSqlite)}&table=${encodeURIComponent(selectedSqliteTable)}&format=${sqliteImportFormat}`}
+                              onClick={(event) => { event.preventDefault(); void downloadAuthenticated(event.currentTarget.href, `${selectedSqliteTable}.${sqliteImportFormat}`).catch((error) => alert(error.message)); }}
                               className="flex items-center justify-center gap-2 px-3 border border-emerald-500/20 rounded text-xs text-emerald-300"
                             >
                               <Download className="w-3.5 h-3.5" />
@@ -1252,6 +1254,7 @@ export function SQLiteWorkspace({ data, actions }: SQLiteWorkspaceProps) {
                               <a
                                 title="Download"
                                 href={`${API_URL}/api/sqlite/backups/${encodeURIComponent(backup.name)}/download`}
+                                onClick={(event) => { event.preventDefault(); void downloadAuthenticated(event.currentTarget.href, backup.name).catch((error) => alert(error.message)); }}
                                 className="p-2 rounded border border-white/10 text-slate-400"
                               >
                                 <Download className="w-3.5 h-3.5" />

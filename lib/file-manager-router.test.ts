@@ -135,6 +135,14 @@ test('snapshot endpoints are no longer registered', async () => {
   }
 });
 
+test('file manager accepts bearer without cookie and rejects invalid bearer over cookie', async () => {
+  const f = await fixture();
+  try {
+    assert.equal((await f.request('/', { headers: { authorization: 'Bearer valid-token' } }, false)).status, 200);
+    assert.equal((await f.request('/', { headers: { authorization: 'Bearer invalid-token' } })).status, 401);
+  } finally { await f.close(); }
+});
+
 test('rejects unauthenticated requests', async () => {
   const context = await fixture();
   try {
