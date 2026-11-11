@@ -32,11 +32,15 @@ test('vault share token lookup, expiry, revocation, and item deletion', () => {
   const user: StoredUser = { id: 'owner', username: 'owner', passwordHash: 'test', role: 'root', enabled: true, createdAt: 1 };
   db.saveUser(user);
   db.createVaultItem({ id: 'item', userId: user.id, envelope: 'cipher', content: 'cipher', version: 1, pinned: false, createdAt: '', updatedAt: '' });
-  const share = { id: 'share', userId: user.id, itemId: 'item', tokenHash: crypto.createHash('sha256').update('secret-token').digest('hex'), createdAt: Date.now(), expiresAt: Date.now() + 60_000 };
+  const share = { id: 'share', userId: user.id, itemId: 'item', tokenHash: crypto.createHash('sha256').update('secret-token').digest('hex'), note: 'Share cho anh A', createdAt: Date.now(), expiresAt: Date.now() + 60_000 };
   db.createVaultShare(share);
   assert.equal(db.getVaultShareByTokenHash(share.tokenHash)?.id, share.id);
+  assert.equal(db.getVaultShareByTokenHash(share.tokenHash)?.note, 'Share cho anh A');
   assert.equal(db.listVaultShares(user.id, 'item').length, 1);
-  assert.deepEqual(db.listActiveVaultShares(user.id).map(value => value.id), ['share']);
+  assert.equal(db.listVaultShares(user.id, 'item')[0]?.note, 'Share cho anh A');
+  assert.deepEqual(db.listActiveVaultShares(user.id).map(value => ({ id: value.id, note: value.note })), [{ id: 'share', note: 'Share cho anh A' }]);
+  assert.equal(db.updateVaultShareNote(user.id, 'item', share.id, 'Đã đổi tên'), true);
+  assert.equal(db.listVaultShares(user.id, 'item')[0]?.note, 'Đã đổi tên');
   assert.equal(db.revokeVaultShare('other', 'item', share.id), false);
   assert.equal(db.revokeVaultShare(user.id, 'item', share.id), true);
   assert.equal(db.getVaultShareByTokenHash(share.tokenHash), undefined);

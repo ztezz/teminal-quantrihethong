@@ -1036,6 +1036,9 @@ async function startServer() {
     const context = vaultContext(req, res, true); if (!context) return;
     const durationMinutes = req.body?.durationMinutes;
     if (![5, 15, 60, 360, 1440].includes(durationMinutes)) return res.status(400).json({ success: false, error: 'Thời gian chia sẻ không hợp lệ.' });
+    const rawNote = typeof req.body?.note === 'string' ? req.body.note.trim() : '';
+    if (rawNote.length > 150) return res.status(400).json({ success: false, error: 'Ghi chú không được vượt quá 150 ký tự.' });
+    const note = rawNote || undefined;
     const item = db.getVaultItem(context.user.id, req.params.id);
     const config = db.getVaultConfig(context.user.id);
     if (!item || item.deletedAt || config?.salt !== 'managed-v1') return res.status(404).json({ success: false, error: 'Không tìm thấy mã 2FA.' });
@@ -1043,10 +1046,18 @@ async function startServer() {
     try { readSharedTotp(item, decryptSecret(config.checkCipher)); }
     catch { return res.status(400).json({ success: false, error: 'Mục này không phải mã 2FA hợp lệ.' }); }
     const token = crypto.randomBytes(32).toString('base64url');
-    const share = { id: crypto.randomUUID(), userId: context.user.id, itemId: item.id, tokenHash: crypto.createHash('sha256').update(token).digest('hex'), createdAt: Date.now(), expiresAt: Date.now() + durationMinutes * 60_000 };
+    const share = { id: crypto.randomUUID(), userId: context.user.id, itemId: item.id, tokenHash: crypto.createHash('sha256').update(token).digest('hex'), ...(note ? { note } : {}), createdAt: Date.now(), expiresAt: Date.now() + durationMinutes * 60_000 };
     db.createVaultShare(share);
-    auditRequest(req, { category: 'vault', action: 'share_create', event: '2FA share link created', level: 'warning', metadata: { itemId: item.id, shareId: share.id, expiresAt: share.expiresAt } });
-    return res.status(201).json({ success: true, share: { id: share.id, createdAt: share.createdAt, expiresAt: share.expiresAt }, token });
+    auditRequest(req, { category: 'vault', action: 'share_create', event: '2FA share link created', level: 'warning', metadata: { itemId: item.id, shareId: share.id, ...(note ? { note } : {}), expiresAt: share.expiresAt } });
+    return res.status(201).json({ success: true, share: { id: share.id, ...(note ? { note } : {}), createdAt: share.createdAt, expiresAt: share.expiresAt }, token });
+  });
+  expressApp.patch('/api/vault/items/:id/shares/:shareId', (req, res) => {
+    const context = vaultContext(req, res); if (!context) return;
+    const rawNote = typeof req.body?.note === 'string' ? req.body.note.trim() : '';
+    if (rawNote.length > 150) return res.status(400).json({ success: false, error: 'Ghi chú không được vượt quá 150 ký tự.' });
+    const note = rawNote || undefined;
+    if (!db.updateVaultShareNote(context.user.id, req.params.id, req.params.shareId, note)) return res.status(404).json({ success: false, error: 'Không tìm thấy link chia sẻ.' });
+    return res.json({ success: true, note });
   });
   expressApp.delete('/api/vault/items/:id/shares/:shareId', (req, res) => {
     const context = vaultContext(req, res); if (!context) return;
