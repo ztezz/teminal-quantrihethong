@@ -62,6 +62,7 @@ test("shows an invalid share code inline without leaving the page", async ({ pag
   const loaded = page.waitForResponse((response) => response.url().endsWith("/api/quick-share/public"));
   await page.goto("/share");
   await loaded;
+  await page.getByRole("tab", { name: /Truyền riêng tư mã 4 số/i }).click();
   await page.getByLabel("MÃ NHẬN FILE").fill("1234");
   await page.getByRole("button", { name: "Nhận và tải file" }).click();
 
