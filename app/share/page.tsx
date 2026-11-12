@@ -1,12 +1,12 @@
 "use client";
 
 import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Check, Clipboard, Download, Eye, FileText, FileUp, Globe, KeyRound, LockKeyhole, RotateCcw, Send, ShieldCheck, Sparkles, Timer, Trash2, Upload } from "lucide-react";
+import { ArrowLeft, Check, Clipboard, Download, FileText, FileUp, Globe, KeyRound, LockKeyhole, RotateCcw, Send, ShieldCheck, Sparkles, Timer, Trash2, Upload } from "lucide-react";
 import { ApiError, apiClient } from "@/lib/client/api";
 import { InstallShareButton } from "./install-share-button";
 
 type UploadSession = { code: string; uploadToken: string; name: string; size: number };
-type PublicFile = { code: string; name: string; size: number; createdAt: string; expiresAt: number; checksum?: string; previewMime?: string | null };
+type PublicFile = { code: string; name: string; size: number; createdAt: string; expiresAt: number; checksum?: string };
 type PublicUploadSession = UploadSession & { lastModified: number; expiresAt: number };
 type OwnedPublicFile = { token: string; expiresAt: number };
 type ShareMode = "public" | "private";
@@ -14,24 +14,9 @@ const UPLOAD_SESSION_KEY = "nodeshell_quick_share_upload";
 const PUBLIC_UPLOAD_KEY = "nodeshell_public_share_upload";
 const PUBLIC_OWNED_KEY = "nodeshell_public_share_owned";
 
-const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".avif"]);
-const VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".m4v", ".ogv"]);
-const AUDIO_EXTS = new Set([".mp3", ".wav", ".ogg", ".oga", ".opus", ".flac", ".aac", ".m4a"]);
-const TEXT_EXTS = new Set([".txt", ".md", ".json", ".csv", ".log", ".yml", ".yaml"]);
-
 function fileExt(name: string) {
   const dot = name.lastIndexOf(".");
   return dot >= 0 ? name.slice(dot).toLowerCase() : "";
-}
-
-function previewKind(name: string): "image" | "video" | "audio" | "pdf" | "text" | null {
-  const ext = fileExt(name);
-  if (IMAGE_EXTS.has(ext)) return "image";
-  if (VIDEO_EXTS.has(ext)) return "video";
-  if (AUDIO_EXTS.has(ext)) return "audio";
-  if (ext === ".pdf") return "pdf";
-  if (TEXT_EXTS.has(ext)) return "text";
-  return null;
 }
 
 function fileSize(bytes: number) {
@@ -61,7 +46,6 @@ export default function QuickSharePage() {
   const [viewingFile, setViewingFile] = useState<PublicFile | null>(null);
   const [viewingLoading, setViewingLoading] = useState(false);
   const [viewingError, setViewingError] = useState("");
-  const [textPreview, setTextPreview] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [code, setCode] = useState("");
   const [status, setStatus] = useState("");
@@ -113,13 +97,11 @@ export default function QuickSharePage() {
       if (!viewingCode) {
         setViewingFile(null);
         setViewingError("");
-        setTextPreview(null);
         setViewingLoading(false);
         return;
       }
       setViewingLoading(true);
       setViewingError("");
-      setTextPreview(null);
       try {
         let found: PublicFile | null = null;
         try {
@@ -136,14 +118,6 @@ export default function QuickSharePage() {
           return;
         }
         setViewingFile(found);
-        if (previewKind(found.name) === "text" && found.size <= 256 * 1024) {
-          try {
-            const res = await fetch(`${apiClient.baseUrl}/api/quick-share/public/${found.code}?inline=1`, { cache: "no-store" });
-            if (res.ok && active) setTextPreview(await res.text());
-          } catch {
-            // Optional inline text preview; ignore if unavailable.
-          }
-        }
       } catch (error) {
         if (!active) return;
         setViewingFile(null);
@@ -192,7 +166,6 @@ export default function QuickSharePage() {
     setViewingCode("");
     setViewingFile(null);
     setViewingError("");
-    setTextPreview(null);
   }
 
   function buildShareViewUrl(itemCode: string) {
@@ -385,8 +358,6 @@ export default function QuickSharePage() {
 
   const activePublicFiles = publicFiles.filter(item => item.expiresAt > now);
   const currentViewedFile = viewingFile && viewingFile.expiresAt > now ? viewingFile : null;
-  const currentPreviewKind = currentViewedFile ? previewKind(currentViewedFile.name) : null;
-  const inlineUrl = currentViewedFile ? `${apiClient.baseUrl}/api/quick-share/public/${currentViewedFile.code}?inline=1` : "";
   const downloadUrl = currentViewedFile ? `${apiClient.baseUrl}/api/quick-share/public/${currentViewedFile.code}` : "";
 
   return <main className="quick-share-shell"><div className="quick-share-orb is-one" /><div className="quick-share-orb is-two" /><div className="quick-share-wrap">
@@ -441,44 +412,15 @@ export default function QuickSharePage() {
                 <FileUp />
               </div>
               <div className="quick-share-viewer-meta">
-                <p>FILE ĐƯỢC CHIA SẺ CÔNG KHAI · #{currentViewedFile.code}</p>
+                <p>THÔNG TIN FILE CHIA SẺ · #{currentViewedFile.code}</p>
                 <h2 title={currentViewedFile.name}>{currentViewedFile.name}</h2>
                 <div className="quick-share-viewer-tags">
                   <span>Dung lượng: <strong>{fileSize(currentViewedFile.size)}</strong></span>
                   <span>Định dạng: <strong>{(fileExt(currentViewedFile.name) || "FILE").replace(".", "").toUpperCase()}</strong></span>
-                  <span>Hiệu lực: <strong>Còn {timeLeft(currentViewedFile.expiresAt, now)}</strong></span>
+                  <span>Thời gian còn lại: <strong>{timeLeft(currentViewedFile.expiresAt, now)}</strong></span>
                 </div>
               </div>
             </div>
-
-            {currentPreviewKind && (
-              <div className="quick-share-viewer-preview">
-                <div className="quick-share-viewer-preview-bar">
-                  <span><Eye />Xem trước nội dung</span>
-                  <small>{currentViewedFile.name}</small>
-                </div>
-                <div className="quick-share-viewer-stage">
-                  {currentPreviewKind === "image" && (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={inlineUrl} alt={currentViewedFile.name} loading="lazy" />
-                  )}
-                  {currentPreviewKind === "video" && (
-                    <video src={inlineUrl} controls preload="metadata" playsInline />
-                  )}
-                  {currentPreviewKind === "audio" && (
-                    <audio src={inlineUrl} controls preload="metadata" />
-                  )}
-                  {currentPreviewKind === "pdf" && (
-                    <iframe src={inlineUrl} title={`Xem trước ${currentViewedFile.name}`} />
-                  )}
-                  {currentPreviewKind === "text" && (
-                    textPreview !== null
-                      ? <pre>{textPreview}</pre>
-                      : <p className="quick-share-empty">File văn bản sẵn sàng tải về để xem đầy đủ.</p>
-                  )}
-                </div>
-              </div>
-            )}
 
             <div className="quick-share-viewer-actions">
               <a href={downloadUrl} download={currentViewedFile.name} className="quick-share-viewer-download">
@@ -607,7 +549,7 @@ export default function QuickSharePage() {
           <div className="quick-share-list-heading">
             <div>
               <h2>File đang chia sẻ</h2>
-              <p>Bấm vào tên file hoặc gửi link để mở trang xem & tải file</p>
+              <p>Bấm vào tên file hoặc sao chép link để mở trang thông tin & tải file</p>
             </div>
             <span className="quick-share-count-pill">{activePublicFiles.length} file</span>
           </div>
@@ -615,16 +557,13 @@ export default function QuickSharePage() {
             {activePublicFiles.map(item => <div className="quick-share-file" key={item.code}>
               <div className="quick-share-file-icon"><FileUp /></div>
               <div className="quick-share-file-info">
-                <button type="button" className="quick-share-file-title-btn" onClick={() => openFileViewer(item.code)} title={`Xem trang tải ${item.name}`}>
+                <button type="button" className="quick-share-file-title-btn" onClick={() => openFileViewer(item.code)} title={`Xem thông tin ${item.name}`}>
                   <strong>{item.name}</strong>
                 </button>
                 <span>{fileSize(item.size)} · Còn {timeLeft(item.expiresAt, now)}</span>
               </div>
               <div className="quick-share-file-actions">
-                <button type="button" onClick={() => openFileViewer(item.code)} aria-label={`Xem ${item.name}`} title="Mở trang xem file">
-                  <Eye />Xem file
-                </button>
-                <button type="button" onClick={() => void copyPublicLink(item)} aria-label={`Sao chép liên kết ${item.name}`} title="Sao chép liên kết trang xem & tải file">
+                <button type="button" onClick={() => void copyPublicLink(item)} aria-label={`Sao chép liên kết ${item.name}`} title="Sao chép liên kết trang tải file">
                   {copiedPublicCode === item.code ? <Check /> : <Clipboard />}
                   {copiedPublicCode === item.code ? "Đã sao chép" : "Sao chép link"}
                 </button>
