@@ -895,6 +895,12 @@ kbd {
     bottom: calc(4.25rem + env(safe-area-inset-bottom, 0px));
     width: calc(100vw - 1.5rem);
   }
+  /* Prevent iOS Safari auto-zoom on input focus when font-size < 16px */
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

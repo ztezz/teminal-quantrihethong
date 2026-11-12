@@ -97,14 +97,14 @@ export function SystemWorkspace({
                   <>
                     <th className="p-3">Service</th>
                     <th className="p-3">Trạng thái</th>
-                    <th className="p-3">Mô tả</th>
+                    <th className="p-3 hidden md:table-cell">Mô tả</th>
                     <th className="p-3">Thao tác</th>
                   </>
                 ) : (
                   <>
                     <th className="p-3">PID / User</th>
                     <th className="p-3">CPU / RAM</th>
-                    <th className="p-3">Command</th>
+                    <th className="p-3 hidden md:table-cell">Command</th>
                     <th className="p-3">Signal</th>
                   </>
                 )}
@@ -134,7 +134,12 @@ export function SystemWorkspace({
                       )
                       .map((service) => (
                         <tr key={service.unit}>
-                          <td className="p-3 text-white">{service.unit}</td>
+                          <td className="p-3 text-white">
+                            <span className="block break-all">{service.unit}</span>
+                            <span className="mt-0.5 block text-[10px] text-slate-500 md:hidden line-clamp-2">
+                              {service.description}
+                            </span>
+                          </td>
                           <td className="p-3">
                             <span
                               className={
@@ -148,7 +153,7 @@ export function SystemWorkspace({
                               {service.active}/{service.sub}
                             </span>
                           </td>
-                          <td className="p-3 text-slate-400 max-w-md truncate">
+                          <td className="p-3 text-slate-400 max-w-md truncate hidden md:table-cell">
                             {service.description}
                           </td>
                           <td className="p-3">
@@ -222,6 +227,9 @@ export function SystemWorkspace({
                               {process.user} · PPID {process.ppid} ·{" "}
                               {process.elapsed}
                             </span>
+                            <span className="mt-1 block text-[10px] text-slate-400 md:hidden break-all line-clamp-2">
+                              {process.command}
+                            </span>
                           </td>
                           <td className="p-3">
                             <span className="text-blue-400">
@@ -235,7 +243,7 @@ export function SystemWorkspace({
                               {(process.rssKB / 1024).toFixed(1)} MB
                             </span>
                           </td>
-                          <td className="p-3 text-slate-300 max-w-2xl break-all">
+                          <td className="p-3 text-slate-300 max-w-2xl break-all hidden md:table-cell">
                             {process.command}
                           </td>
                           <td className="p-3">

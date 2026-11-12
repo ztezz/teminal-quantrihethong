@@ -163,8 +163,8 @@ export function LogsWorkspace({
                 <tr className="bg-[#111116]/80 border-b border-white/10 text-[10px] text-slate-500 font-mono uppercase tracking-widest">
                   <th className="py-3.5 px-4 font-semibold">Mức / Nhóm</th>
                   <th className="py-3.5 px-4 font-semibold">Mô tả sự kiện</th>
-                  <th className="py-3.5 px-5 font-semibold">Địa chỉ IP</th>
-                  <th className="py-3.5 px-5 font-semibold">Thời gian</th>
+                  <th className="py-3.5 px-5 font-semibold hidden sm:table-cell">Địa chỉ IP</th>
+                  <th className="py-3.5 px-5 font-semibold hidden md:table-cell">Thời gian</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5 font-mono text-xs">
@@ -195,6 +195,10 @@ export function LogsWorkspace({
                       </td>
                       <td className="py-3.5 px-4 text-slate-300">
                         <div>{log.event}</div>
+                        <div className="mt-1 text-[10px] text-slate-500 md:hidden">
+                          <span className="text-blue-400 font-semibold sm:hidden">{log.ip} · </span>
+                          <span>{new Date(log.timestamp).toLocaleString()}</span>
+                        </div>
                         {log.metadata && (
                           <code className="block mt-1 max-w-xl whitespace-pre-wrap break-all text-[10px] text-slate-500">
                             {JSON.stringify(log.metadata)}
@@ -206,10 +210,10 @@ export function LogsWorkspace({
                           {log.result}
                         </span>
                       </td>
-                      <td className="py-3.5 px-5 text-blue-400 font-semibold">
+                      <td className="py-3.5 px-5 text-blue-400 font-semibold hidden sm:table-cell">
                         {log.ip}
                       </td>
-                      <td className="py-3.5 px-5 text-slate-500">
+                      <td className="py-3.5 px-5 text-slate-500 hidden md:table-cell">
                         {new Date(log.timestamp).toLocaleString()}
                       </td>
                     </tr>

@@ -112,6 +112,7 @@ export default function Home() {
   const settingsDebounceRef = useRef<NodeJS.Timeout | null>(null);
   const stepUpPromiseRef = useRef<Promise<boolean> | null>(null);
   const stepUpResolveRef = useRef<((granted: boolean) => void) | null>(null);
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
 
   // Logs & Settings Management UI State
   const auditLog = useAuditLog(sessionReady);
@@ -3096,7 +3097,29 @@ export default function Home() {
             />
 
             {/* Main Content Area */}
-            <div className="flex flex-1 overflow-hidden">
+            <div
+              className="flex flex-1 overflow-hidden"
+              onTouchStart={(event) => {
+                if (typeof window === "undefined" || window.innerWidth >= 768) return;
+                const touch = event.touches[0];
+                if (touch) touchStartRef.current = { x: touch.clientX, y: touch.clientY };
+              }}
+              onTouchEnd={(event) => {
+                if (!touchStartRef.current || typeof window === "undefined" || window.innerWidth >= 768) return;
+                const touch = event.changedTouches[0];
+                const start = touchStartRef.current;
+                touchStartRef.current = null;
+                if (!touch) return;
+                const dx = touch.clientX - start.x;
+                const dy = Math.abs(touch.clientY - start.y);
+                if (dy > 45) return;
+                if (!isSidebarOpen && start.x <= 28 && dx >= 65) {
+                  setIsSidebarOpen(true);
+                } else if (isSidebarOpen && dx <= -65) {
+                  setIsSidebarOpen(false);
+                }
+              }}
+            >
               <MobileBackdrop open={isSidebarOpen} onClose={() => setIsSidebarOpen(false)} />
               {currentUser && (
                 <Sidebar
