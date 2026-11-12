@@ -1,4 +1,4 @@
-const CACHE_NAME = "nodeshell-share-c75b9c07c9eb";
+const CACHE_NAME = "nodeshell-share-bf55158b9262";
 
 self.addEventListener("install", (event) => {
   event.waitUntil((async () => {

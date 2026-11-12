@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState } from "react";
-import { Check, Clipboard, Download, FileUp, Globe, KeyRound, LockKeyhole, RotateCcw, Send, ShieldCheck, Timer, Trash2, Upload } from "lucide-react";
+import { Check, Clipboard, Download, FileUp, Globe, KeyRound, LockKeyhole, RotateCcw, Send, ShieldCheck, Sparkles, Timer, Trash2, Upload } from "lucide-react";
 import { ApiError, apiClient } from "@/lib/client/api";
 import { InstallShareButton } from "./install-share-button";
 
@@ -47,6 +47,9 @@ export default function QuickSharePage() {
   const [copiedPublicCode, setCopiedPublicCode] = useState("");
   const [removingCode, setRemovingCode] = useState("");
   const [dragging, setDragging] = useState(false);
+  const [privateDragging, setPrivateDragging] = useState(false);
+  const publicDragDepthRef = useRef(0);
+  const privateDragDepthRef = useRef(0);
   const [now, setNow] = useState(() => Date.now());
 
   const refreshPublicFiles = useCallback(async () => {
@@ -114,8 +117,21 @@ export default function QuickSharePage() {
     finally { setRemovingCode(""); }
   }
 
+  function applyPrivateFile(chosen: File | null) {
+    setFile(chosen); setStatus(""); setChecksum(""); setProgress(null); setCode("");
+  }
+
   function selectFile(event: ChangeEvent<HTMLInputElement>) {
-    setFile(event.target.files?.[0] || null); setStatus(""); setChecksum(""); setProgress(null); setCode("");
+    applyPrivateFile(event.target.files?.[0] || null);
+  }
+
+  function dropPrivateFile(event: DragEvent<HTMLElement>) {
+    event.preventDefault();
+    privateDragDepthRef.current = 0;
+    setPrivateDragging(false);
+    if (busy) return;
+    const dropped = event.dataTransfer.files?.[0] || null;
+    if (dropped) applyPrivateFile(dropped);
   }
 
   async function upload(session: UploadSession, startOffset: number) {
@@ -198,7 +214,9 @@ export default function QuickSharePage() {
   }
 
   function dropPublicFiles(event: DragEvent<HTMLElement>) {
-    event.preventDefault(); setDragging(false);
+    event.preventDefault();
+    publicDragDepthRef.current = 0;
+    setDragging(false);
     void uploadPublicFiles(Array.from(event.dataTransfer.files));
   }
 
@@ -317,13 +335,47 @@ export default function QuickSharePage() {
         </div>
         <FileUp />
       </div>
-      <label className={`quick-share-drop ${dragging ? "is-dragging" : ""}`} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { event.preventDefault(); setDragging(false); }} onDrop={dropPublicFiles}>
+      <label
+        className={`quick-share-drop ${dragging ? "is-dragging" : ""} ${publicBusy ? "is-uploading" : ""}`}
+        onDragEnter={(event) => { event.preventDefault(); publicDragDepthRef.current += 1; setDragging(true); }}
+        onDragOver={(event) => event.preventDefault()}
+        onDragLeave={(event) => {
+          event.preventDefault();
+          publicDragDepthRef.current = Math.max(0, publicDragDepthRef.current - 1);
+          if (publicDragDepthRef.current === 0) setDragging(false);
+        }}
+        onDrop={dropPublicFiles}
+      >
         <input type="file" multiple disabled={publicBusy} onChange={(event) => { void uploadPublicFiles(Array.from(event.target.files || [])); event.target.value = ""; }} />
-        <div className="quick-share-drop-icon"><Upload /></div>
-        <strong>{publicBusy ? "Đang tải file lên..." : "Thả nhiều file vào đây hoặc bấm để chọn"}</strong>
-        <span>File hiển thị ngay bên dưới trong 60 phút, ai mở trang này cũng có thể tải xuống.</span>
+        <div className="quick-share-drop-aura" aria-hidden="true">
+          <i className="is-ring-one" />
+          <i className="is-ring-two" />
+        </div>
+        <div className="quick-share-drop-icon">
+          {dragging ? <Sparkles /> : <Upload />}
+        </div>
+        <strong>
+          {publicBusy
+            ? `Đang tải lên ${selectedPublicFile?.name || "file"}...`
+            : dragging
+              ? "Thả tay ngay để bắn file lên trạm!"
+              : "Thả nhiều file vào đây hoặc bấm để chọn"}
+        </strong>
+        <span>
+          {publicBusy && publicProgress !== null
+            ? `Đang truyền dữ liệu tốc độ cao · Đã đạt ${publicProgress}%`
+            : dragging
+              ? "Hỗ trợ thả nhiều file cùng lúc · Tự động chia sẻ ngay lập tức"
+              : "File hiển thị ngay bên dưới trong 60 phút, ai mở trang này cũng có thể tải xuống."}
+        </span>
       </label>
-      {publicProgress !== null && <div className="quick-share-progress"><div><span>{publicStatus}</span><strong>{publicProgress}%</strong></div><i><b style={{ width: `${publicProgress}%` }} /></i></div>}
+      {publicProgress !== null && <div className="quick-share-progress is-live">
+        <div className="quick-share-progress-head">
+          <span><i className="quick-share-pulse-dot" />{publicStatus || "Đang tải file lên..."}</span>
+          <strong>{publicProgress}%</strong>
+        </div>
+        <i className="quick-share-progress-track"><b style={{ width: `${publicProgress}%` }} /></i>
+      </div>}
       {pendingPublicSession && <div className="quick-share-interrupted"><div><strong>Phiên upload chưa hoàn tất: {pendingPublicSession.name}</strong><span>Chọn lại đúng file trên thiết bị này để tiếp tục từ phần đã tải lên. Phiên chờ còn {timeLeft(pendingPublicSession.expiresAt, now)}.</span></div><div className="quick-share-interrupted-actions"><label><input type="file" disabled={publicBusy} onChange={(event) => { setSelectedPublicFile(event.target.files?.[0] || null); event.target.value = ""; }} />Chọn lại file</label><button type="button" disabled={publicBusy || !selectedPublicFile} onClick={() => { if (selectedPublicFile) void uploadPublicFiles([selectedPublicFile]); }}><RotateCcw />Tiếp tục</button><button type="button" disabled={publicBusy} onClick={() => void discardPublicSession()}>Hủy phiên dở</button></div></div>}
       {publicStatus && <p role="status" className="quick-share-status">{publicStatus}</p>}
       <div className="quick-share-list-heading">
@@ -374,13 +426,45 @@ export default function QuickSharePage() {
             </div>
             <FileUp />
           </div>
-          <label className={`quick-share-drop ${file ? "has-file" : ""}`}>
+          <label
+            className={`quick-share-drop ${file ? "has-file" : ""} ${privateDragging ? "is-dragging" : ""} ${busy ? "is-uploading" : ""}`}
+            onDragEnter={(event) => { event.preventDefault(); privateDragDepthRef.current += 1; setPrivateDragging(true); }}
+            onDragOver={(event) => event.preventDefault()}
+            onDragLeave={(event) => {
+              event.preventDefault();
+              privateDragDepthRef.current = Math.max(0, privateDragDepthRef.current - 1);
+              if (privateDragDepthRef.current === 0) setPrivateDragging(false);
+            }}
+            onDrop={dropPrivateFile}
+          >
             <input type="file" onChange={selectFile} disabled={busy} />
-            <div className="quick-share-drop-icon"><Upload /></div>
-            <strong>{file?.name || "Chọn một file để bắt đầu"}</strong>
-            <span>{file ? `${fileSize(file.size)} · sẵn sàng truyền` : "Bấm để duyệt file từ thiết bị (tối đa 2 GB)"}</span>
+            <div className="quick-share-drop-aura" aria-hidden="true">
+              <i className="is-ring-one" />
+              <i className="is-ring-two" />
+            </div>
+            <div className="quick-share-drop-icon">
+              {privateDragging ? <Sparkles /> : file && !busy ? <Check /> : <Upload />}
+            </div>
+            <strong>
+              {privateDragging
+                ? "Thả file vào kênh riêng tư!"
+                : file?.name || "Kéo thả hoặc chọn 1 file để bắt đầu"}
+            </strong>
+            <span>
+              {busy && progress !== null
+                ? `Đang mã hóa & truyền lên kênh · ${progress}%`
+                : file
+                  ? `${fileSize(file.size)} · Sẵn sàng tạo mã 4 số`
+                  : "Bấm để duyệt file hoặc kéo thả trực tiếp (tối đa 2 GB)"}
+            </span>
           </label>
-          {progress !== null && <div className="quick-share-progress"><div><span>{busy ? "Đang truyền an toàn" : "Tiến độ upload"}</span><strong>{progress}%</strong></div><i><b style={{ width: `${progress}%` }} /></i></div>}
+          {progress !== null && <div className="quick-share-progress is-live">
+            <div className="quick-share-progress-head">
+              <span><i className="quick-share-pulse-dot" />{busy ? "Đang truyền an toàn" : "Tiến độ upload"}</span>
+              <strong>{progress}%</strong>
+            </div>
+            <i className="quick-share-progress-track"><b style={{ width: `${progress}%` }} /></i>
+          </div>}
           <button type="button" disabled={!file || busy} onClick={() => void send()} className="quick-share-primary"><Upload />{busy ? "Đang truyền file..." : "Tạo mã gửi file"}</button>
           {resumeSession && <button type="button" disabled={!file || busy} onClick={() => void resume()} className="quick-share-resume"><RotateCcw />Tiếp tục phiên dở <span>{resumeSession.code}</span></button>}
           <small className="quick-share-caption">Upload gián đoạn có thể tiếp tục trên thiết bị này bằng đúng file đã chọn.</small>

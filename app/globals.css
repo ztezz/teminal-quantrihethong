@@ -108,18 +108,71 @@ body {
 .quick-share-step { display: inline-grid; place-items: center; min-width: 28px; height: 28px; padding: 0 .45rem; border-radius: 8px; background: rgba(142, 231, 217, .1); border: 1px solid rgba(142, 231, 217, .22); color: #8ee7d9; font: 700 11px ui-monospace, monospace; }
 .quick-share-card h2 { margin: .25rem 0 0; color: #edf7f7; font-size: 1.08rem; letter-spacing: -.02em; }
 .quick-share-card-heading > svg { color: #76cbdf; width: 20px; }
-.quick-share-drop { display: flex; min-height: 165px; flex-direction: column; align-items: center; justify-content: center; margin-top: 1.25rem; padding: 1.35rem; text-align: center; border: 1.5px dashed rgba(119, 201, 215, .36); border-radius: 16px; background: rgba(3, 11, 18, .38); cursor: pointer; transition: all .18s ease; }
-.quick-share-drop:hover, .quick-share-drop.has-file { border-color: #83e2da; background: rgba(32, 160, 161, .08); }
+.quick-share-drop { position: relative; overflow: hidden; isolation: isolate; display: flex; min-height: 172px; flex-direction: column; align-items: center; justify-content: center; margin-top: 1.25rem; padding: 1.45rem; text-align: center; border: 1.5px dashed rgba(119, 201, 215, .36); border-radius: 18px; background: radial-gradient(circle at 50% 0%, rgba(56, 189, 248, .08), rgba(3, 11, 18, .44) 70%); cursor: pointer; transition: transform .24s cubic-bezier(.22, 1, .36, 1), border-color .22s ease, background .22s ease, box-shadow .24s ease; }
+.quick-share-drop::before { position: absolute; z-index: -1; inset: -40%; content: ""; opacity: 0; background: conic-gradient(from 0deg, transparent 0deg, rgba(142, 231, 217, .22) 90deg, transparent 180deg, rgba(56, 189, 248, .22) 270deg, transparent 360deg); transition: opacity .3s ease; pointer-events: none; }
+.quick-share-drop:hover { border-color: rgba(142, 231, 217, .65); background: radial-gradient(circle at 50% 0%, rgba(52, 211, 153, .13), rgba(5, 16, 26, .52) 72%); transform: translateY(-2px); box-shadow: 0 14px 34px rgba(0, 0, 0, .26), 0 0 28px rgba(56, 189, 248, .09); }
+.quick-share-drop.has-file { border-style: solid; border-color: rgba(52, 211, 153, .48); background: radial-gradient(circle at 50% 0%, rgba(16, 185, 129, .14), rgba(5, 18, 25, .58) 75%); box-shadow: inset 0 1px 0 rgba(167, 243, 208, .12), 0 10px 28px rgba(0, 0, 0, .2); }
+.quick-share-drop.is-dragging, .quick-share-drop:focus-within { border-style: solid; border-color: #93e9df; background: radial-gradient(circle at 50% 50%, rgba(45, 212, 191, .22), rgba(8, 28, 38, .78) 74%); transform: scale(1.015); box-shadow: 0 0 0 4px rgba(147, 233, 223, .16), 0 20px 48px rgba(16, 185, 129, .24); outline: none; }
+.quick-share-drop.is-uploading { border-style: solid; border-color: rgba(56, 189, 248, .58); background: radial-gradient(circle at 50% 50%, rgba(14, 165, 233, .16), rgba(6, 18, 28, .72) 74%); box-shadow: 0 0 0 3px rgba(56, 189, 248, .12), 0 16px 38px rgba(14, 165, 233, .18); }
+.quick-share-drop.is-dragging::before, .quick-share-drop.is-uploading::before { opacity: 1; animation: quick-share-spin 5s linear infinite; }
 .quick-share-drop input { position: absolute; width: 1px; height: 1px; opacity: 0; }
-.quick-share-drop-icon { display: grid; width: 46px; height: 46px; place-items: center; margin-bottom: .7rem; border-radius: 14px; background: rgba(116, 212, 219, .1); border: 1px solid rgba(116, 212, 219, .2); color: #8ee7d9; }
-.quick-share-drop-icon svg { width: 22px; height: 22px; margin: 0; }
-.quick-share-drop strong { max-width: 100%; overflow: hidden; color: #e2f3f4; font-size: .88rem; text-overflow: ellipsis; white-space: nowrap; }
-.quick-share-drop span, .quick-share-caption { margin-top: .35rem; color: #78939b; font-size: .73rem; }
-.quick-share-progress { margin-top: 1rem; }
-.quick-share-progress > div { display: flex; justify-content: space-between; margin-bottom: .45rem; color: #87a4a8; font-size: .72rem; }
-.quick-share-progress strong { color: #9aece0; }
-.quick-share-progress i { display: block; height: 6px; overflow: hidden; border-radius: 9px; background: rgba(255,255,255,.08); }
-.quick-share-progress b { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #47b8db, #90ebd8); transition: width .25s ease; }
+.quick-share-drop-aura { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; z-index: -1; }
+.quick-share-drop-aura i { position: absolute; width: 64px; height: 64px; border-radius: 999px; border: 1.5px solid rgba(142, 231, 217, .35); opacity: 0; transform: scale(.8); }
+.quick-share-drop.is-dragging .quick-share-drop-aura .is-ring-one,
+.quick-share-drop.is-uploading .quick-share-drop-aura .is-ring-one { animation: quick-share-ripple 1.8s cubic-bezier(.16, 1, .3, 1) infinite; }
+.quick-share-drop.is-dragging .quick-share-drop-aura .is-ring-two,
+.quick-share-drop.is-uploading .quick-share-drop-aura .is-ring-two { animation: quick-share-ripple 1.8s cubic-bezier(.16, 1, .3, 1) .9s infinite; }
+.quick-share-drop-icon { position: relative; display: grid; width: 52px; height: 52px; place-items: center; margin-bottom: .75rem; border-radius: 16px; background: linear-gradient(145deg, rgba(142, 231, 217, .16), rgba(56, 189, 248, .08)); border: 1px solid rgba(142, 231, 217, .28); color: #8ee7d9; box-shadow: 0 8px 20px rgba(0, 0, 0, .22); transition: transform .25s cubic-bezier(.22, 1, .36, 1), background .25s ease, color .25s ease, box-shadow .25s ease; }
+.quick-share-drop:hover .quick-share-drop-icon { transform: translateY(-3px) scale(1.05); border-color: rgba(142, 231, 217, .5); box-shadow: 0 12px 24px rgba(16, 185, 129, .22); }
+.quick-share-drop.has-file .quick-share-drop-icon { background: linear-gradient(135deg, rgba(52, 211, 153, .24), rgba(16, 185, 129, .12)); border-color: rgba(52, 211, 153, .5); color: #6ee7b7; }
+.quick-share-drop.is-dragging .quick-share-drop-icon { transform: translateY(-5px) scale(1.12); background: linear-gradient(135deg, #93e9df, #38bdf8); color: #05131a; border-color: transparent; box-shadow: 0 0 28px rgba(147, 233, 223, .55); animation: quick-share-float 1.1s ease-in-out infinite alternate; }
+.quick-share-drop.is-uploading .quick-share-drop-icon { background: linear-gradient(135deg, rgba(56, 189, 248, .28), rgba(142, 231, 217, .2)); border-color: #7dd3fc; color: #bae6fd; animation: quick-share-launch .95s ease-in-out infinite alternate; }
+.quick-share-drop-icon svg { width: 24px; height: 24px; margin: 0; }
+.quick-share-drop strong { max-width: 100%; overflow: hidden; color: #e9f8f9; font-size: .92rem; text-overflow: ellipsis; white-space: nowrap; transition: color .2s ease; }
+.quick-share-drop.is-dragging strong { color: #a7f3d0; font-size: .96rem; }
+.quick-share-drop span, .quick-share-caption { margin-top: .38rem; color: #7e9ca4; font-size: .74rem; }
+.quick-share-progress { margin-top: 1.05rem; padding: .85rem 1rem; border: 1px solid rgba(142, 231, 217, .22); border-radius: 13px; background: rgba(4, 15, 23, .6); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .04); }
+.quick-share-progress-head, .quick-share-progress > div { display: flex; justify-content: space-between; align-items: center; gap: .75rem; margin-bottom: .55rem; color: #9ec0c5; font-size: .74rem; }
+.quick-share-progress-head span { display: inline-flex; align-items: center; gap: .48rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quick-share-pulse-dot { flex: none; width: 8px; height: 8px; border-radius: 999px; background: #34d399; box-shadow: 0 0 0 0 rgba(52, 211, 153, .7); animation: quick-share-dot-pulse 1.4s infinite; }
+.quick-share-progress strong { flex: none; padding: .15rem .48rem; border-radius: 999px; background: rgba(142, 231, 217, .14); color: #a7f3d0; font: 700 .72rem ui-monospace, monospace; }
+.quick-share-progress-track, .quick-share-progress i { position: relative; display: block; height: 9px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.08); }
+.quick-share-progress b { position: relative; display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #0ea5e9, #2dd4bf, #a7f3d0); background-size: 200% 100%; box-shadow: 0 0 16px rgba(45, 212, 191, .55); transition: width .28s cubic-bezier(.22, 1, .36, 1); animation: quick-share-gradient 2.2s linear infinite; }
+.quick-share-progress b::after { position: absolute; inset: 0; content: ""; background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .48), transparent); transform: translateX(-100%); animation: quick-share-shimmer 1.35s infinite; }
+.quick-share-file { animation: quick-share-item-in .28s cubic-bezier(.22, 1, .36, 1); }
+.quick-share-ready { animation: quick-share-item-in .32s cubic-bezier(.22, 1, .36, 1); }
+
+@keyframes quick-share-ripple {
+  0% { width: 52px; height: 52px; opacity: .78; transform: scale(.85); }
+  100% { width: 220px; height: 220px; opacity: 0; transform: scale(1.35); }
+}
+@keyframes quick-share-float {
+  0% { transform: translateY(-3px) scale(1.08); }
+  100% { transform: translateY(-9px) scale(1.15); }
+}
+@keyframes quick-share-launch {
+  0% { transform: translateY(2px) scale(.98); }
+  100% { transform: translateY(-5px) scale(1.06); }
+}
+@keyframes quick-share-shimmer {
+  100% { transform: translateX(100%); }
+}
+@keyframes quick-share-gradient {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+@keyframes quick-share-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes quick-share-dot-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(52, 211, 153, .65); }
+  70% { box-shadow: 0 0 0 7px rgba(52, 211, 153, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+}
+@keyframes quick-share-item-in {
+  from { opacity: 0; transform: translateY(6px) scale(.99); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
 .quick-share-primary, .quick-share-download { display: flex; width: 100%; align-items: center; justify-content: center; gap: .55rem; margin-top: 1.15rem; padding: .88rem 1rem; border: 0; border-radius: 11px; color: #061116; background: #8ee7d9; font-size: .8rem; font-weight: 800; cursor: pointer; transition: all .18s ease; }
 .quick-share-primary:hover, .quick-share-download:hover { background: #b3f6e9; box-shadow: 0 8px 24px rgba(62, 213, 190, .18); }
 .quick-share-primary:disabled { cursor: not-allowed; opacity: .42; }
