@@ -26,7 +26,12 @@ test("only the uploader can remove a listed file, and its link can be copied", a
   await page.goto("/share");
   await loaded;
   await page.getByRole("button", { name: "Sao chép liên kết example.txt" }).click();
-  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain("/api/quick-share/public/1234");
+  const copiedLink = await page.evaluate(() => navigator.clipboard.readText());
+  expect(copiedLink).toContain("/share?file=1234");
+  await page.goto("/share?file=1234");
+  await expect(page.getByRole("heading", { name: "example.txt" })).toBeVisible();
+  await expect(page.getByRole("link", { name: /Tải file xuống/i })).toHaveAttribute("href", /\/api\/quick-share\/public\/1234$/);
+  await page.getByRole("button", { name: "Quay lại danh sách chia sẻ" }).click();
   await page.getByRole("button", { name: "Gỡ example.txt" }).click();
   await expect(page.getByText("Đã gỡ example.txt")).toBeVisible();
   expect(deleted).toBe(true);

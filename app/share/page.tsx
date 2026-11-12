@@ -1,18 +1,38 @@
 "use client";
 
 import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState } from "react";
-import { Check, Clipboard, Download, FileUp, Globe, KeyRound, LockKeyhole, RotateCcw, Send, ShieldCheck, Sparkles, Timer, Trash2, Upload } from "lucide-react";
+import { ArrowLeft, Check, Clipboard, Download, Eye, FileText, FileUp, Globe, KeyRound, LockKeyhole, RotateCcw, Send, ShieldCheck, Sparkles, Timer, Trash2, Upload } from "lucide-react";
 import { ApiError, apiClient } from "@/lib/client/api";
 import { InstallShareButton } from "./install-share-button";
 
 type UploadSession = { code: string; uploadToken: string; name: string; size: number };
-type PublicFile = { code: string; name: string; size: number; createdAt: string; expiresAt: number };
+type PublicFile = { code: string; name: string; size: number; createdAt: string; expiresAt: number; checksum?: string; previewMime?: string | null };
 type PublicUploadSession = UploadSession & { lastModified: number; expiresAt: number };
 type OwnedPublicFile = { token: string; expiresAt: number };
 type ShareMode = "public" | "private";
 const UPLOAD_SESSION_KEY = "nodeshell_quick_share_upload";
 const PUBLIC_UPLOAD_KEY = "nodeshell_public_share_upload";
 const PUBLIC_OWNED_KEY = "nodeshell_public_share_owned";
+
+const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".avif"]);
+const VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".m4v", ".ogv"]);
+const AUDIO_EXTS = new Set([".mp3", ".wav", ".ogg", ".oga", ".opus", ".flac", ".aac", ".m4a"]);
+const TEXT_EXTS = new Set([".txt", ".md", ".json", ".csv", ".log", ".yml", ".yaml"]);
+
+function fileExt(name: string) {
+  const dot = name.lastIndexOf(".");
+  return dot >= 0 ? name.slice(dot).toLowerCase() : "";
+}
+
+function previewKind(name: string): "image" | "video" | "audio" | "pdf" | "text" | null {
+  const ext = fileExt(name);
+  if (IMAGE_EXTS.has(ext)) return "image";
+  if (VIDEO_EXTS.has(ext)) return "video";
+  if (AUDIO_EXTS.has(ext)) return "audio";
+  if (ext === ".pdf") return "pdf";
+  if (TEXT_EXTS.has(ext)) return "text";
+  return null;
+}
 
 function fileSize(bytes: number) {
   if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
@@ -24,8 +44,24 @@ function timeLeft(expiresAt: number, now: number) {
   return `${Math.floor(seconds / 60)}p ${String(seconds % 60).padStart(2, "0")}s`;
 }
 
+function parseSharedFileCode(): string {
+  if (typeof window === "undefined") return "";
+  const fromQuery = new URLSearchParams(window.location.search).get("file") || new URLSearchParams(window.location.search).get("code") || "";
+  if (/^\d{4}$/.test(fromQuery)) return fromQuery;
+  const rawHash = window.location.hash.replace(/^#/, "");
+  const fromHashParams = new URLSearchParams(rawHash).get("file") || new URLSearchParams(rawHash).get("code") || "";
+  if (/^\d{4}$/.test(fromHashParams)) return fromHashParams;
+  if (/^\d{4}$/.test(rawHash)) return rawHash;
+  return "";
+}
+
 export default function QuickSharePage() {
   const [activeTab, setActiveTab] = useState<ShareMode>("public");
+  const [viewingCode, setViewingCode] = useState<string>("");
+  const [viewingFile, setViewingFile] = useState<PublicFile | null>(null);
+  const [viewingLoading, setViewingLoading] = useState(false);
+  const [viewingError, setViewingError] = useState("");
+  const [textPreview, setTextPreview] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [code, setCode] = useState("");
   const [status, setStatus] = useState("");
@@ -60,6 +96,67 @@ export default function QuickSharePage() {
   }, []);
 
   useEffect(() => {
+    const syncViewingCode = () => setViewingCode(parseSharedFileCode());
+    const init = window.setTimeout(syncViewingCode, 0);
+    window.addEventListener("hashchange", syncViewingCode);
+    window.addEventListener("popstate", syncViewingCode);
+    return () => {
+      window.clearTimeout(init);
+      window.removeEventListener("hashchange", syncViewingCode);
+      window.removeEventListener("popstate", syncViewingCode);
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const loadFileInfo = async () => {
+      if (!viewingCode) {
+        setViewingFile(null);
+        setViewingError("");
+        setTextPreview(null);
+        setViewingLoading(false);
+        return;
+      }
+      setViewingLoading(true);
+      setViewingError("");
+      setTextPreview(null);
+      try {
+        let found: PublicFile | null = null;
+        try {
+          const info = await apiClient.request<{ file: PublicFile }>(`/api/quick-share/public/${viewingCode}/info`, { cache: "no-store" });
+          found = info.file;
+        } catch {
+          const list = await apiClient.request<{ files: PublicFile[] }>("/api/quick-share/public", { cache: "no-store" });
+          found = list.files.find(item => item.code === viewingCode && item.expiresAt > Date.now()) || null;
+        }
+        if (!active) return;
+        if (!found || found.expiresAt <= Date.now()) {
+          setViewingFile(null);
+          setViewingError("File này không tồn tại, đã hết thời gian chia sẻ (60 phút) hoặc đã được người gửi gỡ bỏ.");
+          return;
+        }
+        setViewingFile(found);
+        if (previewKind(found.name) === "text" && found.size <= 256 * 1024) {
+          try {
+            const res = await fetch(`${apiClient.baseUrl}/api/quick-share/public/${found.code}?inline=1`, { cache: "no-store" });
+            if (res.ok && active) setTextPreview(await res.text());
+          } catch {
+            // Optional inline text preview; ignore if unavailable.
+          }
+        }
+      } catch (error) {
+        if (!active) return;
+        setViewingFile(null);
+        setViewingError(error instanceof Error ? error.message : "Không thể tải thông tin file.");
+      } finally {
+        if (active) setViewingLoading(false);
+      }
+    };
+    const timer = window.setTimeout(() => void loadFileInfo(), 0);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [viewingCode]);
+
+  useEffect(() => {
     const initial = window.setTimeout(() => void refreshPublicFiles(), 0);
     const clock = window.setInterval(() => setNow(Date.now()), 1000);
     const refresh = window.setInterval(() => void refreshPublicFiles(), 30_000);
@@ -84,6 +181,25 @@ export default function QuickSharePage() {
     return () => window.clearTimeout(timer);
   }, []);
 
+  function openFileViewer(itemCode: string) {
+    const url = `${window.location.pathname}?file=${encodeURIComponent(itemCode)}`;
+    window.history.pushState({}, "", url);
+    setViewingCode(itemCode);
+  }
+
+  function closeFileViewer() {
+    window.history.pushState({}, "", window.location.pathname);
+    setViewingCode("");
+    setViewingFile(null);
+    setViewingError("");
+    setTextPreview(null);
+  }
+
+  function buildShareViewUrl(itemCode: string) {
+    const origin = typeof window !== "undefined" ? window.location.origin : (apiClient.baseUrl || "");
+    return `${origin}/share?file=${encodeURIComponent(itemCode)}`;
+  }
+
   function savePublicSession(session: PublicUploadSession | null) {
     if (session) localStorage.setItem(PUBLIC_UPLOAD_KEY, JSON.stringify(session));
     else localStorage.removeItem(PUBLIC_UPLOAD_KEY);
@@ -98,7 +214,7 @@ export default function QuickSharePage() {
 
   async function copyPublicLink(item: PublicFile) {
     try {
-      await navigator.clipboard.writeText(`${apiClient.baseUrl || window.location.origin}/api/quick-share/public/${item.code}`);
+      await navigator.clipboard.writeText(buildShareViewUrl(item.code));
       setCopiedPublicCode(item.code);
       window.setTimeout(() => setCopiedPublicCode(current => current === item.code ? "" : current), 1800);
     } catch { setPublicStatus("Không thể sao chép liên kết. Hãy kiểm tra quyền clipboard của trình duyệt."); }
@@ -113,6 +229,7 @@ export default function QuickSharePage() {
       const next = { ...ownedPublicRef.current }; delete next[item.code]; saveOwnedPublicFiles(next);
       setPublicFiles(current => current.filter(file => file.code !== item.code));
       setPublicStatus(`Đã gỡ ${item.name} khỏi danh sách chia sẻ.`);
+      if (viewingCode === item.code) closeFileViewer();
     } catch (error) { setPublicStatus(error instanceof Error ? error.message : "Không thể gỡ file."); }
     finally { setRemovingCode(""); }
   }
@@ -267,6 +384,10 @@ export default function QuickSharePage() {
   async function copyCode() { await navigator.clipboard.writeText(code); setCopied(true); window.setTimeout(() => setCopied(false), 1800); }
 
   const activePublicFiles = publicFiles.filter(item => item.expiresAt > now);
+  const currentViewedFile = viewingFile && viewingFile.expiresAt > now ? viewingFile : null;
+  const currentPreviewKind = currentViewedFile ? previewKind(currentViewedFile.name) : null;
+  const inlineUrl = currentViewedFile ? `${apiClient.baseUrl}/api/quick-share/public/${currentViewedFile.code}?inline=1` : "";
+  const downloadUrl = currentViewedFile ? `${apiClient.baseUrl}/api/quick-share/public/${currentViewedFile.code}` : "";
 
   return <main className="quick-share-shell"><div className="quick-share-orb is-one" /><div className="quick-share-orb is-two" /><div className="quick-share-wrap">
     <header className="quick-share-hero">
@@ -285,227 +406,339 @@ export default function QuickSharePage() {
       </div>
     </header>
 
-    <div className="quick-share-tabs" role="tablist" aria-label="Chế độ truyền file">
-      <button
-        type="button"
-        role="tab"
-        id="tab-public"
-        aria-selected={activeTab === "public"}
-        aria-controls="panel-public"
-        className={`quick-share-tab ${activeTab === "public" ? "is-active" : ""}`}
-        onClick={() => setActiveTab("public")}
-      >
-        <Globe />
-        <div>
-          <strong>Truyền nhanh công khai</strong>
-          <span>Không cần mã · Lưu 60 phút</span>
+    {viewingCode ? (
+      <section className="quick-share-card quick-share-viewer" aria-label="Chi tiết file chia sẻ">
+        <div className="quick-share-viewer-top">
+          <button type="button" className="quick-share-back-btn" onClick={closeFileViewer}>
+            <ArrowLeft />Quay lại danh sách chia sẻ
+          </button>
+          {currentViewedFile && (
+            <span className="quick-share-viewer-badge">
+              <Timer />Còn {timeLeft(currentViewedFile.expiresAt, now)}
+            </span>
+          )}
         </div>
-        <em className="quick-share-tab-badge">{activePublicFiles.length}</em>
-      </button>
-      <button
-        type="button"
-        role="tab"
-        id="tab-private"
-        aria-selected={activeTab === "private"}
-        aria-controls="panel-private"
-        className={`quick-share-tab ${activeTab === "private" ? "is-active" : ""}`}
-        onClick={() => setActiveTab("private")}
-      >
-        <KeyRound />
-        <div>
-          <strong>Truyền riêng tư mã 4 số</strong>
-          <span>Bảo mật 1-1 · Tự xóa sau khi tải</span>
-        </div>
-        {(resumeSession || (code && checksum)) && <em className="quick-share-tab-dot" aria-hidden="true" />}
-      </button>
-    </div>
 
-    <section
-      id="panel-public"
-      role="tabpanel"
-      aria-labelledby="tab-public"
-      hidden={activeTab !== "public"}
-      className="quick-share-card quick-share-public"
-    >
-      <div className="quick-share-card-heading">
-        <span className="quick-share-step">★</span>
-        <div>
-          <p>CHIA SẺ KHÔNG CẦN MÃ</p>
-          <h2>Kéo thả file vào đây</h2>
-        </div>
-        <FileUp />
-      </div>
-      <label
-        className={`quick-share-drop ${dragging ? "is-dragging" : ""} ${publicBusy ? "is-uploading" : ""}`}
-        onDragEnter={(event) => { event.preventDefault(); publicDragDepthRef.current += 1; setDragging(true); }}
-        onDragOver={(event) => event.preventDefault()}
-        onDragLeave={(event) => {
-          event.preventDefault();
-          publicDragDepthRef.current = Math.max(0, publicDragDepthRef.current - 1);
-          if (publicDragDepthRef.current === 0) setDragging(false);
-        }}
-        onDrop={dropPublicFiles}
-      >
-        <input type="file" multiple disabled={publicBusy} onChange={(event) => { void uploadPublicFiles(Array.from(event.target.files || [])); event.target.value = ""; }} />
-        <div className="quick-share-drop-aura" aria-hidden="true">
-          <i className="is-ring-one" />
-          <i className="is-ring-two" />
-        </div>
-        <div className="quick-share-drop-icon">
-          {dragging ? <Sparkles /> : <Upload />}
-        </div>
-        <strong>
-          {publicBusy
-            ? `Đang tải lên ${selectedPublicFile?.name || "file"}...`
-            : dragging
-              ? "Thả tay ngay để bắn file lên trạm!"
-              : "Thả nhiều file vào đây hoặc bấm để chọn"}
-        </strong>
-        <span>
-          {publicBusy && publicProgress !== null
-            ? `Đang truyền dữ liệu tốc độ cao · Đã đạt ${publicProgress}%`
-            : dragging
-              ? "Hỗ trợ thả nhiều file cùng lúc · Tự động chia sẻ ngay lập tức"
-              : "File hiển thị ngay bên dưới trong 60 phút, ai mở trang này cũng có thể tải xuống."}
-        </span>
-      </label>
-      {publicProgress !== null && <div className="quick-share-progress is-live">
-        <div className="quick-share-progress-head">
-          <span><i className="quick-share-pulse-dot" />{publicStatus || "Đang tải file lên..."}</span>
-          <strong>{publicProgress}%</strong>
-        </div>
-        <i className="quick-share-progress-track"><b style={{ width: `${publicProgress}%` }} /></i>
-      </div>}
-      {pendingPublicSession && <div className="quick-share-interrupted"><div><strong>Phiên upload chưa hoàn tất: {pendingPublicSession.name}</strong><span>Chọn lại đúng file trên thiết bị này để tiếp tục từ phần đã tải lên. Phiên chờ còn {timeLeft(pendingPublicSession.expiresAt, now)}.</span></div><div className="quick-share-interrupted-actions"><label><input type="file" disabled={publicBusy} onChange={(event) => { setSelectedPublicFile(event.target.files?.[0] || null); event.target.value = ""; }} />Chọn lại file</label><button type="button" disabled={publicBusy || !selectedPublicFile} onClick={() => { if (selectedPublicFile) void uploadPublicFiles([selectedPublicFile]); }}><RotateCcw />Tiếp tục</button><button type="button" disabled={publicBusy} onClick={() => void discardPublicSession()}>Hủy phiên dở</button></div></div>}
-      {publicStatus && <p role="status" className="quick-share-status">{publicStatus}</p>}
-      <div className="quick-share-list-heading">
-        <div>
-          <h2>File đang chia sẻ</h2>
-          <p>Tự động dọn dẹp khi hết thời gian hiệu lực</p>
-        </div>
-        <span className="quick-share-count-pill">{activePublicFiles.length} file</span>
-      </div>
-      <div className="quick-share-files">
-        {activePublicFiles.map(item => <div className="quick-share-file" key={item.code}>
-          <div className="quick-share-file-icon"><FileUp /></div>
-          <div className="quick-share-file-info">
-            <strong title={item.name}>{item.name}</strong>
-            <span>{fileSize(item.size)} · Còn {timeLeft(item.expiresAt, now)}</span>
+        {viewingLoading ? (
+          <div className="quick-share-viewer-state">
+            <div className="quick-share-drop-icon"><Upload /></div>
+            <strong>Đang tải thông tin file...</strong>
+            <span>Vui lòng chờ trong giây lát.</span>
           </div>
-          <div className="quick-share-file-actions">
-            <button type="button" onClick={() => void copyPublicLink(item)} aria-label={`Sao chép liên kết ${item.name}`} title="Sao chép liên kết tải">
-              {copiedPublicCode === item.code ? <Check /> : <Clipboard />}
-              {copiedPublicCode === item.code ? "Đã sao chép" : "Sao chép link"}
+        ) : viewingError || !currentViewedFile ? (
+          <div className="quick-share-viewer-state is-error" role="alert">
+            <div className="quick-share-drop-icon"><FileText /></div>
+            <strong>Không tìm thấy file chia sẻ</strong>
+            <span>{viewingError || "Liên kết này đã hết hạn hoặc file đã được gỡ bỏ."}</span>
+            <button type="button" className="quick-share-primary" onClick={closeFileViewer}>
+              <ArrowLeft />Mở trang truyền file
             </button>
-            <a href={`${apiClient.baseUrl}/api/quick-share/public/${item.code}`} aria-label={`Tải ${item.name}`} title={`Tải ${item.name}`}>
-              <Download />Tải xuống
-            </a>
-            {ownedPublicFiles[item.code] && <button type="button" className="is-remove" disabled={removingCode === item.code} onClick={() => void removePublicFile(item)} aria-label={`Gỡ ${item.name}`} title="Gỡ file ngay">
-              <Trash2 />Gỡ file
-            </button>}
           </div>
-        </div>)}
-        {!activePublicFiles.length && <div className="quick-share-empty-box"><Upload /><p className="quick-share-empty">Chưa có file nào đang chia sẻ. Kéo thả file lên trên để bắt đầu!</p></div>}
-      </div>
-    </section>
+        ) : (
+          <>
+            <div className="quick-share-viewer-hero">
+              <div className="quick-share-viewer-icon">
+                <FileUp />
+              </div>
+              <div className="quick-share-viewer-meta">
+                <p>FILE ĐƯỢC CHIA SẺ CÔNG KHAI · #{currentViewedFile.code}</p>
+                <h2 title={currentViewedFile.name}>{currentViewedFile.name}</h2>
+                <div className="quick-share-viewer-tags">
+                  <span>Dung lượng: <strong>{fileSize(currentViewedFile.size)}</strong></span>
+                  <span>Định dạng: <strong>{(fileExt(currentViewedFile.name) || "FILE").replace(".", "").toUpperCase()}</strong></span>
+                  <span>Hiệu lực: <strong>Còn {timeLeft(currentViewedFile.expiresAt, now)}</strong></span>
+                </div>
+              </div>
+            </div>
 
-    <div
-      id="panel-private"
-      role="tabpanel"
-      aria-labelledby="tab-private"
-      hidden={activeTab !== "private"}
-      className="quick-share-private-pane"
-    >
-      <section className="quick-share-grid">
-        <article className="quick-share-card is-send">
-          <div className="quick-share-card-heading">
-            <span className="quick-share-step">01</span>
+            {currentPreviewKind && (
+              <div className="quick-share-viewer-preview">
+                <div className="quick-share-viewer-preview-bar">
+                  <span><Eye />Xem trước nội dung</span>
+                  <small>{currentViewedFile.name}</small>
+                </div>
+                <div className="quick-share-viewer-stage">
+                  {currentPreviewKind === "image" && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={inlineUrl} alt={currentViewedFile.name} loading="lazy" />
+                  )}
+                  {currentPreviewKind === "video" && (
+                    <video src={inlineUrl} controls preload="metadata" playsInline />
+                  )}
+                  {currentPreviewKind === "audio" && (
+                    <audio src={inlineUrl} controls preload="metadata" />
+                  )}
+                  {currentPreviewKind === "pdf" && (
+                    <iframe src={inlineUrl} title={`Xem trước ${currentViewedFile.name}`} />
+                  )}
+                  {currentPreviewKind === "text" && (
+                    textPreview !== null
+                      ? <pre>{textPreview}</pre>
+                      : <p className="quick-share-empty">File văn bản sẵn sàng tải về để xem đầy đủ.</p>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className="quick-share-viewer-actions">
+              <a href={downloadUrl} download={currentViewedFile.name} className="quick-share-viewer-download">
+                <Download />Tải file xuống ({fileSize(currentViewedFile.size)})
+              </a>
+              <button type="button" className="quick-share-viewer-copy" onClick={() => void copyPublicLink(currentViewedFile)}>
+                {copiedPublicCode === currentViewedFile.code ? <Check /> : <Clipboard />}
+                {copiedPublicCode === currentViewedFile.code ? "Đã sao chép link" : "Sao chép link trang này"}
+              </button>
+              {ownedPublicFiles[currentViewedFile.code] && (
+                <button
+                  type="button"
+                  className="quick-share-viewer-remove"
+                  disabled={removingCode === currentViewedFile.code}
+                  onClick={() => void removePublicFile(currentViewedFile)}
+                >
+                  <Trash2 />Gỡ file
+                </button>
+              )}
+            </div>
+
+            {currentViewedFile.checksum && (
+              <footer className="quick-share-viewer-checksum">
+                <span>SHA-256</span>
+                <code>{currentViewedFile.checksum}</code>
+              </footer>
+            )}
+          </>
+        )}
+      </section>
+    ) : (
+      <>
+        <div className="quick-share-tabs" role="tablist" aria-label="Chế độ truyền file">
+          <button
+            type="button"
+            role="tab"
+            id="tab-public"
+            aria-selected={activeTab === "public"}
+            aria-controls="panel-public"
+            className={`quick-share-tab ${activeTab === "public" ? "is-active" : ""}`}
+            onClick={() => setActiveTab("public")}
+          >
+            <Globe />
             <div>
-              <p>GỬI FILE RIÊNG TƯ</p>
-              <h2>Tạo mã truyền 4 số</h2>
+              <strong>Truyền nhanh công khai</strong>
+              <span>Không cần mã · Lưu 60 phút</span>
+            </div>
+            <em className="quick-share-tab-badge">{activePublicFiles.length}</em>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            id="tab-private"
+            aria-selected={activeTab === "private"}
+            aria-controls="panel-private"
+            className={`quick-share-tab ${activeTab === "private" ? "is-active" : ""}`}
+            onClick={() => setActiveTab("private")}
+          >
+            <KeyRound />
+            <div>
+              <strong>Truyền riêng tư mã 4 số</strong>
+              <span>Bảo mật 1-1 · Tự xóa sau khi tải</span>
+            </div>
+            {(resumeSession || (code && checksum)) && <em className="quick-share-tab-dot" aria-hidden="true" />}
+          </button>
+        </div>
+
+        <section
+          id="panel-public"
+          role="tabpanel"
+          aria-labelledby="tab-public"
+          hidden={activeTab !== "public"}
+          className="quick-share-card quick-share-public"
+        >
+          <div className="quick-share-card-heading">
+            <span className="quick-share-step">★</span>
+            <div>
+              <p>CHIA SẺ KHÔNG CẦN MÃ</p>
+              <h2>Kéo thả file vào đây</h2>
             </div>
             <FileUp />
           </div>
           <label
-            className={`quick-share-drop ${file ? "has-file" : ""} ${privateDragging ? "is-dragging" : ""} ${busy ? "is-uploading" : ""}`}
-            onDragEnter={(event) => { event.preventDefault(); privateDragDepthRef.current += 1; setPrivateDragging(true); }}
+            className={`quick-share-drop ${dragging ? "is-dragging" : ""} ${publicBusy ? "is-uploading" : ""}`}
+            onDragEnter={(event) => { event.preventDefault(); publicDragDepthRef.current += 1; setDragging(true); }}
             onDragOver={(event) => event.preventDefault()}
             onDragLeave={(event) => {
               event.preventDefault();
-              privateDragDepthRef.current = Math.max(0, privateDragDepthRef.current - 1);
-              if (privateDragDepthRef.current === 0) setPrivateDragging(false);
+              publicDragDepthRef.current = Math.max(0, publicDragDepthRef.current - 1);
+              if (publicDragDepthRef.current === 0) setDragging(false);
             }}
-            onDrop={dropPrivateFile}
+            onDrop={dropPublicFiles}
           >
-            <input type="file" onChange={selectFile} disabled={busy} />
+            <input type="file" multiple disabled={publicBusy} onChange={(event) => { void uploadPublicFiles(Array.from(event.target.files || [])); event.target.value = ""; }} />
             <div className="quick-share-drop-aura" aria-hidden="true">
               <i className="is-ring-one" />
               <i className="is-ring-two" />
             </div>
             <div className="quick-share-drop-icon">
-              {privateDragging ? <Sparkles /> : file && !busy ? <Check /> : <Upload />}
+              {dragging ? <Sparkles /> : <Upload />}
             </div>
             <strong>
-              {privateDragging
-                ? "Thả file vào kênh riêng tư!"
-                : file?.name || "Kéo thả hoặc chọn 1 file để bắt đầu"}
+              {publicBusy
+                ? `Đang tải lên ${selectedPublicFile?.name || "file"}...`
+                : dragging
+                  ? "Thả tay ngay để bắn file lên trạm!"
+                  : "Thả nhiều file vào đây hoặc bấm để chọn"}
             </strong>
             <span>
-              {busy && progress !== null
-                ? `Đang mã hóa & truyền lên kênh · ${progress}%`
-                : file
-                  ? `${fileSize(file.size)} · Sẵn sàng tạo mã 4 số`
-                  : "Bấm để duyệt file hoặc kéo thả trực tiếp (tối đa 2 GB)"}
+              {publicBusy && publicProgress !== null
+                ? `Đang truyền dữ liệu tốc độ cao · Đã đạt ${publicProgress}%`
+                : dragging
+                  ? "Hỗ trợ thả nhiều file cùng lúc · Tự động chia sẻ ngay lập tức"
+                  : "File hiển thị ngay bên dưới trong 60 phút, ai mở trang này cũng có thể tải xuống."}
             </span>
           </label>
-          {progress !== null && <div className="quick-share-progress is-live">
+          {publicProgress !== null && <div className="quick-share-progress is-live">
             <div className="quick-share-progress-head">
-              <span><i className="quick-share-pulse-dot" />{busy ? "Đang truyền an toàn" : "Tiến độ upload"}</span>
-              <strong>{progress}%</strong>
+              <span><i className="quick-share-pulse-dot" />{publicStatus || "Đang tải file lên..."}</span>
+              <strong>{publicProgress}%</strong>
             </div>
-            <i className="quick-share-progress-track"><b style={{ width: `${progress}%` }} /></i>
+            <i className="quick-share-progress-track"><b style={{ width: `${publicProgress}%` }} /></i>
           </div>}
-          <button type="button" disabled={!file || busy} onClick={() => void send()} className="quick-share-primary"><Upload />{busy ? "Đang truyền file..." : "Tạo mã gửi file"}</button>
-          {resumeSession && <button type="button" disabled={!file || busy} onClick={() => void resume()} className="quick-share-resume"><RotateCcw />Tiếp tục phiên dở <span>{resumeSession.code}</span></button>}
-          <small className="quick-share-caption">Upload gián đoạn có thể tiếp tục trên thiết bị này bằng đúng file đã chọn.</small>
-          {code && checksum && <section className="quick-share-ready">
+          {pendingPublicSession && <div className="quick-share-interrupted"><div><strong>Phiên upload chưa hoàn tất: {pendingPublicSession.name}</strong><span>Chọn lại đúng file trên thiết bị này để tiếp tục từ phần đã tải lên. Phiên chờ còn {timeLeft(pendingPublicSession.expiresAt, now)}.</span></div><div className="quick-share-interrupted-actions"><label><input type="file" disabled={publicBusy} onChange={(event) => { setSelectedPublicFile(event.target.files?.[0] || null); event.target.value = ""; }} />Chọn lại file</label><button type="button" disabled={publicBusy || !selectedPublicFile} onClick={() => { if (selectedPublicFile) void uploadPublicFiles([selectedPublicFile]); }}><RotateCcw />Tiếp tục</button><button type="button" disabled={publicBusy} onClick={() => void discardPublicSession()}>Hủy phiên dở</button></div></div>}
+          {publicStatus && <p role="status" className="quick-share-status">{publicStatus}</p>}
+          <div className="quick-share-list-heading">
             <div>
-              <p>FILE ĐÃ SẴN SÀNG</p>
-              <strong>Mã nhận file 4 số</strong>
-              <span>{status}</span>
+              <h2>File đang chia sẻ</h2>
+              <p>Bấm vào tên file hoặc gửi link để mở trang xem & tải file</p>
             </div>
-            <div className="quick-share-code-display">{code.split("").map((digit, index) => <i key={index}>{digit}</i>)}</div>
-            <button type="button" onClick={() => void copyCode()}>{copied ? <Check /> : <Clipboard />}{copied ? "Đã sao chép" : "Sao chép mã"}</button>
-            <footer><span>SHA-256</span><code>{checksum}</code></footer>
-          </section>}
-          {status && !(code && checksum) && <p role="status" className="quick-share-status">{status}</p>}
-        </article>
+            <span className="quick-share-count-pill">{activePublicFiles.length} file</span>
+          </div>
+          <div className="quick-share-files">
+            {activePublicFiles.map(item => <div className="quick-share-file" key={item.code}>
+              <div className="quick-share-file-icon"><FileUp /></div>
+              <div className="quick-share-file-info">
+                <button type="button" className="quick-share-file-title-btn" onClick={() => openFileViewer(item.code)} title={`Xem trang tải ${item.name}`}>
+                  <strong>{item.name}</strong>
+                </button>
+                <span>{fileSize(item.size)} · Còn {timeLeft(item.expiresAt, now)}</span>
+              </div>
+              <div className="quick-share-file-actions">
+                <button type="button" onClick={() => openFileViewer(item.code)} aria-label={`Xem ${item.name}`} title="Mở trang xem file">
+                  <Eye />Xem file
+                </button>
+                <button type="button" onClick={() => void copyPublicLink(item)} aria-label={`Sao chép liên kết ${item.name}`} title="Sao chép liên kết trang xem & tải file">
+                  {copiedPublicCode === item.code ? <Check /> : <Clipboard />}
+                  {copiedPublicCode === item.code ? "Đã sao chép" : "Sao chép link"}
+                </button>
+                <a href={`${apiClient.baseUrl}/api/quick-share/public/${item.code}`} aria-label={`Tải ${item.name}`} title={`Tải ${item.name}`}>
+                  <Download />Tải xuống
+                </a>
+                {ownedPublicFiles[item.code] && <button type="button" className="is-remove" disabled={removingCode === item.code} onClick={() => void removePublicFile(item)} aria-label={`Gỡ ${item.name}`} title="Gỡ file ngay">
+                  <Trash2 />Gỡ file
+                </button>}
+              </div>
+            </div>)}
+            {!activePublicFiles.length && <div className="quick-share-empty-box"><Upload /><p className="quick-share-empty">Chưa có file nào đang chia sẻ. Kéo thả file lên trên để bắt đầu!</p></div>}
+          </div>
+        </section>
 
-        <article className="quick-share-card is-receive">
-          <div className="quick-share-card-heading">
-            <span className="quick-share-step">02</span>
-            <div>
-              <p>NHẬN FILE</p>
-              <h2>Nhập mã 4 chữ số</h2>
-            </div>
-            <Download />
-          </div>
-          <div className="quick-share-code-input">
-            <label htmlFor="receive-code">MÃ NHẬN FILE</label>
-            <div>
-              <KeyRound />
-              <input id="receive-code" inputMode="numeric" autoComplete="one-time-code" value={code} onChange={(event) => normalizeCode(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void receive(); }} placeholder="0000" aria-invalid={Boolean(receiveError)} aria-describedby={receiveError ? "receive-error" : undefined} />
-            </div>
-            <span>Nhập 4 chữ số từ người gửi. File sẽ tự động xóa ngay sau lượt tải đầu tiên.</span>
-            {receiveError && <p id="receive-error" role="alert" className="quick-share-receive-error">{receiveError}</p>}
-          </div>
-          <button type="button" disabled={receiving} onClick={() => void receive()} className="quick-share-download"><Download />{receiving ? "Đang kiểm tra mã..." : "Nhận và tải file"}</button>
-          <div className="quick-share-rules">
-            <p><Timer />Mã nhận file có hiệu lực trong vòng 24 giờ.</p>
-            <p><LockKeyhole />Ẩn danh hoàn toàn — không hiển thị trên danh sách công khai.</p>
-          </div>
-        </article>
-      </section>
-    </div>
+        <div
+          id="panel-private"
+          role="tabpanel"
+          aria-labelledby="tab-private"
+          hidden={activeTab !== "private"}
+          className="quick-share-private-pane"
+        >
+          <section className="quick-share-grid">
+            <article className="quick-share-card is-send">
+              <div className="quick-share-card-heading">
+                <span className="quick-share-step">01</span>
+                <div>
+                  <p>GỬI FILE RIÊNG TƯ</p>
+                  <h2>Tạo mã truyền 4 số</h2>
+                </div>
+                <FileUp />
+              </div>
+              <label
+                className={`quick-share-drop ${file ? "has-file" : ""} ${privateDragging ? "is-dragging" : ""} ${busy ? "is-uploading" : ""}`}
+                onDragEnter={(event) => { event.preventDefault(); privateDragDepthRef.current += 1; setPrivateDragging(true); }}
+                onDragOver={(event) => event.preventDefault()}
+                onDragLeave={(event) => {
+                  event.preventDefault();
+                  privateDragDepthRef.current = Math.max(0, privateDragDepthRef.current - 1);
+                  if (privateDragDepthRef.current === 0) setPrivateDragging(false);
+                }}
+                onDrop={dropPrivateFile}
+              >
+                <input type="file" onChange={selectFile} disabled={busy} />
+                <div className="quick-share-drop-aura" aria-hidden="true">
+                  <i className="is-ring-one" />
+                  <i className="is-ring-two" />
+                </div>
+                <div className="quick-share-drop-icon">
+                  {privateDragging ? <Sparkles /> : file && !busy ? <Check /> : <Upload />}
+                </div>
+                <strong>
+                  {privateDragging
+                    ? "Thả file vào kênh riêng tư!"
+                    : file?.name || "Kéo thả hoặc chọn 1 file để bắt đầu"}
+                </strong>
+                <span>
+                  {busy && progress !== null
+                    ? `Đang mã hóa & truyền lên kênh · ${progress}%`
+                    : file
+                      ? `${fileSize(file.size)} · Sẵn sàng tạo mã 4 số`
+                      : "Bấm để duyệt file hoặc kéo thả trực tiếp (tối đa 2 GB)"}
+                </span>
+              </label>
+              {progress !== null && <div className="quick-share-progress is-live">
+                <div className="quick-share-progress-head">
+                  <span><i className="quick-share-pulse-dot" />{busy ? "Đang truyền an toàn" : "Tiến độ upload"}</span>
+                  <strong>{progress}%</strong>
+                </div>
+                <i className="quick-share-progress-track"><b style={{ width: `${progress}%` }} /></i>
+              </div>}
+              <button type="button" disabled={!file || busy} onClick={() => void send()} className="quick-share-primary"><Upload />{busy ? "Đang truyền file..." : "Tạo mã gửi file"}</button>
+              {resumeSession && <button type="button" disabled={!file || busy} onClick={() => void resume()} className="quick-share-resume"><RotateCcw />Tiếp tục phiên dở <span>{resumeSession.code}</span></button>}
+              <small className="quick-share-caption">Upload gián đoạn có thể tiếp tục trên thiết bị này bằng đúng file đã chọn.</small>
+              {code && checksum && <section className="quick-share-ready">
+                <div>
+                  <p>FILE ĐÃ SẴN SÀNG</p>
+                  <strong>Mã nhận file 4 số</strong>
+                  <span>{status}</span>
+                </div>
+                <div className="quick-share-code-display">{code.split("").map((digit, index) => <i key={index}>{digit}</i>)}</div>
+                <button type="button" onClick={() => void copyCode()}>{copied ? <Check /> : <Clipboard />}{copied ? "Đã sao chép" : "Sao chép mã"}</button>
+                <footer><span>SHA-256</span><code>{checksum}</code></footer>
+              </section>}
+              {status && !(code && checksum) && <p role="status" className="quick-share-status">{status}</p>}
+            </article>
+
+            <article className="quick-share-card is-receive">
+              <div className="quick-share-card-heading">
+                <span className="quick-share-step">02</span>
+                <div>
+                  <p>NHẬN FILE</p>
+                  <h2>Nhập mã 4 chữ số</h2>
+                </div>
+                <Download />
+              </div>
+              <div className="quick-share-code-input">
+                <label htmlFor="receive-code">MÃ NHẬN FILE</label>
+                <div>
+                  <KeyRound />
+                  <input id="receive-code" inputMode="numeric" autoComplete="one-time-code" value={code} onChange={(event) => normalizeCode(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void receive(); }} placeholder="0000" aria-invalid={Boolean(receiveError)} aria-describedby={receiveError ? "receive-error" : undefined} />
+                </div>
+                <span>Nhập 4 chữ số từ người gửi. File sẽ tự động xóa ngay sau lượt tải đầu tiên.</span>
+                {receiveError && <p id="receive-error" role="alert" className="quick-share-receive-error">{receiveError}</p>}
+              </div>
+              <button type="button" disabled={receiving} onClick={() => void receive()} className="quick-share-download"><Download />{receiving ? "Đang kiểm tra mã..." : "Nhận và tải file"}</button>
+              <div className="quick-share-rules">
+                <p><Timer />Mã nhận file có hiệu lực trong vòng 24 giờ.</p>
+                <p><LockKeyhole />Ẩn danh hoàn toàn — không hiển thị trên danh sách công khai.</p>
+              </div>
+            </article>
+          </section>
+        </div>
+      </>
+    )}
   </div></main>;
 }

@@ -633,6 +633,18 @@ async function startServer() {
     return res.status(401).json({ success: false, error: 'Invalid or expired session token' });
   });
 
+  const PUBLIC_SHARE_PREVIEW_MIMES: Record<string, string> = {
+    '.aac': 'audio/aac', '.avif': 'image/avif', '.bmp': 'image/bmp', '.flac': 'audio/flac',
+    '.gif': 'image/gif', '.ico': 'image/x-icon', '.jpeg': 'image/jpeg', '.jpg': 'image/jpeg',
+    '.m4a': 'audio/mp4', '.m4v': 'video/x-m4v', '.mov': 'video/quicktime', '.mp3': 'audio/mpeg',
+    '.mp4': 'video/mp4', '.oga': 'audio/ogg', '.ogg': 'audio/ogg', '.ogv': 'video/ogg',
+    '.opus': 'audio/ogg', '.pdf': 'application/pdf', '.png': 'image/png', '.wav': 'audio/wav',
+    '.webm': 'video/webm', '.webp': 'image/webp', '.txt': 'text/plain; charset=utf-8',
+    '.md': 'text/plain; charset=utf-8', '.json': 'text/plain; charset=utf-8',
+    '.csv': 'text/plain; charset=utf-8', '.log': 'text/plain; charset=utf-8',
+    '.yml': 'text/plain; charset=utf-8', '.yaml': 'text/plain; charset=utf-8'
+  };
+
   // Public, short-lived transfer channel. It is deliberately isolated from File Manager.
   expressApp.get('/api/quick-share/public', async (_req, res) => {
     try {
@@ -643,7 +655,7 @@ async function startServer() {
           if (!share.public || !share.ready || share.offset !== share.size) return null;
           const stat = await fs.promises.stat(data);
           if (stat.size !== share.size) return null;
-          return { code: share.code, name: share.name, size: share.size, createdAt: share.createdAt, expiresAt: share.expiresAt };
+          return { code: share.code, name: share.name, size: share.size, createdAt: share.createdAt, expiresAt: share.expiresAt, checksum: share.checksum };
         } catch { return null; }
       }));
       res.setHeader('Cache-Control', 'no-store');
@@ -651,14 +663,53 @@ async function startServer() {
     } catch (error: any) { return res.status(500).json({ success: false, error: error.message }); }
   });
 
+  expressApp.get('/api/quick-share/public/:code/info', async (req, res) => {
+    try {
+      const { share, data } = await readQuickShare(req.params.code);
+      if (!share.public || !share.ready || share.offset !== share.size || (await fs.promises.stat(data)).size !== share.size) return res.status(404).json({ success: false, error: 'File không tồn tại hoặc đã hết hạn' });
+      const ext = path.extname(share.name).toLowerCase();
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({
+        success: true,
+        file: {
+          code: share.code,
+          name: share.name,
+          size: share.size,
+          createdAt: share.createdAt,
+          expiresAt: share.expiresAt,
+          checksum: share.checksum,
+          previewMime: PUBLIC_SHARE_PREVIEW_MIMES[ext] || null
+        }
+      });
+    } catch (error: any) { return res.status(error.status || (error.code === 'ENOENT' ? 404 : 500)).json({ success: false, error: error.message }); }
+  });
+
   expressApp.get('/api/quick-share/public/:code', async (req, res) => {
     try {
       const { share, data } = await readQuickShare(req.params.code);
       if (!share.public || !share.ready || share.offset !== share.size || (await fs.promises.stat(data)).size !== share.size) return res.status(404).json({ success: false, error: 'File không tồn tại hoặc chưa sẵn sàng' });
+      const ext = path.extname(share.name).toLowerCase();
+      const previewMime = req.query.inline === '1' ? PUBLIC_SHARE_PREVIEW_MIMES[ext] : undefined;
       res.setHeader('Cache-Control', 'no-store');
-      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('Content-Type', previewMime || 'application/octet-stream');
+      res.setHeader('Content-Disposition', `${previewMime ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(share.name)}`);
+      const range = req.headers.range;
+      if (previewMime && range) {
+        const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+        if (!match) { res.setHeader('Content-Range', `bytes */${share.size}`); return res.sendStatus(416); }
+        const start = match[1] ? Number(match[1]) : Math.max(0, share.size - Number(match[2]));
+        const end = match[2] && match[1] ? Number(match[2]) : share.size - 1;
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start > end || start >= share.size) {
+          res.setHeader('Content-Range', `bytes */${share.size}`); return res.sendStatus(416);
+        }
+        const boundedEnd = Math.min(end, share.size - 1);
+        res.status(206);
+        res.setHeader('Content-Range', `bytes ${start}-${boundedEnd}/${share.size}`);
+        res.setHeader('Content-Length', boundedEnd - start + 1);
+        return fs.createReadStream(data, { start, end: boundedEnd }).on('error', error => res.destroy(error)).pipe(res);
+      }
       res.setHeader('Content-Length', share.size);
-      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(share.name)}`);
       return fs.createReadStream(data).on('error', error => res.destroy(error)).pipe(res);
     } catch (error: any) { return res.status(error.status || (error.code === 'ENOENT' ? 404 : 500)).json({ success: false, error: error.message }); }
   });
