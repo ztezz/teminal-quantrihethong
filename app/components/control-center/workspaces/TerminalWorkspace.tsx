@@ -7,6 +7,7 @@ interface TerminalWorkspaceProps {
   autoScroll: boolean;
   fontSize: number;
   onInsertCommand: (command: string) => void;
+  onSendInput?: (data: string) => void;
   onAutoScrollChange: (enabled: boolean) => void;
   onExportHistory: () => void;
   onClear: () => void;
@@ -14,11 +15,31 @@ interface TerminalWorkspaceProps {
   onIncreaseFontSize: () => void;
 }
 
+const mobileKeys: Array<{ label: string; seq: string }> = [
+  { label: "ESC", seq: "\x1b" },
+  { label: "TAB", seq: "\t" },
+  { label: "CTRL+C", seq: "\x03" },
+  { label: "CTRL+Z", seq: "\x1a" },
+  { label: "CTRL+D", seq: "\x04" },
+  { label: "CTRL+L", seq: "\x0c" },
+  { label: "↑", seq: "\x1b[A" },
+  { label: "↓", seq: "\x1b[B" },
+  { label: "←", seq: "\x1b[D" },
+  { label: "→", seq: "\x1b[C" },
+  { label: "HOME", seq: "\x1b[H" },
+  { label: "END", seq: "\x1b[F" },
+  { label: "/", seq: "/" },
+  { label: "-", seq: "-" },
+  { label: "|", seq: "|" },
+  { label: "~", seq: "~" },
+];
+
 export function TerminalWorkspace({
   terminalRef,
   autoScroll,
   fontSize,
   onInsertCommand,
+  onSendInput,
   onAutoScrollChange,
   onExportHistory,
   onClear,
@@ -197,8 +218,25 @@ export function TerminalWorkspace({
           title="Chuột phải: sao chép vùng chọn hoặc dán | Ctrl+Shift+C / Ctrl+Shift+V"
         />
       </div>
-      <div className={`mt-4 ${minimal ? "hidden" : "flex"} flex-col sm:flex-row items-start sm:items-center justify-between text-[11px] text-slate-500 font-mono px-1 gap-2`}>
-        <span className="text-emerald-500/80 font-semibold">
+
+      {/* Mobile Virtual Shortcut Key Bar */}
+      {onSendInput && (
+        <div role="toolbar" aria-label="Phím tắt terminal trên điện thoại" className="mt-2 flex md:hidden items-center gap-1.5 overflow-x-auto pb-1 shrink-0 select-none">
+          {mobileKeys.map((key) => (
+            <button
+              key={key.label}
+              type="button"
+              onClick={() => onSendInput(key.seq)}
+              className="shrink-0 rounded-lg border border-white/12 bg-[#0d1420] active:bg-sky-500/20 px-2.5 py-2 font-mono text-[11px] font-bold text-slate-200 shadow-sm"
+            >
+              {key.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className={`mt-3 sm:mt-4 ${minimal ? "hidden" : "flex"} flex-col sm:flex-row items-start sm:items-center justify-between text-[11px] text-slate-500 font-mono px-1 gap-2`}>
+        <span className="hidden sm:inline text-emerald-500/80 font-semibold">
           [TTY TƯƠNG TÁC] top: P CPU, M RAM, q thoát | nano: Ctrl+O lưu,
           Ctrl+X thoát | Clipboard: Ctrl+Shift+C / Ctrl+Shift+V
         </span>

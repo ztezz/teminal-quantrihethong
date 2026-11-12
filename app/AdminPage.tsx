@@ -18,6 +18,7 @@ import {
   Footer,
   Header,
   MobileBackdrop,
+  MobileBottomNav,
   Sidebar,
 } from "./components/control-center/DashboardChrome";
 import { ResourceModals } from "./components/control-center/ResourceModals";
@@ -317,7 +318,9 @@ export default function Home() {
   }, [activeTab]);
 
   useEffect(() => {
-    localStorage.setItem("vps_terminal_sidebar_open", String(isSidebarOpen));
+    if (window.innerWidth >= 768) {
+      localStorage.setItem("vps_terminal_sidebar_open", String(isSidebarOpen));
+    }
   }, [isSidebarOpen]);
 
   useEffect(() => {
@@ -1887,13 +1890,17 @@ export default function Home() {
     }
   };
 
-  const handleInsertCommand = (cmd: string) => {
+  const handleSendTerminalInput = (data: string) => {
     if (socketInstance.current && socketInstance.current.connected) {
-      socketInstance.current.emit("input", cmd + "\r");
+      socketInstance.current.emit("input", data);
       if (xtermInstance.current) {
         xtermInstance.current.focus();
       }
     }
+  };
+
+  const handleInsertCommand = (cmd: string) => {
+    handleSendTerminalInput(cmd + "\r");
   };
 
   const loadSettings = useCallback(async () => {
@@ -2897,6 +2904,7 @@ export default function Home() {
   const navigateWorkspace = (tab: ActiveTab, sqliteView?: SqliteWorkspace) => {
     setActiveTab(tab);
     if (sqliteView) setSqliteWorkspace(sqliteView);
+    if (typeof window !== "undefined" && window.innerWidth < 768) setIsSidebarOpen(false);
     setPaletteOpen(false);
     setPaletteQuery("");
   };
@@ -3056,7 +3064,7 @@ export default function Home() {
             key="dashboard"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            className="app-shell flex flex-col w-full h-screen overflow-hidden"
+            className="app-shell flex flex-col w-full h-dvh overflow-hidden"
           >
             <input
               id="file-upload-input"
@@ -3082,6 +3090,7 @@ export default function Home() {
             />
             <Header
               socketStatus={displayedSocketStatus}
+              activeTab={activeTab}
               onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
               onLogout={handleLogout}
             />
@@ -3099,6 +3108,7 @@ export default function Home() {
                   logs={logs}
                   onSelectTab={(tab) => {
                     setActiveTab(tab);
+                    if (typeof window !== "undefined" && window.innerWidth < 768) setIsSidebarOpen(false);
                     if (tab === "logs") loadLogs();
                     if (tab === "files") loadFiles(currentPath || getSavedFilePath());
                   }}
@@ -3125,6 +3135,7 @@ export default function Home() {
                           autoScroll={autoScroll}
                           fontSize={fontSize}
                           onInsertCommand={handleInsertCommand}
+                          onSendInput={handleSendTerminalInput}
                           onAutoScrollChange={setAutoScroll}
                           onExportHistory={exportTerminalHistory}
                           onClear={clearTerminal}
@@ -3502,6 +3513,20 @@ export default function Home() {
               </main>
             </div>
 
+            {currentUser && (
+              <MobileBottomNav
+                activeTab={activeTab}
+                role={currentUser.role}
+                sidebarOpen={isSidebarOpen}
+                onSelectTab={(tab) => {
+                  setActiveTab(tab);
+                  setIsSidebarOpen(false);
+                  if (tab === "logs") loadLogs();
+                  if (tab === "files") loadFiles(currentPath || getSavedFilePath());
+                }}
+                onToggleSidebar={() => setIsSidebarOpen((prev) => !prev)}
+              />
+            )}
             <Footer socketStatus={displayedSocketStatus} />
           </motion.div>
         )}

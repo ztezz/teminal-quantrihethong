@@ -831,12 +831,47 @@ kbd {
 @keyframes login-float { 50% { transform: translate3d(0, 18px, 0) scale(1.04); } }
 @keyframes login-sheen { to { background-position: -200% 0; } }
 
+.mobile-bottom-nav {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  align-items: center;
+  height: calc(3.75rem + env(safe-area-inset-bottom, 0px));
+  padding: 0.25rem 0.35rem env(safe-area-inset-bottom, 0px);
+  background: rgba(8, 13, 22, 0.94);
+  border-top: 1px solid var(--app-border);
+  box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(20px);
+  z-index: 50;
+  flex-shrink: 0;
+}
+
+.mobile-bottom-nav-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.22rem;
+  min-width: 0;
+  height: 100%;
+  padding: 0.25rem 0.2rem;
+  border-radius: 10px;
+  color: #77879c;
+  font-size: 0.65rem;
+  font-weight: 600;
+  transition: color 150ms ease, background-color 150ms ease;
+}
+
+.mobile-bottom-nav-item.is-active {
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.1);
+}
+
 @media (max-width: 767px) {
   .login-shell { min-height: 0; border-radius: 18px; }
-  .login-form-panel { min-height: calc(100vh - 1.5rem); border-radius: 18px; }
+  .login-form-panel { min-height: calc(100dvh - 1.5rem); border-radius: 18px; }
   .app-sidebar {
     position: fixed !important;
-    inset: 56px auto 32px 0;
+    inset: 56px auto calc(3.75rem + env(safe-area-inset-bottom, 0px)) 0;
     z-index: 40;
     width: min(86vw, 300px) !important;
   }
@@ -851,7 +886,7 @@ kbd {
   }
   .toast-region {
     right: 0.75rem;
-    bottom: 2.5rem;
+    bottom: calc(4.25rem + env(safe-area-inset-bottom, 0px));
     width: calc(100vw - 1.5rem);
   }
 }

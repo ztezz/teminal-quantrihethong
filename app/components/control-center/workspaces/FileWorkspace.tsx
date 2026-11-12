@@ -750,22 +750,31 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
                             {file.isDirectory ? (
                               <button
                                 onClick={() => loadFiles(fullItemPath)}
-                                className="flex items-center gap-2.5 text-blue-400 hover:text-blue-300 font-semibold cursor-pointer text-left"
+                                className="flex items-center gap-2 text-blue-400 hover:text-blue-300 font-semibold cursor-pointer text-left"
                               >
                                 <Folder className="w-4 h-4 shrink-0 text-blue-500" />
-                                <span className="truncate max-w-xs sm:max-w-md">
+                                <span className="truncate max-w-[140px] sm:max-w-xs md:max-w-md">
                                   {file.name}/
                                 </span>
                               </button>
                             ) : (
                               <button
                                 onClick={() => openFile(fullItemPath)}
-                                className="flex items-center gap-2.5 text-slate-300 hover:text-white cursor-pointer text-left"
+                                className="flex items-center gap-2 text-slate-300 hover:text-white cursor-pointer text-left"
                               >
                                 {getFileIcon(file.name)}
-                                <span className="truncate max-w-xs sm:max-w-md">
-                                  {file.name}
-                                </span>
+                                <div className="min-w-0">
+                                  <span className="block truncate max-w-[140px] sm:max-w-xs md:max-w-md">
+                                    {file.name}
+                                  </span>
+                                  <span className="block sm:hidden text-[10px] text-slate-500">
+                                    {file.size < 1024
+                                      ? `${file.size} B`
+                                      : file.size < 1024 * 1024
+                                        ? `${(file.size / 1024).toFixed(1)} KB`
+                                        : `${(file.size / (1024 * 1024)).toFixed(1)} MB`}
+                                  </span>
+                                </div>
                               </button>
                             )}
                           </td>
@@ -793,8 +802,8 @@ export function FileWorkspace({ data, actions }: FileWorkspaceProps) {
                           </td>
 
                           {/* Actions */}
-                          <td className="py-2.5 px-5 text-right">
-                            <div className="flex items-center justify-end gap-1.5 [&>button]:inline-flex [&>button]:min-h-11 [&>button]:min-w-11 [&>button]:items-center [&>button]:justify-center sm:[&>button]:min-h-8 sm:[&>button]:min-w-8 [&>button]:cursor-pointer [&>button]:transition-colors [&>button:focus-visible]:outline-none [&>button:focus-visible]:ring-2 [&>button:focus-visible]:ring-sky-400 [&>button:focus-visible]:ring-offset-2 [&>button:focus-visible]:ring-offset-slate-950 [&>button:disabled]:cursor-not-allowed [&>button:disabled]:opacity-50">
+                          <td className="py-2.5 px-2 sm:px-5 text-right">
+                            <div className="flex items-center justify-end gap-1 sm:gap-1.5 [&>button]:inline-flex [&>button]:min-h-8 [&>button]:min-w-8 [&>button]:items-center [&>button]:justify-center [&>button]:cursor-pointer [&>button]:transition-colors [&>button:focus-visible]:outline-none [&>button:focus-visible]:ring-2 [&>button:focus-visible]:ring-sky-400 [&>button:focus-visible]:ring-offset-2 [&>button:focus-visible]:ring-offset-slate-950 [&>button:disabled]:cursor-not-allowed [&>button:disabled]:opacity-50">
                               {file.isDirectory ? (
                                 <button
                                   onClick={() => loadFiles(fullItemPath)}

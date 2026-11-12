@@ -8,6 +8,7 @@ import {
   NotebookPen,
   LayoutDashboard,
   Menu,
+  MoreHorizontal,
   Settings,
   ShieldCheck,
   Terminal as TerminalIcon,
@@ -18,24 +19,39 @@ export type SocketStatus = "idle" | "connecting" | "connected" | "error";
 
 interface HeaderProps {
   socketStatus: SocketStatus;
+  activeTab: ActiveTab;
   onToggleSidebar: () => void;
   onLogout: () => void;
 }
 
-export function Header({ socketStatus, onToggleSidebar, onLogout }: HeaderProps) {
+const tabTitles: Record<ActiveTab, string> = {
+  overview: "Tổng Quan",
+  terminal: "Terminal",
+  system: "Hệ Thống",
+  sqlite: "SQLite",
+  jobs: "Tác Vụ",
+  logs: "Nhật Ký",
+  files: "Tệp Tin",
+  notes: "Ghi Chú",
+  authenticator: "Ví 2FA",
+  settings: "Cấu Hình",
+};
+
+export function Header({ socketStatus, activeTab, onToggleSidebar, onLogout }: HeaderProps) {
   return (
     <header className="app-topbar h-14 sm:h-16 border-b flex items-center justify-between px-3 sm:px-6 shrink-0 z-50">
-      <div className="flex items-center gap-4">
-        <button onClick={onToggleSidebar} className="p-2 text-slate-400 hover:text-white rounded-lg border border-transparent hover:border-white/10 hover:bg-white/5 transition">
+      <div className="flex items-center gap-3 sm:gap-4 min-w-0">
+        <button onClick={onToggleSidebar} aria-label="Mở hoặc đóng thanh điều hướng" className="p-2 text-slate-400 hover:text-white rounded-lg border border-transparent hover:border-white/10 hover:bg-white/5 transition">
           <Menu className="w-4 h-4" />
         </button>
         <div className="relative hidden sm:block">
           <div className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
           <div className="absolute inset-0 rounded-full bg-emerald-400 animate-ping opacity-30" />
         </div>
-        <h1 className="text-xs sm:text-sm font-bold tracking-tight text-white flex items-center gap-2">
+        <h1 className="text-xs sm:text-sm font-bold tracking-tight text-white flex items-center gap-2 truncate">
           <span className="hidden sm:inline">NodeShell</span> Control
-          <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[8px] text-slate-500 font-mono font-normal">v1.1</span>
+          <span className="sm:hidden text-sky-400 font-semibold">· {tabTitles[activeTab]}</span>
+          <span className="hidden sm:inline rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[8px] text-slate-500 font-mono font-normal">v1.1</span>
         </h1>
       </div>
       <div className="flex items-center gap-4 sm:gap-8">
@@ -137,11 +153,65 @@ function Metric({ label, value, percent, barClass }: { label: string; value: str
 }
 
 export function MobileBackdrop({ open, onClose }: { open: boolean; onClose: () => void }) {
-  return open ? <button aria-label="Đóng thanh điều hướng" onClick={onClose} className="fixed inset-x-0 top-14 bottom-8 z-30 bg-black/60 backdrop-blur-sm md:hidden" /> : null;
+  return open ? <button aria-label="Đóng thanh điều hướng" onClick={onClose} className="fixed inset-x-0 top-14 bottom-16 z-30 bg-black/60 backdrop-blur-sm md:hidden" /> : null;
+}
+
+interface MobileBottomNavProps {
+  activeTab: ActiveTab;
+  role: UserRole;
+  sidebarOpen: boolean;
+  onSelectTab: (tab: ActiveTab) => void;
+  onToggleSidebar: () => void;
+}
+
+export function MobileBottomNav({ activeTab, role, sidebarOpen, onSelectTab, onToggleSidebar }: MobileBottomNavProps) {
+  const privileged = ["admin", "root"].includes(role);
+  const items: Array<{ tab: ActiveTab; label: string; icon: typeof Database }> = privileged
+    ? [
+        { tab: "overview", label: "Tổng quan", icon: LayoutDashboard },
+        { tab: "terminal", label: "Terminal", icon: TerminalIcon },
+        { tab: "files", label: "Tệp tin", icon: Folder },
+        { tab: "authenticator", label: "Ví 2FA", icon: ShieldCheck },
+      ]
+    : [
+        { tab: "files", label: "Tệp tin", icon: Folder },
+        { tab: "notes", label: "Ghi chú", icon: NotebookPen },
+        { tab: "authenticator", label: "Ví 2FA", icon: ShieldCheck },
+        { tab: "settings", label: "Cấu hình", icon: Settings },
+      ];
+  const inMore = !items.some((item) => item.tab === activeTab);
+
+  return (
+    <nav aria-label="Điều hướng di động" className="mobile-bottom-nav md:hidden">
+      {items.map(({ tab, label, icon: Icon }) => {
+        const active = activeTab === tab && !sidebarOpen;
+        return (
+          <button
+            key={tab}
+            type="button"
+            onClick={() => onSelectTab(tab)}
+            className={`mobile-bottom-nav-item ${active ? "is-active" : ""}`}
+          >
+            <Icon className="h-4 w-4 shrink-0" />
+            <span className="truncate">{label}</span>
+          </button>
+        );
+      })}
+      <button
+        type="button"
+        onClick={onToggleSidebar}
+        aria-expanded={sidebarOpen}
+        className={`mobile-bottom-nav-item ${sidebarOpen || inMore ? "is-active" : ""}`}
+      >
+        <MoreHorizontal className="h-4 w-4 shrink-0" />
+        <span className="truncate">Menu</span>
+      </button>
+    </nav>
+  );
 }
 
 export function Footer({ socketStatus }: { socketStatus: SocketStatus }) {
-  return <footer className="status-footer h-8 border-t flex items-center justify-between px-3 sm:px-6 shrink-0 text-[9px] sm:text-[10px] font-mono text-slate-500 uppercase tracking-widest z-50 select-none"><div className="flex gap-6"><span className="flex items-center gap-1.5"><StatusDot status={socketStatus} />Socket.io: {socketStatus === "connected" ? "Kết nối" : socketStatus === "connecting" ? "Đang nối" : socketStatus === "error" ? "Lỗi" : "Sẵn sàng"}</span><span className="hidden sm:inline">Bộ nhớ đệm: 1024kb</span><span className="hidden md:inline text-slate-400">Node-PTY: Hoạt động</span></div><div className="flex gap-6"><span>Cổng: 3000</span><span className="hidden sm:inline">Máy chủ: 127.0.0.1</span><span className="text-slate-400">UTF-8</span></div></footer>;
+  return <footer className="status-footer hidden md:flex h-8 border-t items-center justify-between px-3 sm:px-6 shrink-0 text-[9px] sm:text-[10px] font-mono text-slate-500 uppercase tracking-widest z-50 select-none"><div className="flex gap-6"><span className="flex items-center gap-1.5"><StatusDot status={socketStatus} />Socket.io: {socketStatus === "connected" ? "Kết nối" : socketStatus === "connecting" ? "Đang nối" : socketStatus === "error" ? "Lỗi" : "Sẵn sàng"}</span><span className="hidden sm:inline">Bộ nhớ đệm: 1024kb</span><span className="hidden md:inline text-slate-400">Node-PTY: Hoạt động</span></div><div className="flex gap-6"><span>Cổng: 3000</span><span className="hidden sm:inline">Máy chủ: 127.0.0.1</span><span className="text-slate-400">UTF-8</span></div></footer>;
 }
 
 function StatusDot({ status }: { status: SocketStatus }) {

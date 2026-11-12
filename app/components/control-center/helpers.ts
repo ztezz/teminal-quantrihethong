@@ -34,6 +34,7 @@ export function getSavedActiveTab(): ActiveTab {
 
 export function getSavedSidebarState(): boolean {
   if (typeof window === "undefined") return true;
+  if (window.innerWidth < 768) return false;
   return localStorage.getItem("vps_terminal_sidebar_open") !== "false";
 }
 
