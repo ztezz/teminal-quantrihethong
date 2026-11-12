@@ -117,24 +117,24 @@ export function Sidebar({ open, width, activeTab, role, metrics, logs, onSelectT
   return (
     <AnimatePresence initial={false}>
       {open && (
-        <motion.aside initial={{ width: 0, opacity: 0 }} animate={{ width, opacity: 1 }} exit={{ width: 0, opacity: 0 }} className="app-sidebar relative border-r flex flex-col h-full shrink-0 overflow-y-auto">
+        <motion.aside initial={{ width: 0, opacity: 0 }} animate={{ width, opacity: 1 }} exit={{ width: 0, opacity: 0 }} className="app-sidebar relative border-r flex flex-col h-full shrink-0 overflow-y-auto overscroll-contain">
+          <div className="p-3 border-b border-white/10">
+            <h3 className="app-kicker mb-3 px-2">Workspace</h3>
+            <nav className="space-y-1.5">
+              {navigation.filter((item) => !item.restricted || privileged).map(({ tab, label, icon: Icon }) => (
+                <button key={tab} onClick={() => onSelectTab(tab)} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded text-xs font-semibold uppercase tracking-wider transition cursor-pointer border ${activeTab === tab ? tab === "sqlite" ? "bg-emerald-500/10 text-emerald-300 border-emerald-400/20 shadow-[inset_3px_0_0_#34d399]" : "bg-sky-500/10 text-sky-300 border-sky-400/20 shadow-[inset_3px_0_0_#38bdf8]" : "text-slate-400 border-transparent hover:bg-white/5 hover:text-white"}`}>
+                  <Icon className="w-4 h-4 shrink-0" /><span>{label}</span>
+                </button>
+              ))}
+            </nav>
+          </div>
           <div className="p-4 border-b border-white/10 space-y-3">
             <div className="flex items-center justify-between"><h3 className="app-kicker">Tài nguyên</h3><span className={`text-[9px] font-mono ${metrics.unavailable ? "text-amber-400" : "text-emerald-400"}`}>{metrics.unavailable ? "STALE" : "LIVE"}</span></div>
             <Metric label="Tải CPU" value={metrics.cpuPercent === null ? "Chưa có dữ liệu" : `${metrics.cpuPercent}%`} percent={metrics.cpuPercent ?? 0} barClass="bg-gradient-to-r from-sky-500 to-cyan-300" />
             <Metric label="Sử dụng Bộ nhớ" value={metrics.memUsedMB === null ? "Chưa có dữ liệu" : `${metrics.memUsedMB}MB / ${metrics.memTotalMB}MB`} percent={metrics.memPercent ?? 0} barClass="bg-gradient-to-r from-violet-500 to-fuchsia-400" />
             <Metric label="Dung lượng ổ đĩa" value={metrics.diskUsedGB === null ? "Chưa có dữ liệu" : `${metrics.diskUsedGB}GB / ${metrics.diskTotalGB}GB`} percent={metrics.diskPercent ?? 0} barClass={(metrics.diskPercent ?? 0) >= 90 ? "bg-red-500" : (metrics.diskPercent ?? 0) >= 75 ? "bg-amber-500" : "bg-emerald-500"} />
           </div>
-          <div className="p-3 border-b border-white/10">
-            <h3 className="app-kicker mb-3 px-2">Workspace</h3>
-            <nav className="space-y-1.5">
-              {navigation.filter((item) => !item.restricted || privileged).map(({ tab, label, icon: Icon }) => (
-                <button key={tab} onClick={() => onSelectTab(tab)} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded text-xs font-semibold uppercase tracking-wider transition cursor-pointer border ${activeTab === tab ? tab === "sqlite" ? "bg-emerald-500/10 text-emerald-300 border-emerald-400/20 shadow-[inset_3px_0_0_#34d399]" : "bg-sky-500/10 text-sky-300 border-sky-400/20 shadow-[inset_3px_0_0_#38bdf8]" : "text-slate-400 border-transparent hover:bg-white/5 hover:text-white"}`}>
-                  <Icon className="w-4 h-4" /><span>{label}</span>
-                </button>
-              ))}
-            </nav>
-          </div>
-          <div className="p-4 mt-auto">
+          <div className="p-4 pb-8 md:pb-4 mt-auto">
             <h3 className="app-kicker mb-3">Hoạt động gần đây</h3>
             <div className="space-y-3 font-mono text-[11px] leading-relaxed">
               {logs.slice(0, 3).map((log) => <div key={log.id} className="border-b border-white/5 pb-2 last:border-0 last:pb-0"><p className="text-slate-400 text-[10px]">{new Date(log.timestamp).toLocaleTimeString()}</p><p className="text-slate-500 truncate">IP: <span className="text-blue-400">{log.ip}</span> • {log.event.includes("fail") ? <span className="text-red-400 font-bold">LỖI</span> : <span className="text-emerald-400 font-bold">OK</span>}</p></div>)}
@@ -153,7 +153,7 @@ function Metric({ label, value, percent, barClass }: { label: string; value: str
 }
 
 export function MobileBackdrop({ open, onClose }: { open: boolean; onClose: () => void }) {
-  return open ? <button aria-label="Đóng thanh điều hướng" onClick={onClose} className="fixed inset-x-0 top-14 bottom-16 z-30 bg-black/60 backdrop-blur-sm md:hidden" /> : null;
+  return open ? <button aria-label="Đóng thanh điều hướng" onClick={onClose} className="fixed inset-x-0 top-14 bottom-[calc(3.75rem+env(safe-area-inset-bottom,0px))] z-30 bg-black/60 backdrop-blur-sm md:hidden" /> : null;
 }
 
 interface MobileBottomNavProps {

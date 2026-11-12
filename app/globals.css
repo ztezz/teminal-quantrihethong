@@ -875,8 +875,11 @@ kbd {
   .app-sidebar {
     position: fixed !important;
     inset: 56px auto calc(3.75rem + env(safe-area-inset-bottom, 0px)) 0;
+    height: auto !important;
+    max-height: calc(100dvh - 56px - 3.75rem - env(safe-area-inset-bottom, 0px)) !important;
     z-index: 40;
     width: min(86vw, 300px) !important;
+    -webkit-overflow-scrolling: touch;
   }
   .sqlite-layout {
     display: block;
