@@ -832,17 +832,7 @@ kbd {
 @keyframes login-sheen { to { background-position: -200% 0; } }
 
 .mobile-bottom-nav {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  align-items: center;
-  height: calc(3.75rem + env(safe-area-inset-bottom, 0px));
-  padding: 0.25rem 0.35rem env(safe-area-inset-bottom, 0px);
-  background: rgba(8, 13, 22, 0.94);
-  border-top: 1px solid var(--app-border);
-  box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.35);
-  backdrop-filter: blur(20px);
-  z-index: 50;
-  flex-shrink: 0;
+  display: none;
 }
 
 .mobile-bottom-nav-item {
@@ -867,6 +857,19 @@ kbd {
 }
 
 @media (max-width: 767px) {
+  .mobile-bottom-nav {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    align-items: center;
+    height: calc(3.75rem + env(safe-area-inset-bottom, 0px));
+    padding: 0.25rem 0.35rem env(safe-area-inset-bottom, 0px);
+    background: rgba(8, 13, 22, 0.94);
+    border-top: 1px solid var(--app-border);
+    box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(20px);
+    z-index: 50;
+    flex-shrink: 0;
+  }
   .login-shell { min-height: 0; border-radius: 18px; }
   .login-form-panel { min-height: calc(100dvh - 1.5rem); border-radius: 18px; }
   .app-sidebar {
