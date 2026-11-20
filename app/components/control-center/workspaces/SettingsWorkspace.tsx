@@ -7,9 +7,11 @@ import {
   Copy,
   Database,
   HardDrive,
+  Lock,
   Monitor,
   RefreshCw,
   Smartphone,
+  Unlock,
   X,
 } from "lucide-react";
 import { applyUiPreferences, getUiPreferences, saveUiPreferences, type UiPreferences } from "@/lib/client/preferences";
@@ -18,6 +20,47 @@ import { apiClient } from "@/lib/client/api";
 import type { ManagedUser, SecuritySession, UserRole } from "../types";
 
 type SaveStatus = "idle" | "saving" | "saved" | "error";
+interface QuickShareUsage {
+  activeFiles: number;
+  activeBytes: number;
+  maxTotalBytes: number;
+}
+interface QuickShareSettingsResponse {
+  enabled: boolean;
+  directory?: string;
+  activeFiles?: number;
+  activeBytes?: number;
+  maxTotalBytes?: number;
+}
+function formatStorageBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const formatted = unitIndex === 0 ? String(Math.round(value)) : value >= 100 ? value.toFixed(0) : value.toFixed(1).replace(/\.0$/, "");
+  return `${formatted} ${units[unitIndex]}`;
+}
+function extractQuickShareUsage(result: QuickShareSettingsResponse): QuickShareUsage | null {
+  if (
+    typeof result.activeFiles === "number" &&
+    Number.isFinite(result.activeFiles) &&
+    typeof result.activeBytes === "number" &&
+    Number.isFinite(result.activeBytes) &&
+    typeof result.maxTotalBytes === "number" &&
+    Number.isFinite(result.maxTotalBytes)
+  ) {
+    return {
+      activeFiles: result.activeFiles,
+      activeBytes: result.activeBytes,
+      maxTotalBytes: result.maxTotalBytes,
+    };
+  }
+  return null;
+}
 interface TerminalColors {
   background: string;
   foreground: string;
@@ -151,19 +194,104 @@ export function SettingsWorkspace({ data, actions }: SettingsWorkspaceProps) {
     resetUserPassword,
     resetUserTwoFactor,
   } = actions;
+  const canManageQuickShare = currentRole === "admin" || currentRole === "root";
+  const canConfigureQuickShareDirectory = currentRole === "root";
+  const [quickShareEnabled, setQuickShareEnabled] = useState<boolean | null>(null);
+  const [quickShareConfigLoading, setQuickShareConfigLoading] = useState(false);
+  const [quickShareToggleLoading, setQuickShareToggleLoading] = useState(false);
+  const [quickShareUsage, setQuickShareUsage] = useState<QuickShareUsage | null>(null);
   const [quickShareDirectory, setQuickShareDirectory] = useState("");
   const [quickShareDraft, setQuickShareDraft] = useState("");
-  const [quickShareMessage, setQuickShareMessage] = useState("");
+  const [quickShareFeedback, setQuickShareFeedback] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [quickShareLoading, setQuickShareLoading] = useState(false);
   useEffect(() => {
-    if (currentRole !== "root") return;
-    void apiClient.request<{ directory: string }>("/api/settings/quick-share").then(({ directory }) => { setQuickShareDirectory(directory); setQuickShareDraft(directory); }).catch((error: Error) => setQuickShareMessage(error.message));
-  }, [currentRole]);
+    if (!canManageQuickShare) return;
+    let active = true;
+    const loadQuickShareConfig = async () => {
+      setQuickShareConfigLoading(true);
+      try {
+        const result = await apiClient.request<QuickShareSettingsResponse>("/api/settings/quick-share");
+        if (!active) return;
+        setQuickShareEnabled(typeof result.enabled === "boolean" ? result.enabled : null);
+        const usage = extractQuickShareUsage(result);
+        if (usage) setQuickShareUsage(usage);
+        if (typeof result.directory === "string") {
+          setQuickShareDirectory(result.directory);
+          setQuickShareDraft(result.directory);
+        }
+      } catch (error) {
+        if (!active) return;
+        setQuickShareFeedback({
+          type: "error",
+          text: error instanceof Error ? error.message : "Không thể tải cấu hình truyền file nhanh.",
+        });
+      } finally {
+        if (active) setQuickShareConfigLoading(false);
+      }
+    };
+    void loadQuickShareConfig();
+    return () => {
+      active = false;
+    };
+  }, [canManageQuickShare, canConfigureQuickShareDirectory]);
+  async function toggleQuickShareAccess(nextEnabled: boolean) {
+    if (!canManageQuickShare || quickShareConfigLoading || quickShareToggleLoading || quickShareEnabled === null) return;
+    setQuickShareToggleLoading(true);
+    setQuickShareFeedback(null);
+    try {
+      const result = await apiClient.request<QuickShareSettingsResponse>("/api/settings/quick-share", {
+        method: "POST",
+        body: { enabled: nextEnabled },
+      });
+      const resolvedEnabled = typeof result.enabled === "boolean" ? result.enabled : nextEnabled;
+      setQuickShareEnabled(resolvedEnabled);
+      const usage = extractQuickShareUsage(result);
+      if (usage) setQuickShareUsage(usage);
+      setQuickShareFeedback({
+        type: "success",
+        text: resolvedEnabled
+          ? "Đã mở lại truy cập tính năng truyền file nhanh (/share)."
+          : "Đã khóa truy cập tính năng truyền file nhanh (/share).",
+      });
+    } catch (error) {
+      setQuickShareFeedback({
+        type: "error",
+        text: error instanceof Error ? error.message : "Không thể cập nhật trạng thái truy cập.",
+      });
+    } finally {
+      setQuickShareToggleLoading(false);
+    }
+  }
   async function saveQuickShareDirectory() {
-    setQuickShareLoading(true); setQuickShareMessage("");
-    try { const { directory } = await apiClient.request<{ directory: string }>("/api/settings/quick-share", { method: "POST", body: { directory: quickShareDraft } }); setQuickShareDirectory(directory); setQuickShareDraft(directory); setQuickShareMessage("Đã áp dụng thư mục lưu truyền file nhanh."); }
-    catch (error) { setQuickShareMessage(error instanceof Error ? error.message : "Không thể lưu cấu hình."); }
-    finally { setQuickShareLoading(false); }
+    if (!canConfigureQuickShareDirectory || quickShareLoading || !quickShareDraft.trim()) return;
+    setQuickShareLoading(true);
+    setQuickShareFeedback(null);
+    try {
+      const result = await apiClient.request<QuickShareSettingsResponse>("/api/settings/quick-share", {
+        method: "POST",
+        body: { directory: quickShareDraft },
+      });
+      if (typeof result.directory === "string") {
+        setQuickShareDirectory(result.directory);
+        setQuickShareDraft(result.directory);
+      }
+      if (typeof result.enabled === "boolean") {
+        setQuickShareEnabled(result.enabled);
+      }
+      const usage = extractQuickShareUsage(result);
+      if (usage) setQuickShareUsage(usage);
+      setQuickShareFeedback({
+        type: "success",
+        text: "Đã áp dụng thư mục lưu truyền file nhanh.",
+      });
+    } catch (error) {
+      setQuickShareFeedback({
+        type: "error",
+        text: error instanceof Error ? error.message : "Không thể lưu cấu hình.",
+      });
+    } finally {
+      setQuickShareLoading(false);
+    }
   }
   return (
     <motion.div
@@ -174,7 +302,134 @@ export function SettingsWorkspace({ data, actions }: SettingsWorkspaceProps) {
       className="workspace-screen w-full h-full p-4 sm:p-8 overflow-y-auto"
     >
       <div className="max-w-3xl mx-auto space-y-8">
-        {currentUser?.role === "root" && <div className="app-panel p-4 sm:p-6 space-y-4"><div className="flex items-start gap-3"><span className="rounded-lg border border-sky-400/20 bg-sky-400/10 p-2 text-sky-300"><HardDrive className="h-4 w-4" /></span><div><h3 className="text-base font-bold text-white uppercase tracking-wider">Kho Truyền File Nhanh</h3><p className="mt-1 text-xs text-slate-500">Chọn thư mục trên máy chủ để lưu file tại trang <code>/share</code>. Thay đổi có hiệu lực ngay.</p></div></div><label className="block text-xs text-slate-400">Đường dẫn lưu trữ<input value={quickShareDraft} onChange={(event) => setQuickShareDraft(event.target.value)} placeholder="/var/lib/nodeshell/quick-share" className="mt-2 w-full rounded border border-white/10 bg-black px-3 py-2.5 font-mono text-sm text-slate-200" /></label><div className="flex flex-wrap items-center gap-3"><button type="button" disabled={quickShareLoading || !quickShareDraft.trim()} onClick={() => void saveQuickShareDirectory()} className="rounded bg-sky-500 px-4 py-2 text-xs font-semibold text-white hover:bg-sky-400 disabled:opacity-40">{quickShareLoading ? "Đang kiểm tra..." : "Lưu đường dẫn"}</button>{quickShareDirectory && <span className="font-mono text-[10px] text-slate-600">Đang dùng: {quickShareDirectory}</span>}</div>{quickShareMessage && <p className={`rounded border px-3 py-2 text-xs ${quickShareMessage.startsWith("Đã") ? "border-emerald-500/20 bg-emerald-500/5 text-emerald-300" : "border-rose-500/20 bg-rose-500/5 text-rose-300"}`}>{quickShareMessage}</p>}</div>}
+        {canManageQuickShare && (
+          <div className="app-panel p-4 sm:p-6 space-y-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="flex items-start gap-3">
+                <span className="rounded-lg border border-sky-400/20 bg-sky-400/10 p-2 text-sky-300 shrink-0">
+                  <HardDrive className="h-4 w-4" />
+                </span>
+                <div>
+                  <h3 className="text-base font-bold text-white uppercase tracking-wider">
+                    Truyền File Nhanh (/share)
+                  </h3>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Quản trị viên (admin/root) có thể khóa hoặc mở lại trang <code>/share</code> ngay lập tức để ngăn lạm dụng và quá tải máy chủ.
+                  </p>
+                </div>
+              </div>
+              <span
+                className={`self-start shrink-0 rounded border px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider ${
+                  quickShareEnabled === true
+                    ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-300"
+                    : quickShareEnabled === false
+                      ? "border-rose-500/25 bg-rose-500/10 text-rose-300"
+                      : "border-white/10 bg-white/5 text-slate-400"
+                }`}
+              >
+                {quickShareEnabled === true
+                  ? "Đang mở truy cập"
+                  : quickShareEnabled === false
+                    ? "Đã khóa truy cập"
+                    : "Đang tải..."}
+              </span>
+            </div>
+
+            <div className="flex flex-col gap-3 rounded-lg border border-white/10 bg-black/40 p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="space-y-1 min-w-0">
+                <p className="text-xs font-semibold text-white">
+                  Kiểm soát truy cập công khai
+                </p>
+                <p className="text-xs text-slate-400">
+                  {quickShareEnabled === false
+                    ? "Trang /share và toàn bộ API /api/quick-share* đang từ chối tải lên và tải xuống. File chưa hết hạn vẫn được giữ đến khi mở lại hoặc tự hết hạn."
+                    : quickShareEnabled === true
+                      ? "Trang /share và toàn bộ API /api/quick-share* đang cho phép tải lên và tải xuống theo giới hạn hệ thống."
+                      : "Đang kiểm tra trạng thái hoạt động hiện tại của tính năng truyền file nhanh..."}
+                </p>
+                {quickShareUsage && (
+                  <p className="font-mono text-[11px] text-slate-400">
+                    Đang lưu: {quickShareUsage.activeFiles} file · {formatStorageBytes(quickShareUsage.activeBytes)} / {formatStorageBytes(quickShareUsage.maxTotalBytes)}
+                  </p>
+                )}
+              </div>
+              <button
+                type="button"
+                disabled={quickShareConfigLoading || quickShareToggleLoading || quickShareEnabled === null}
+                onClick={() => {
+                  if (quickShareEnabled !== null) {
+                    void toggleQuickShareAccess(!quickShareEnabled);
+                  }
+                }}
+                className={`inline-flex shrink-0 items-center justify-center gap-1.5 rounded border px-4 py-2 text-xs font-semibold transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${
+                  quickShareEnabled === false
+                    ? "border-emerald-500/30 bg-emerald-600/20 text-emerald-300 hover:bg-emerald-600/30"
+                    : "border-rose-500/30 bg-rose-600/20 text-rose-300 hover:bg-rose-600/30"
+                }`}
+              >
+                {quickShareEnabled === false ? (
+                  <>
+                    <Unlock className="h-3.5 w-3.5" />
+                    <span>{quickShareToggleLoading ? "Đang mở..." : "Mở truy cập"}</span>
+                  </>
+                ) : (
+                  <>
+                    <Lock className="h-3.5 w-3.5" />
+                    <span>
+                      {quickShareToggleLoading
+                        ? "Đang khóa..."
+                        : quickShareEnabled === null
+                          ? "Đang tải..."
+                          : "Khóa truy cập"}
+                    </span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            {canConfigureQuickShareDirectory && (
+              <div className="border-t border-white/10 pt-4 space-y-3">
+                <label className="block text-xs text-slate-400">
+                  Đường dẫn lưu trữ
+                  <input
+                    value={quickShareDraft}
+                    onChange={(event) => setQuickShareDraft(event.target.value)}
+                    placeholder="/var/lib/nodeshell/quick-share"
+                    className="mt-2 w-full rounded border border-white/10 bg-black px-3 py-2.5 font-mono text-sm text-slate-200"
+                  />
+                </label>
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    disabled={quickShareLoading || !quickShareDraft.trim()}
+                    onClick={() => void saveQuickShareDirectory()}
+                    className="rounded bg-sky-500 px-4 py-2 text-xs font-semibold text-white hover:bg-sky-400 disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed"
+                  >
+                    {quickShareLoading ? "Đang kiểm tra..." : "Lưu đường dẫn"}
+                  </button>
+                  {quickShareDirectory && (
+                    <span className="font-mono text-[10px] text-slate-600">
+                      Đang dùng: {quickShareDirectory}
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {quickShareFeedback && (
+              <p
+                role={quickShareFeedback.type === "error" ? "alert" : "status"}
+                className={`rounded border px-3 py-2 text-xs ${
+                  quickShareFeedback.type === "success"
+                    ? "border-emerald-500/20 bg-emerald-500/5 text-emerald-300"
+                    : "border-rose-500/20 bg-rose-500/5 text-rose-300"
+                }`}
+              >
+                {quickShareFeedback.text}
+              </p>
+            )}
+          </div>
+        )}
         <div className="app-panel p-4 sm:p-6 space-y-5">
           <div>
             <h3 className="text-base font-bold text-white uppercase tracking-wider mb-1">Trải Nghiệm Giao Diện</h3>

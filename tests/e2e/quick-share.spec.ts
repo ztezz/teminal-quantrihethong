@@ -75,3 +75,152 @@ test("resumes an interrupted public upload using the server offset", async ({ pa
   expect(resumed).toBe(true);
   await expect(page.getByRole("button", { name: "Gỡ part.txt" })).toBeVisible();
 });
+
+test("shows a locked screen on /share when disabled and recovers live when re-enabled", async ({ page }) => {
+  const expiresAt = Date.now() + 60_000;
+  const item = { code: "1234", name: "example.txt", size: 10, createdAt: new Date().toISOString(), expiresAt };
+  let locked = true;
+  await page.route("**/api/quick-share/public", route => {
+    if (locked) {
+      return route.fulfill({
+        status: 403,
+        contentType: "application/json",
+        body: JSON.stringify({
+          success: false,
+          code: "QUICK_SHARE_DISABLED",
+          enabled: false,
+          error: "Tính năng truyền file nhanh hiện đang bị quản trị viên khóa tạm thời.",
+        }),
+      });
+    }
+    return route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ success: true, enabled: true, files: [item] }),
+    });
+  });
+
+  const initialLoaded = page.waitForResponse(response => response.url().endsWith("/api/quick-share/public"));
+  await page.goto("/share");
+  await initialLoaded;
+
+  await expect(page.getByRole("heading", { name: /Chia sẻ file/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Tính năng truyền file đang tạm khóa" })).toBeVisible();
+  await expect(page.getByText("Tính năng truyền file nhanh hiện đang bị quản trị viên khóa tạm thời.")).toBeVisible();
+  await expect(page.locator("#tab-public")).toHaveCount(0);
+  await expect(page.locator("#tab-private")).toHaveCount(0);
+  await expect(page.locator('input[type="file"]')).toHaveCount(0);
+
+  locked = false;
+  const recovered = page.waitForResponse(response => response.url().endsWith("/api/quick-share/public") && response.status() === 200);
+  await page.getByRole("button", { name: "Kiểm tra lại trạng thái" }).click();
+  await recovered;
+
+  await expect(page.locator("#tab-public")).toBeVisible();
+  await expect(page.getByText("example.txt")).toBeVisible();
+});
+
+test("shows a locked screen on /share?file=1234 without exposing download controls", async ({ page }) => {
+  const lockedBody = JSON.stringify({
+    success: false,
+    code: "QUICK_SHARE_DISABLED",
+    enabled: false,
+    error: "Tính năng truyền file nhanh hiện đang bị quản trị viên khóa tạm thời.",
+  });
+  await page.route("**/api/quick-share/public/1234/info", route =>
+    route.fulfill({ status: 403, contentType: "application/json", body: lockedBody }),
+  );
+  await page.route("**/api/quick-share/public", route =>
+    route.fulfill({ status: 403, contentType: "application/json", body: lockedBody }),
+  );
+
+  const infoLoaded = page.waitForResponse(response => response.url().endsWith("/api/quick-share/public/1234/info"));
+  await page.goto("/share?file=1234");
+  await infoLoaded;
+
+  await expect(page.getByRole("heading", { name: /Chia sẻ file/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Tính năng truyền file đang tạm khóa" })).toBeVisible();
+  await expect(page.getByText("Tính năng truyền file nhanh hiện đang bị quản trị viên khóa tạm thời.")).toBeVisible();
+  await expect(page.getByRole("link", { name: /Tải file xuống/i })).toHaveCount(0);
+  await expect(page.locator("#tab-public")).toHaveCount(0);
+});
+
+test("allows an admin to lock and unlock Quick Share from settings without exposing root storage path", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("vps_terminal_active_tab", "settings"));
+  await page.route("**/api/auth/verify", route =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ success: true, user: { id: "admin-1", username: "opsadmin", role: "admin" } }),
+    }),
+  );
+  await page.route("**/api/settings", route =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(
+        route.request().method() === "POST"
+          ? { success: true }
+          : { success: true, settings: { fontSize: "14", theme: "dark-classic", defaultTerminalCwd: "" } },
+      ),
+    }),
+  );
+  await page.route("**/api/security", route =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        success: true,
+        twoFactorEnabled: false,
+        twoFactorAvailable: true,
+        recoveryCodesRemaining: 0,
+        sessions: [],
+      }),
+    }),
+  );
+
+  let enabled = true;
+  const postedPayloads: Array<{ enabled?: boolean }> = [];
+  await page.route("**/api/settings/quick-share", route => {
+    if (route.request().method() === "POST") {
+      const payload = route.request().postDataJSON() as { enabled?: boolean };
+      postedPayloads.push(payload);
+      if (typeof payload.enabled === "boolean") enabled = payload.enabled;
+    }
+    return route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        success: true,
+        enabled,
+        maxFileMb: 2048,
+        ttlMinutes: 1440,
+        activeFiles: 1,
+        activeBytes: 1024,
+        maxTotalBytes: 21474836480,
+      }),
+    });
+  });
+
+  const loaded = page.waitForResponse(response => response.url().endsWith("/api/settings/quick-share") && response.request().method() === "GET");
+  await page.goto("/");
+  await loaded;
+
+  await expect(page.getByRole("heading", { name: "Truyền File Nhanh (/share)" })).toBeVisible();
+  await expect(page.getByText("Đang mở truy cập", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Đường dẫn lưu trữ")).toHaveCount(0);
+  await expect(page.getByText("Đường dẫn lưu trữ")).toHaveCount(0);
+
+  const lockRequest = page.waitForResponse(response => response.url().endsWith("/api/settings/quick-share") && response.request().method() === "POST");
+  await page.getByRole("button", { name: "Khóa truy cập" }).click();
+  await lockRequest;
+
+  expect(postedPayloads.at(-1)).toEqual({ enabled: false });
+  await expect(page.getByText("Đã khóa truy cập", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Mở truy cập" })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "Đã khóa truy cập tính năng truyền file nhanh (/share)." })).toBeVisible();
+
+  const unlockRequest = page.waitForResponse(response => response.url().endsWith("/api/settings/quick-share") && response.request().method() === "POST");
+  await page.getByRole("button", { name: "Mở truy cập" }).click();
+  await unlockRequest;
+
+  expect(postedPayloads.at(-1)).toEqual({ enabled: true });
+  await expect(page.getByText("Đang mở truy cập", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Khóa truy cập" })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "Đã mở lại truy cập tính năng truyền file nhanh (/share)." })).toBeVisible();
+});

@@ -50,6 +50,7 @@ const QUICK_SHARE_MAX_SIZE = (Number.isFinite(quickShareMaxFileMb) ? Math.min(20
 const QUICK_SHARE_TTL_MS = (Number.isFinite(quickShareTtlMinutes) ? Math.min(1440, Math.max(1, quickShareTtlMinutes)) : 1440) * 60_000;
 const QUICK_SHARE_MAX_TOTAL_SIZE = (Number.isFinite(quickShareTotalGb) ? Math.min(200, Math.max(1, quickShareTotalGb)) : 20) * 1024 * 1024 * 1024;
 const QUICK_SHARE_MAX_PER_IP_SIZE = (Number.isFinite(quickSharePerIpGb) ? Math.min(20, Math.max(1, quickSharePerIpGb)) : 4) * 1024 * 1024 * 1024;
+const QUICK_SHARE_DISABLED_ERROR = 'Tính năng truyền file nhanh hiện đang bị quản trị viên khóa tạm thời.';
 const SESSION_COOKIE = 'terminal_session';
 const STEP_UP_COOKIE = 'terminal_step_up';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -173,12 +174,14 @@ function ownsQuickShare(req: express.Request, share: QuickShare) {
 }
 async function quickShareUsage() {
   const entries = await fs.promises.readdir(QUICK_SHARE_DIR).catch(() => []);
-  const usage = { total: 0, byIp: new Map<string, number>() };
+  const usage = { total: 0, count: 0, byIp: new Map<string, number>() };
   await Promise.all(entries.filter(name => name.endsWith('.json')).map(async name => {
     try {
       const share = JSON.parse(await fs.promises.readFile(path.join(QUICK_SHARE_DIR, name), 'utf8')) as QuickShare;
       if (share.expiresAt > Date.now() && Number.isSafeInteger(share.size) && share.size > 0 && typeof share.ipHash === 'string') {
-        usage.total += share.size; usage.byIp.set(share.ipHash, (usage.byIp.get(share.ipHash) || 0) + share.size);
+        usage.count += 1;
+        usage.total += share.size;
+        usage.byIp.set(share.ipHash, (usage.byIp.get(share.ipHash) || 0) + share.size);
       }
     } catch { /* Pruning handles malformed temporary metadata. */ }
   }));
@@ -448,6 +451,10 @@ async function startServer() {
 
   const quickShareDirectory = await db.get('SELECT value FROM settings WHERE key = ?', 'quick_share_dir');
   if (quickShareDirectory?.value) QUICK_SHARE_DIR = path.resolve(quickShareDirectory.value);
+  const quickShareEnabledRow = await db.get('SELECT value FROM settings WHERE key = ?', 'quick_share_enabled');
+  let quickShareEnabled = quickShareEnabledRow
+    ? quickShareEnabledRow.value === 'true'
+    : process.env.QUICK_SHARE_ENABLED?.trim().toLowerCase() !== 'false';
 
   const pruneQuickShares = async () => {
     const entries = await fs.promises.readdir(QUICK_SHARE_DIR).catch(() => []);
@@ -646,6 +653,19 @@ async function startServer() {
   };
 
   // Public, short-lived transfer channel. It is deliberately isolated from File Manager.
+  expressApp.use('/api/quick-share', (_req, res, nextMiddleware) => {
+    if (!quickShareEnabled) {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(403).json({
+        success: false,
+        code: 'QUICK_SHARE_DISABLED',
+        enabled: false,
+        error: QUICK_SHARE_DISABLED_ERROR
+      });
+    }
+    nextMiddleware();
+  });
+
   expressApp.get('/api/quick-share/public', async (_req, res) => {
     try {
       const entries = await fs.promises.readdir(QUICK_SHARE_DIR).catch(() => []);
@@ -659,7 +679,7 @@ async function startServer() {
         } catch { return null; }
       }));
       res.setHeader('Cache-Control', 'no-store');
-      return res.json({ success: true, files: files.filter(file => file !== null).sort((a, b) => b.createdAt.localeCompare(a.createdAt)) });
+      return res.json({ success: true, enabled: true, files: files.filter(file => file !== null).sort((a, b) => b.createdAt.localeCompare(a.createdAt)) });
     } catch (error: any) { return res.status(500).json({ success: false, error: error.message }); }
   });
 
@@ -900,25 +920,92 @@ async function startServer() {
   });
 
   expressApp.get('/api/settings/quick-share', async (req, res) => {
-    if (!requireRole(req, res, 'root')) return;
-    try { await fs.promises.mkdir(QUICK_SHARE_DIR, { recursive: true, mode: 0o700 }); return res.json({ success: true, directory: QUICK_SHARE_DIR, maxFileMb: QUICK_SHARE_MAX_SIZE / 1024 / 1024, ttlMinutes: QUICK_SHARE_TTL_MS / 60_000 }); }
-    catch (error: any) { return res.status(500).json({ success: false, error: error.message }); }
+    const context = requireRole(req, res, 'admin');
+    if (!context) return;
+    try {
+      await fs.promises.mkdir(QUICK_SHARE_DIR, { recursive: true, mode: 0o700 });
+      const usage = await quickShareUsage();
+      return res.json({
+        success: true,
+        enabled: quickShareEnabled,
+        ...(context.user.role === 'root' ? { directory: QUICK_SHARE_DIR } : {}),
+        maxFileMb: QUICK_SHARE_MAX_SIZE / 1024 / 1024,
+        ttlMinutes: QUICK_SHARE_TTL_MS / 60_000,
+        activeFiles: usage.count,
+        activeBytes: usage.total,
+        maxTotalBytes: QUICK_SHARE_MAX_TOTAL_SIZE
+      });
+    } catch (error: any) { return res.status(500).json({ success: false, error: error.message }); }
   });
 
   expressApp.post('/api/settings/quick-share', async (req, res) => {
-    if (!requireRole(req, res, 'root')) return;
-    const requested = typeof req.body?.directory === 'string' ? req.body.directory.trim() : '';
-    if (!requested || !path.isAbsolute(requested)) return res.status(400).json({ success: false, error: 'Đường dẫn phải là đường dẫn tuyệt đối trên máy chủ' });
-    const directory = path.resolve(requested);
+    const context = requireRole(req, res, 'admin');
+    if (!context) return;
+    const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body as Record<string, unknown> : {};
+    const hasEnabled = Object.prototype.hasOwnProperty.call(body, 'enabled');
+    const hasDirectory = Object.prototype.hasOwnProperty.call(body, 'directory');
+
+    if (!hasEnabled && !hasDirectory) {
+      return res.status(400).json({ success: false, error: 'Cần cung cấp trạng thái truy cập hoặc đường dẫn lưu trữ' });
+    }
+    if (hasEnabled && typeof body.enabled !== 'boolean') {
+      return res.status(400).json({ success: false, error: 'Trạng thái truy cập không hợp lệ' });
+    }
+
+    let nextDirectory: string | undefined;
+    if (hasDirectory) {
+      if (context.user.role !== 'root') {
+        return res.status(403).json({ success: false, error: 'Chỉ tài khoản root mới được thay đổi thư mục lưu trữ' });
+      }
+      const requested = typeof body.directory === 'string' ? body.directory.trim() : '';
+      if (!requested || !path.isAbsolute(requested)) {
+        return res.status(400).json({ success: false, error: 'Đường dẫn phải là đường dẫn tuyệt đối trên máy chủ' });
+      }
+      const directory = path.resolve(requested);
+      try {
+        await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
+        const stat = await fs.promises.stat(directory);
+        if (!stat.isDirectory()) return res.status(400).json({ success: false, error: 'Đường dẫn không phải thư mục' });
+        await fs.promises.access(directory, fs.constants.R_OK | fs.constants.W_OK);
+        nextDirectory = directory;
+      } catch (error: any) {
+        return res.status(400).json({ success: false, error: `Không thể dùng thư mục này: ${error.message}` });
+      }
+    }
+
     try {
-      await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
-      const stat = await fs.promises.stat(directory); if (!stat.isDirectory()) return res.status(400).json({ success: false, error: 'Đường dẫn không phải thư mục' });
-      await fs.promises.access(directory, fs.constants.R_OK | fs.constants.W_OK);
-      QUICK_SHARE_DIR = directory;
-      await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'quick_share_dir', directory);
-      auditRequest(req, { category: 'quick_share', action: 'storage_directory', event: 'Quick-share storage directory changed', level: 'critical', metadata: { directory } });
-      return res.json({ success: true, directory });
-    } catch (error: any) { return res.status(400).json({ success: false, error: `Không thể dùng thư mục này: ${error.message}` }); }
+      if (nextDirectory !== undefined) {
+        QUICK_SHARE_DIR = nextDirectory;
+        await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'quick_share_dir', nextDirectory);
+        auditRequest(req, {
+          category: 'quick_share',
+          action: 'storage_directory',
+          event: 'Quick-share storage directory changed',
+          level: 'critical',
+          metadata: { directory: nextDirectory }
+        });
+      }
+      if (hasEnabled) {
+        quickShareEnabled = body.enabled as boolean;
+        await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'quick_share_enabled', quickShareEnabled ? 'true' : 'false');
+        auditRequest(req, {
+          category: 'quick_share',
+          action: quickShareEnabled ? 'enable' : 'disable',
+          event: quickShareEnabled ? 'Quick-share access enabled' : 'Quick-share access locked',
+          level: 'critical',
+          metadata: { enabled: quickShareEnabled }
+        });
+      }
+      const usage = await quickShareUsage();
+      return res.json({
+        success: true,
+        enabled: quickShareEnabled,
+        ...(context.user.role === 'root' ? { directory: QUICK_SHARE_DIR } : {}),
+        activeFiles: usage.count,
+        activeBytes: usage.total,
+        maxTotalBytes: QUICK_SHARE_MAX_TOTAL_SIZE
+      });
+    } catch (error: any) { return res.status(500).json({ success: false, error: error.message }); }
   });
 
   // Change password endpoint

@@ -13,6 +13,14 @@ type ShareMode = "public" | "private";
 const UPLOAD_SESSION_KEY = "nodeshell_quick_share_upload";
 const PUBLIC_UPLOAD_KEY = "nodeshell_public_share_upload";
 const PUBLIC_OWNED_KEY = "nodeshell_public_share_owned";
+const DEFAULT_LOCKED_MESSAGE = "Tính năng truyền file nhanh hiện đang bị quản trị viên khóa tạm thời.";
+
+function isQuickShareDisabledError(error: unknown): error is ApiError {
+  return error instanceof ApiError && (
+    error.body?.code === "QUICK_SHARE_DISABLED" ||
+    error.body?.enabled === false
+  );
+}
 
 function fileExt(name: string) {
   const dot = name.lastIndexOf(".");
@@ -71,13 +79,109 @@ export default function QuickSharePage() {
   const publicDragDepthRef = useRef(0);
   const privateDragDepthRef = useRef(0);
   const [now, setNow] = useState(() => Date.now());
+  const [accessState, setAccessState] = useState<"checking" | "enabled" | "locked">("checking");
+  const [lockedMessage, setLockedMessage] = useState(DEFAULT_LOCKED_MESSAGE);
+  const [checkingAccess, setCheckingAccess] = useState(false);
 
-  const refreshPublicFiles = useCallback(async () => {
-    try {
-      const result = await apiClient.request<{ files: PublicFile[] }>("/api/quick-share/public", { cache: "no-store" });
-      setPublicFiles(result.files);
-    } catch (error) { setPublicStatus(error instanceof Error ? error.message : "Không thể tải danh sách file."); }
+  const markLocked = useCallback((message?: string) => {
+    setAccessState("locked");
+    setLockedMessage(message || DEFAULT_LOCKED_MESSAGE);
+    setPublicFiles([]);
+    setViewingFile(null);
+    setViewingError("");
+    setViewingLoading(false);
   }, []);
+
+  const refreshPublicFiles = useCallback(async (): Promise<boolean> => {
+    try {
+      const result = await apiClient.request<{ files: PublicFile[]; enabled?: boolean }>("/api/quick-share/public", { cache: "no-store" });
+      if (result.enabled === false) {
+        markLocked();
+        return false;
+      }
+      setAccessState("enabled");
+      setPublicFiles(result.files);
+      return true;
+    } catch (error) {
+      if (isQuickShareDisabledError(error)) {
+        markLocked(error.message);
+        return false;
+      }
+      setAccessState(current => current === "checking" ? "enabled" : current);
+      setPublicStatus(error instanceof Error ? error.message : "Không thể tải danh sách file.");
+      return false;
+    }
+  }, [markLocked]);
+
+  const loadViewingFile = useCallback(async (targetCode: string, isActive: () => boolean = () => true) => {
+    if (!targetCode) {
+      setViewingFile(null);
+      setViewingError("");
+      setViewingLoading(false);
+      return;
+    }
+    setViewingLoading(true);
+    setViewingError("");
+    try {
+      let found: PublicFile | null = null;
+      try {
+        const info = await apiClient.request<{ file: PublicFile; enabled?: boolean }>(`/api/quick-share/public/${targetCode}/info`, { cache: "no-store" });
+        if (!isActive()) return;
+        if (info.enabled === false) {
+          markLocked();
+          return;
+        }
+        setAccessState("enabled");
+        found = info.file;
+      } catch (err) {
+        if (!isActive()) return;
+        if (isQuickShareDisabledError(err)) {
+          markLocked(err.message);
+          return;
+        }
+        const list = await apiClient.request<{ files: PublicFile[]; enabled?: boolean }>("/api/quick-share/public", { cache: "no-store" });
+        if (!isActive()) return;
+        if (list.enabled === false) {
+          markLocked();
+          return;
+        }
+        setAccessState("enabled");
+        found = list.files.find(item => item.code === targetCode && item.expiresAt > Date.now()) || null;
+      }
+      if (!isActive()) return;
+      if (!found || found.expiresAt <= Date.now()) {
+        setViewingFile(null);
+        setViewingError("File này không tồn tại, đã hết thời gian chia sẻ (60 phút) hoặc đã được người gửi gỡ bỏ.");
+        return;
+      }
+      setViewingFile(found);
+    } catch (error) {
+      if (!isActive()) return;
+      if (isQuickShareDisabledError(error)) {
+        markLocked(error.message);
+        return;
+      }
+      setAccessState(current => current === "checking" ? "enabled" : current);
+      setViewingFile(null);
+      setViewingError(error instanceof Error ? error.message : "Không thể tải thông tin file.");
+    } finally {
+      if (isActive()) setViewingLoading(false);
+    }
+  }, [markLocked]);
+
+  const recheckAccess = useCallback(async () => {
+    setCheckingAccess(true);
+    if (viewingCode) setViewingLoading(true);
+    try {
+      const enabled = await refreshPublicFiles();
+      if (enabled && viewingCode) {
+        await loadViewingFile(viewingCode);
+      }
+    } finally {
+      setCheckingAccess(false);
+      if (viewingCode) setViewingLoading(false);
+    }
+  }, [loadViewingFile, refreshPublicFiles, viewingCode]);
 
   useEffect(() => {
     const syncViewingCode = () => setViewingCode(parseSharedFileCode());
@@ -93,42 +197,9 @@ export default function QuickSharePage() {
 
   useEffect(() => {
     let active = true;
-    const loadFileInfo = async () => {
-      if (!viewingCode) {
-        setViewingFile(null);
-        setViewingError("");
-        setViewingLoading(false);
-        return;
-      }
-      setViewingLoading(true);
-      setViewingError("");
-      try {
-        let found: PublicFile | null = null;
-        try {
-          const info = await apiClient.request<{ file: PublicFile }>(`/api/quick-share/public/${viewingCode}/info`, { cache: "no-store" });
-          found = info.file;
-        } catch {
-          const list = await apiClient.request<{ files: PublicFile[] }>("/api/quick-share/public", { cache: "no-store" });
-          found = list.files.find(item => item.code === viewingCode && item.expiresAt > Date.now()) || null;
-        }
-        if (!active) return;
-        if (!found || found.expiresAt <= Date.now()) {
-          setViewingFile(null);
-          setViewingError("File này không tồn tại, đã hết thời gian chia sẻ (60 phút) hoặc đã được người gửi gỡ bỏ.");
-          return;
-        }
-        setViewingFile(found);
-      } catch (error) {
-        if (!active) return;
-        setViewingFile(null);
-        setViewingError(error instanceof Error ? error.message : "Không thể tải thông tin file.");
-      } finally {
-        if (active) setViewingLoading(false);
-      }
-    };
-    const timer = window.setTimeout(() => void loadFileInfo(), 0);
+    const timer = window.setTimeout(() => void loadViewingFile(viewingCode, () => active), 0);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [viewingCode]);
+  }, [loadViewingFile, viewingCode]);
 
   useEffect(() => {
     const initial = window.setTimeout(() => void refreshPublicFiles(), 0);
@@ -203,7 +274,13 @@ export default function QuickSharePage() {
       setPublicFiles(current => current.filter(file => file.code !== item.code));
       setPublicStatus(`Đã gỡ ${item.name} khỏi danh sách chia sẻ.`);
       if (viewingCode === item.code) closeFileViewer();
-    } catch (error) { setPublicStatus(error instanceof Error ? error.message : "Không thể gỡ file."); }
+    } catch (error) {
+      if (isQuickShareDisabledError(error)) {
+        markLocked(error.message);
+        return;
+      }
+      setPublicStatus(error instanceof Error ? error.message : "Không thể gỡ file.");
+    }
     finally { setRemovingCode(""); }
   }
 
@@ -235,7 +312,15 @@ export default function QuickSharePage() {
       }
       const completed = await apiClient.request<{ checksum: string }>(`/api/quick-share/${session.code}/complete`, { method: "POST", headers: { "x-quick-share-token": session.uploadToken } });
       localStorage.removeItem(UPLOAD_SESSION_KEY); setResumeSession(null); setCode(session.code); setChecksum(completed.checksum); setStatus("File đã sẵn sàng để nhận.");
-    } catch (error) { setStatus(error instanceof Error ? error.message : "Không thể gửi file."); setProgress(null); }
+    } catch (error) {
+      setProgress(null);
+      if (isQuickShareDisabledError(error)) {
+        setStatus("");
+        markLocked(error.message);
+        return;
+      }
+      setStatus(error instanceof Error ? error.message : "Không thể gửi file.");
+    }
     finally { setBusy(false); }
   }
 
@@ -246,7 +331,14 @@ export default function QuickSharePage() {
       const initialized = await apiClient.request<{ code: string; uploadToken: string }>("/api/quick-share", { method: "POST", body: { name: file.name, size: file.size } });
       const session = { code: initialized.code, uploadToken: initialized.uploadToken, name: file.name, size: file.size };
       localStorage.setItem(UPLOAD_SESSION_KEY, JSON.stringify(session)); setResumeSession(session); await upload(session, 0);
-    } catch (error) { setStatus(error instanceof Error ? error.message : "Không thể tạo kênh truyền file."); }
+    } catch (error) {
+      if (isQuickShareDisabledError(error)) {
+        setStatus("");
+        markLocked(error.message);
+        return;
+      }
+      setStatus(error instanceof Error ? error.message : "Không thể tạo kênh truyền file.");
+    }
   }
 
   async function uploadPublicFiles(files: File[]) {
@@ -299,6 +391,13 @@ export default function QuickSharePage() {
       setSelectedPublicFile(null);
       setPublicStatus(`Đã tải lên ${uploaded} file. Mọi người có thể tải trong 60 phút.`);
     } catch (error) {
+      if (isQuickShareDisabledError(error)) {
+        interrupted = false;
+        setSelectedPublicFile(null);
+        setPublicStatus("");
+        markLocked(error.message);
+        return;
+      }
       setPublicStatus(`${uploaded ? `Đã tải lên ${uploaded}/${files.length} file. ` : ""}${error instanceof Error ? error.message : "Không thể tải file lên."}${interrupted ? " Upload bị gián đoạn; chọn lại đúng file hoặc bấm Tiếp tục để gửi phần còn lại." : ""}`);
     } finally { setPublicBusy(false); if (!interrupted) setPublicProgress(null); }
   }
@@ -316,6 +415,11 @@ export default function QuickSharePage() {
     try {
       await apiClient.request(`/api/quick-share/public/${pendingPublicSession.code}`, { method: "DELETE", headers: { "x-quick-share-token": pendingPublicSession.uploadToken } });
     } catch (error) {
+      if (isQuickShareDisabledError(error)) {
+        markLocked(error.message);
+        setPublicBusy(false);
+        return;
+      }
       if (!(error instanceof ApiError && error.status === 404)) {
         setPublicStatus(error instanceof Error ? error.message : "Không thể hủy phiên upload.");
         setPublicBusy(false);
@@ -335,7 +439,14 @@ export default function QuickSharePage() {
       const state = await apiClient.request<{ offset: number; ready: boolean }>(`/api/quick-share/${resumeSession.code}/upload`, { headers: { "x-quick-share-token": resumeSession.uploadToken } });
       if (state.ready) return setStatus("File này đã hoàn tất upload.");
       await upload(resumeSession, state.offset);
-    } catch (error) { setStatus(error instanceof Error ? error.message : "Không thể tiếp tục upload."); }
+    } catch (error) {
+      if (isQuickShareDisabledError(error)) {
+        setStatus("");
+        markLocked(error.message);
+        return;
+      }
+      setStatus(error instanceof Error ? error.message : "Không thể tiếp tục upload.");
+    }
   }
 
   function normalizeCode(value: string) { setCode(value.replace(/\D/g, "").slice(0, 4)); setReceiveError(""); }
@@ -351,6 +462,10 @@ export default function QuickSharePage() {
       link.click();
       link.remove();
     } catch (error) {
+      if (isQuickShareDisabledError(error)) {
+        markLocked(error.message);
+        return;
+      }
       setReceiveError(error instanceof ApiError && error.status === 404 ? "Mã không đúng, đã hết hạn hoặc file đã được nhận." : error instanceof Error ? error.message : "Không thể kiểm tra mã. Vui lòng thử lại.");
     } finally { setReceiving(false); }
   }
@@ -377,7 +492,37 @@ export default function QuickSharePage() {
       </div>
     </header>
 
-    {viewingCode ? (
+    {accessState === "checking" ? (
+      <section className="quick-share-card quick-share-locked is-checking" aria-live="polite">
+        <div className="quick-share-locked-icon">
+          <RotateCcw className="animate-spin" />
+        </div>
+        <span className="quick-share-locked-badge">TRẠNG THÁI HỆ THỐNG · ĐANG KIỂM TRA</span>
+        <h2>Đang kiểm tra trạng thái kênh truyền file...</h2>
+        <p>Vui lòng chờ trong giây lát để xác minh khả năng truy cập.</p>
+      </section>
+    ) : accessState === "locked" ? (
+      <section className="quick-share-card quick-share-locked" role="alert">
+        <div className="quick-share-locked-icon">
+          <LockKeyhole />
+        </div>
+        <span className="quick-share-locked-badge">TRẠNG THÁI HỆ THỐNG · ĐÃ KHÓA</span>
+        <h2>Tính năng truyền file đang tạm khóa</h2>
+        <p>{lockedMessage}</p>
+        <div className="quick-share-locked-note">
+          Quản trị viên đã tạm khóa trang <code>/share</code> nhằm bảo vệ độ ổn định của máy chủ. Kênh truyền file sẽ mở lại ngay sau khi được mở khóa.
+        </div>
+        <button
+          type="button"
+          className="quick-share-primary"
+          disabled={checkingAccess}
+          onClick={() => void recheckAccess()}
+        >
+          <RotateCcw />
+          {checkingAccess ? "Đang kiểm tra..." : "Kiểm tra lại trạng thái"}
+        </button>
+      </section>
+    ) : viewingCode ? (
       <section className="quick-share-card quick-share-viewer" aria-label="Chi tiết file chia sẻ">
         <div className="quick-share-viewer-top">
           <button type="button" className="quick-share-back-btn" onClick={closeFileViewer}>
